@@ -1,0 +1,14 @@
+# Normalise line endings. This file exists because CRLF and BOM problems cost the previous
+# attempt several debugging sessions with error messages that never mentioned either.
+*                   text=auto eol=lf
+*.sh                text eol=lf
+*.yaml              text eol=lf
+*.yml               text eol=lf
+*.tf                text eol=lf
+*.tpl               text eol=lf
+Makefile            text eol=lf
+*.ps1               text eol=crlf
+*.bat               text eol=crlf
+*.png               binary
+*.jpg               binary
+*.pdf               binary

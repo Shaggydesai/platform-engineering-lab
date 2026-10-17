@@ -1,0 +1,39 @@
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+override.tf
+override.tf.json
+.terraformrc
+terraform.rc
+
+# Credentials and local config - nothing in here is ever committed
+*.pem
+*.key
+!**/testdata/*.key
+kubeconfig*
+!kubeconfig.example
+.env
+.env.*
+secrets.auto.tfvars
+*-credentials.json
+gcp-sa-*.json
+.aws/
+.gcp/
+
+# Ansible
+*.retry
+ansible/inventory/*.local.yml
+
+# Helm
+charts/*.tgz
+**/charts/*.tgz
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
