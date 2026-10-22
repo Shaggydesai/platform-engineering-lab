@@ -168,6 +168,14 @@ apiVersion: kubeadm.k8s.io/v1beta4
 kind: ClusterConfiguration
 clusterName: onprem
 
+# Pin it, and pin it to what is actually installed - `kubeadm version -o short`.
+# Left unset, kubeadm chooses for itself, and if it ever chooses a version newer
+# than the held kubelet packages you get control-plane images from one release
+# running against a kubelet from another. That is supported in one direction only
+# (kubelet may trail the control plane, never lead it), and the failure is obscure.
+# Pinning also means init makes no network call to resolve a version.
+kubernetesVersion: v1.34.12
+
 # controlPlaneEndpoint is the single most consequential line here, and the one
 # most tutorials omit. It is the name clients and joining nodes use to reach the
 # API server. Omit it and everything hardcodes 192.168.100.10; adding a second
@@ -208,6 +216,17 @@ etcd:
 apiVersion: kubelet.config.k8s.io/v1beta1
 kind: KubeletConfiguration
 cgroupDriver: systemd
+
+# Ubuntu's /etc/resolv.conf is a symlink to systemd-resolved's STUB file, which
+# contains the single nameserver 127.0.0.53 - a local listener. The kubelet hands
+# the node's resolv.conf to CoreDNS as its upstream, so CoreDNS would be told to
+# forward unresolved queries to a stub on its own node, which forwards them back.
+# CoreDNS detects that and refuses to start, with "Loop ... detected".
+#
+# Point the kubelet at the file holding the REAL upstream servers instead. This is
+# the single most common Ubuntu-plus-kubeadm failure, and it presents as DNS being
+# broken cluster-wide, which sends people looking at CoreDNS rather than at the host.
+resolvConf: /run/systemd/resolve/resolv.conf
 
 # Reserve resources for the OS and for the kubelet itself. Without reservations
 # the kubelet will happily schedule pods until sshd gets OOM-killed, and then
@@ -626,7 +645,8 @@ without this one working first.
 | init hangs at "waiting for the kubelet to boot up" | kubelet cannot start the static pods — almost always the cgroup driver | `journalctl -xeu kubelet`; check `SystemdCgroup = true` |
 | Nodes `NotReady`, `cni plugin not initialized` | no CNI yet | expected before step 5 |
 | CoreDNS stays `Pending` after Cilium is up | nothing schedulable, or Cilium is not actually passing traffic | `cilium status`; `kubectl -n kube-system describe pod <coredns>` |
-| CoreDNS `CrashLoopBackOff` with "loop detected" | the node's `/etc/resolv.conf` points at a local stub resolver and CoreDNS forwards to itself | point the kubelet at the real upstream: `resolvConf: /run/systemd/resolve/resolv.conf` in KubeletConfiguration |
+| CoreDNS `CrashLoopBackOff` with "loop detected" | the node's `/etc/resolv.conf` points at systemd-resolved's stub and CoreDNS forwards to itself | `resolvConf: /run/systemd/resolve/resolv.conf` is already set in the config above to prevent this; if it recurs, check that file exists and has real nameservers |
+| kubelet fails with "could not open resolv.conf" | systemd-resolved is not running, so that file does not exist | `systemctl status systemd-resolved`; if it is genuinely unused, remove the `resolvConf` line |
 | Join fails: "couldn't validate the identity of the API server" | wrong or stale CA hash | `kubeadm token create --print-join-command` again — do not skip verification |
 | Join fails: "token not found" | tokens live 24 hours | same command |
 | Pod-to-pod works on one node, not across nodes | VXLAN between nodes — MTU or the UDP port | `cilium status --verbose`; check for drops in `hubble observe` |
