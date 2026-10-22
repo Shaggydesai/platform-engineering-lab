@@ -36,15 +36,15 @@ image: ## Module 01 - build the golden Ubuntu image with Packer (run from Window
 
 .PHONY: onprem-vms
 onprem-vms: ## Module 01 - clone the three on-prem VMs from the golden image
-	@powershell.exe -ExecutionPolicy Bypass -File scripts/onprem-vms.ps1 -Action create
+	@bash scripts/onprem-vms.sh create
 
 .PHONY: onprem-vms-status
 onprem-vms-status: ## Show the on-prem VMs and their addresses
-	@powershell.exe -ExecutionPolicy Bypass -File scripts/onprem-vms.ps1 -Action status
+	@bash scripts/onprem-vms.sh status
 
 .PHONY: onprem-vms-destroy
 onprem-vms-destroy: ## Destroy the on-prem VMs (the image is kept)
-	@powershell.exe -ExecutionPolicy Bypass -File scripts/onprem-vms.ps1 -Action destroy
+	@bash scripts/onprem-vms.sh destroy
 
 .PHONY: onprem-up
 onprem-up: ## Module 03 - build the whole on-prem cluster from nothing

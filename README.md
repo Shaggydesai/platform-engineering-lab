@@ -71,6 +71,9 @@ scripts/          doctor, smoke-test, cost-check
 
 ## Getting started
 
+Work from WSL, with the repository cloned inside the WSL filesystem (see
+[ADR-0005](docs/adr/0005-wsl-as-control-workstation.md)):
+
 ```bash
 make doctor        # check the workstation has what it needs
 make status        # where we are
@@ -93,6 +96,7 @@ make cost-check    # fails loudly if anything billable survived
 | [0002](docs/adr/0002-gitops-ownership-model.md) | GitOps ownership model — who owns what, decided before anything is installed |
 | [0003](docs/adr/0003-cost-guardrails.md) | Cost guardrails for free-tier-only cloud use |
 | [0004](docs/adr/0004-onprem-substrate.md) | On-prem substrate and VM sizing — three kubeadm VMs on the SSD |
+| [0005](docs/adr/0005-wsl-as-control-workstation.md) | WSL is the control workstation — one shell, one set of line endings |
 
 ## The workload
 

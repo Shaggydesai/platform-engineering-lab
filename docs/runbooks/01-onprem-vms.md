@@ -47,17 +47,26 @@ it.
 
 ## Run it
 
-```powershell
+Everything runs from WSL (ADR-0005). The repository must live inside the WSL filesystem, not on
+`/mnt/c` — `make doctor` checks this.
+
+```bash
 # one-time: build the golden image
-cd packer\ubuntu-2404
+cd packer/ubuntu-2404
 packer init .
 packer build .                       # ~20 minutes, watch the console on the first run
 
 # every time: produce the three nodes
-cd ..\..
+cd ../..
+make onprem-vms                      # or: ./scripts/onprem-vms.sh create
+make onprem-vms-status
+make onprem-vms-destroy
+```
+
+Windows-native fallback, for a machine without WSL:
+
+```powershell
 .\scripts\onprem-vms.ps1 -Action create
-.\scripts\onprem-vms.ps1 -Action status
-.\scripts\onprem-vms.ps1 -Action destroy -Force
 ```
 
 Before the first build, create `packer/ubuntu-2404/variables.auto.pkrvars.hcl`:
@@ -91,6 +100,8 @@ round trip works, Module 02 does not start.
 | Two nodes get the same address | the template was cloned without `uuid.action = "create"` | the script sets it; if you cloned by hand in the GUI, destroy and re-run |
 | SSH refuses the key after a rebuild | host key changed, as it should | `ssh-keygen -R <ip>`; the script already ignores known_hosts |
 | Node boots but has no network after reboot | cloud-init re-applied its own netplan | `99-disable-network-config.cfg` prevents it; confirm it exists |
+| WSL cannot ping the VM at all | WSL2 does not route to vmnet8 | add `networkingMode=mirrored` to `.wslconfig`, then `wsl --shutdown`. The script detects this and says so. |
+| VMs feel slow | WSL2 forces VMware to run under the Windows Hypervisor Platform | expected; see ADR-0005. Measure before trading WSL away. |
 | `.vmx` will not load | file written with a BOM | the script writes ASCII explicitly; do not edit `.vmx` files with `Set-Content` |
 
 ## Cost of a rebuild

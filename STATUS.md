@@ -23,16 +23,17 @@
 
 ## The next action
 
-1. Push this scaffold to `github.com/Shaggydesai/platform-engineering-lab` (empty remote confirmed).
-2. Confirm C: is solid state — ADR-0004 has the command.
-3. Create the AWS and GCP accounts with budget alarms **before** any resource exists (ADR-0003).
+1. ~~Push the scaffold~~ — done, three commits are on GitHub.
+2. ~~Confirm C: is solid state~~ — done, Samsung NVMe confirmed.
+3. Clone the repo **inside WSL** (`~/platform-engineering-lab`, not `/mnt/c`) — ADR-0005.
 4. `make doctor` until it passes.
+5. Create the AWS and GCP accounts with budget alarms **before** any resource exists (ADR-0003).
 
 Then Module 01, which is already written and waiting:
 
-```powershell
-cd packer\ubuntu-2404 ; packer init . ; packer build .      # ~20 min, once
-cd ..\.. ; .\scripts\onprem-vms.ps1 -Action create          # ~10 min, repeatable
+```bash
+cd packer/ubuntu-2404 && packer init . && packer build .   # ~20 min, once
+cd ../.. && make onprem-vms                                # ~10 min, repeatable
 ```
 
 Gate: destroy all three VMs, rebuild, and get identical nodes back. See
@@ -46,7 +47,9 @@ docs/runbooks/01-onprem-vms.md.
 - [x] ADR-0003: cost guardrails for free-tier-only cloud
 - [x] `.gitattributes` to kill the CRLF/BOM class of bugs permanently
 - [x] Laptop specs captured → on-prem substrate chosen (ADR-0004)
-- [ ] Confirm C: is solid state (`Get-PhysicalDisk`)
+- [x] Confirm C: is solid state — Samsung NVMe (238 GB); D: is a Seagate HDD
+- [x] ADR-0005: WSL is the control workstation
+- [ ] Repo cloned inside the WSL filesystem
 - [ ] Install missing workstation tools until `make doctor` passes
 - [ ] AWS account + budget alarm at $5
 - [ ] GCP account + budget alert at ₹400
@@ -59,5 +62,6 @@ Keep this short. One line per session: what you did, what broke, what is next.
 | Date | Module | What happened | Next |
 |:--|:--|:--|:--|
 | 2026-10-17 | 00 | Project restarted. Decisions and scaffold written before any cluster exists. | Capture laptop specs, create repo |
+| 2026-10-22 | 01 | WSL confirmed available → ADR-0005: WSL becomes the control workstation, bash version of the VM script is now primary, PowerShell kept as fallback. GitHub App access granted, pushes work. | Build the image from WSL |
 | 2026-10-22 | 01 | Module 01 written: Packer golden image (autoinstall, containerd, kubeadm held, sealed identity) plus a clone script that discovers the NAT subnet instead of editing VMware's DHCP config. Not yet run. | Build the image, run the create/destroy round trip |
 | 2026-10-22 | 00 | Hardware captured: 32 GB, 12 threads, C: 106 GB SSD, D: 625 GB HDD. ADR-0004 fixes the substrate: 3 kubeadm VMs on the SSD, because etcd on a mechanical disk is a known failure mode. Repo created, scaffold ready to push. | Push scaffold, budget alarms, `make doctor` |
