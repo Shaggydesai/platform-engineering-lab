@@ -17,6 +17,16 @@ output "control_plane" {
   value       = [for n in local.cfg.nodes : n.address if n.role == "control-plane"][0]
 }
 
+output "verify_commands" {
+  description = "Run these by hand if something looks wrong."
+  value = {
+    list_domains = "virsh -c qemu:///system list --all"
+    console      = "virsh -c qemu:///system console <node>   # escape with Ctrl-]"
+    net_dhcp     = "virsh -c qemu:///system net-dumpxml ${local.net.name}"
+    ssh          = "ssh ${local.cfg.ssh.username}@${[for n in local.cfg.nodes : n.address][0]}"
+  }
+}
+
 output "network" {
   value = {
     name    = local.net.name

@@ -3,10 +3,14 @@
   "comment": "Single source of truth for the on-prem nodes. Terraform reads it to build them and Ansible reads it in Module 03 to generate the inventory, so the two can never disagree. Sizing rationale: docs/adr/0004-onprem-substrate.md.",
   "network": {
     "name": "platform",
-    "comment": "libvirt NAT network. Addresses are static DHCP reservations keyed on MAC, declared here and created by Terraform - nothing is hand-configured and nothing drifts on reboot.",
+    "comment": "libvirt NAT network. Each node's address is assigned by cloud-init inside the guest and declared here, so nothing is hand-configured and nothing drifts on reboot. The mac field is reserved for a future switch to libvirt DHCP reservations and is unused today.",
     "domain": "platform.local",
     "cidr": "192.168.100.0/24",
-    "gateway": "192.168.100.1"
+    "gateway": "192.168.100.1",
+    "nameservers": [
+      "8.8.8.8",
+      "1.1.1.1"
+    ]
   },
   "ssh": {
     "username": "sagar",
@@ -14,8 +18,32 @@
     "private_key_file": "~/.ssh/id_ed25519"
   },
   "nodes": [
-    { "name": "k8s-cp01", "role": "control-plane", "cpus": 2, "memory_mb": 4096, "disk_gb": 30, "address": "192.168.100.10", "mac": "52:54:00:b0:0b:10" },
-    { "name": "k8s-w01",  "role": "worker",        "cpus": 3, "memory_mb": 8192, "disk_gb": 35, "address": "192.168.100.11", "mac": "52:54:00:b0:0b:11" },
-    { "name": "k8s-w02",  "role": "worker",        "cpus": 3, "memory_mb": 8192, "disk_gb": 35, "address": "192.168.100.12", "mac": "52:54:00:b0:0b:12" }
+    {
+      "name": "k8s-cp01",
+      "role": "control-plane",
+      "cpus": 2,
+      "memory_mb": 4096,
+      "disk_gb": 30,
+      "address": "192.168.100.10",
+      "mac": "52:54:00:b0:0b:10"
+    },
+    {
+      "name": "k8s-w01",
+      "role": "worker",
+      "cpus": 3,
+      "memory_mb": 8192,
+      "disk_gb": 35,
+      "address": "192.168.100.11",
+      "mac": "52:54:00:b0:0b:11"
+    },
+    {
+      "name": "k8s-w02",
+      "role": "worker",
+      "cpus": 3,
+      "memory_mb": 8192,
+      "disk_gb": 35,
+      "address": "192.168.100.12",
+      "mac": "52:54:00:b0:0b:12"
+    }
   ]
 }

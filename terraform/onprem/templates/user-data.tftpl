@@ -36,5 +36,7 @@ runcmd:
   # The machine-id was emptied when the image was sealed; make sure this boot has a unique one.
   - [ bash, -c, "[ -s /etc/machine-id ] || systemd-machine-id-setup" ]
   - [ systemctl, enable, --now, qemu-guest-agent ]
+  # Proof that cloud-init finished, for the verification step and for debugging a boot.
+  - [ bash, -c, "echo ready > /run/platform-node-ready" ]
 
 final_message: "${hostname} ready after $UPTIME seconds"

@@ -2,11 +2,20 @@
 # cloud-init. This is Layer 0 of ADR-0002, and unlike the script it replaced it has state, a
 # plan, and a dependency graph.
 #
+#   make onprem-vms-validate   check against the provider schema, touches nothing
 #   make onprem-vms            terraform apply
 #   make onprem-vms-destroy    terraform destroy
 #
-# Nothing here is specific to the lab beyond the values in nodes.json. The same shape appears in
-# terraform/gcp and terraform/aws later, which is the point of ADR-0001.
+# Written against the schema of the installed plugin (0.9.9), dumped with
+# scripts/provider-schema.sh - not against the published documentation, which describes a
+# different version. Two places where they disagree and the schema wins:
+#   - os.boot_devices is a list of OBJECTS ({ dev = "hd" }), not a list of strings
+#   - libvirt_volume has no top-level `format`; it is target.format.type
+#
+# Design note: addresses are assigned by cloud-init inside the guest, not by libvirt DHCP
+# reservations. That keeps the network definition minimal and means no MAC pinning, no DHCP
+# host entries, and no dependence on lease timing. The addresses still live in Git, in
+# nodes.json, which was the point of the reservation approach anyway.
 
 locals {
   cfg   = jsondecode(file("${path.module}/${var.nodes_file}"))
@@ -15,6 +24,9 @@ locals {
 
   ssh_public_key = trimspace(file(pathexpand(local.cfg.ssh.public_key_file)))
 
+  # 192.168.100.0/24 -> 24
+  prefix = tonumber(split("/", local.net.cidr)[1])
+
   # Every node can name every other node before any cluster DNS exists.
   hosts_entries = join("\n", [
     for n in local.cfg.nodes : "${n.address} ${n.name} ${n.name}.${local.net.domain}"
@@ -22,61 +34,79 @@ locals {
 }
 
 # ---------------------------------------------------------------- network
-#
-# NAT with DHCP enabled, but every address is a static reservation keyed on the MAC declared in
-# nodes.json. The nodes therefore boot with plain DHCP - exactly as a cloud instance does - while
-# the addresses are fixed in version control. No DHCP server configuration is ever edited by hand,
-# which was a genuine time sink in the previous attempt at this platform.
 
 resource "libvirt_network" "platform" {
   name      = local.net.name
-  mode      = "nat"
-  domain    = local.net.domain
-  addresses = [local.net.cidr]
   autostart = true
 
-  dhcp {
-    enabled = true
+  forward = {
+    mode = "nat"
   }
 
-  dns {
-    enabled    = true
-    local_only = false
-  }
+  ips = [
+    {
+      family  = "ipv4"
+      address = local.net.gateway
+      prefix  = local.prefix
+    }
+  ]
 }
 
 # ---------------------------------------------------------------- images
 #
-# The golden image is uploaded into the pool once. Each node then gets a copy-on-write volume
-# backed by it, so three 35 GB nodes cost roughly the size of one image plus their divergence.
+# The golden image is uploaded into the pool once. Each node gets a volume backed by it, so
+# three nodes cost roughly one image plus whatever each one diverges by.
 
 resource "libvirt_volume" "base" {
-  name   = "ubuntu-2404-k8s-base.qcow2"
-  pool   = var.pool
-  source = abspath("${path.module}/${var.base_image}")
-  format = "qcow2"
+  name = "ubuntu-2404-k8s-base.qcow2"
+  pool = var.pool
+
+  create = {
+    content = {
+      url = "file://${abspath("${path.module}/${var.base_image}")}"
+    }
+  }
+
+  target = {
+    format = {
+      type = "qcow2"
+    }
+  }
 }
 
 resource "libvirt_volume" "node" {
   for_each = local.nodes
 
-  name           = "${each.key}.qcow2"
-  pool           = var.pool
-  base_volume_id = libvirt_volume.base.id
-  size           = each.value.disk_gb * 1024 * 1024 * 1024
-  format         = "qcow2"
+  name     = "${each.key}.qcow2"
+  pool     = var.pool
+  capacity = each.value.disk_gb
+  # Nodes size UP from the base image. libvirt refuses a backing-store volume smaller than
+  # the image behind it, which is why the Packer disk_size is deliberately small.
+  capacity_unit = "GiB"
+
+  backing_store = {
+    path = libvirt_volume.base.path
+    format = {
+      type = "qcow2"
+    }
+  }
+
+  target = {
+    format = {
+      type = "qcow2"
+    }
+  }
 }
 
 # ---------------------------------------------------------------- cloud-init
 #
-# Identity lives here, not in the image: hostname, the SSH key, and the hosts file. This is the
-# same mechanism EC2 and GCE use, which is why Modules 08 and 09 will look like this one.
+# Identity lives here, not in the image: hostname, SSH key, static address, hosts file. This
+# is the same mechanism EC2 and GCE use, which is why Modules 08 and 09 will look like this.
 
 resource "libvirt_cloudinit_disk" "node" {
   for_each = local.nodes
 
   name = "${each.key}-cloudinit.iso"
-  pool = var.pool
 
   user_data = templatefile("${path.module}/templates/user-data.tftpl", {
     hostname      = each.key
@@ -87,8 +117,15 @@ resource "libvirt_cloudinit_disk" "node" {
     role          = each.value.role
   })
 
+  network_config = templatefile("${path.module}/templates/network-config.tftpl", {
+    address     = each.value.address
+    prefix      = local.prefix
+    gateway     = local.net.gateway
+    nameservers = join(", ", local.cfg.network.nameservers)
+  })
+
   meta_data = <<-EOT
-    instance-id: ${each.key}-${substr(sha1(each.value.mac), 0, 8)}
+    instance-id: ${each.key}-${substr(sha1(each.value.address), 0, 8)}
     local-hostname: ${each.key}
   EOT
 }
@@ -98,81 +135,117 @@ resource "libvirt_cloudinit_disk" "node" {
 resource "libvirt_domain" "node" {
   for_each = local.nodes
 
-  name      = each.key
-  memory    = each.value.memory_mb
-  vcpu      = each.value.cpus
-  autostart = false
-  qemu_agent = true
+  name   = each.key
+  type   = "kvm"
+  vcpu   = each.value.cpus
+  memory = each.value.memory_mb
 
-  cloudinit = libvirt_cloudinit_disk.node[each.key].id
+  memory_unit = "MiB"
+  running     = true
+  autostart   = false
 
-  cpu {
+  # host-passthrough gives the guest the real CPU flags. Nested inside WSL2 we are already
+  # paying for one extra layer of virtualisation; there is no reason to hide instructions too.
+  cpu = {
     mode = "host-passthrough"
   }
 
-  disk {
-    volume_id = libvirt_volume.node[each.key].id
+  os = {
+    type         = "hvm"
+    type_arch    = "x86_64"
+    type_machine = "q35"
+    # A list of objects, not a list of strings - the published docs are wrong about this.
+    boot_devices = [{ dev = "hd" }]
   }
 
-  network_interface {
-    network_id     = libvirt_network.platform.id
-    mac            = each.value.mac
-    addresses      = [each.value.address]   # static DHCP reservation
-    hostname       = each.key
-    wait_for_lease = true
+  devices = {
+    disks = [
+      {
+        # The node's root disk.
+        source = {
+          file = {
+            file = libvirt_volume.node[each.key].path
+          }
+        }
+        target = {
+          dev = "vda"
+          bus = "virtio"
+        }
+      },
+      {
+        # The cloud-init NoCloud seed. cloud-init finds it by its "cidata" filesystem label,
+        # so the bus and device name do not matter.
+        source = {
+          file = {
+            file = libvirt_cloudinit_disk.node[each.key].path
+          }
+        }
+        target = {
+          dev = "vdb"
+          bus = "virtio"
+        }
+        read_only = true
+      },
+    ]
+
+    interfaces = [
+      {
+        model = {
+          type = "virtio"
+        }
+        source = {
+          network = {
+            network = libvirt_network.platform.name
+          }
+        }
+      }
+    ]
   }
 
-  # Serial console, so `virsh console <node>` works. There is no GUI in WSL, and a reachable
-  # console is what you need at three in the morning when networking is the thing that broke.
-  console {
-    type        = "pty"
-    target_port = "0"
-    target_type = "serial"
-  }
-
-  graphics {
-    type        = "vnc"
-    listen_type = "address"
-    autoport    = true
-  }
+  depends_on = [libvirt_network.platform]
 }
 
 # ---------------------------------------------------------------- verification
 #
-# The module is not done when Terraform says "apply complete" - it is done when the nodes are
-# reachable and distinct. This checks that every node answers SSH and that no two share a
-# machine-id, which is the failure a cloned image produces and which hides for hours.
+# The module is not finished when Terraform says "apply complete" - it is finished when the
+# nodes are reachable and distinct. A clone that kept its parent's machine-id is the failure
+# this catches, and it is one that otherwise hides for hours.
 
 resource "terraform_data" "verify" {
   depends_on = [libvirt_domain.node]
 
-  triggers_replace = [for n in local.nodes : n.address]
+  triggers_replace = [for n in local.cfg.nodes : n.address]
 
   provisioner "local-exec" {
     interpreter = ["/bin/bash", "-c"]
     command     = <<-EOT
-      set -euo pipefail
+      set -uo pipefail
+      user=${local.cfg.ssh.username}
       ids=""
+      fail=0
       for addr in ${join(" ", [for n in local.cfg.nodes : n.address])}; do
         echo "waiting for $addr"
+        ok=0
         for i in $(seq 1 60); do
           if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
                  -o ConnectTimeout=5 -o LogLevel=ERROR \
-                 ${local.cfg.ssh.username}@$addr 'exit 0' 2>/dev/null; then break; fi
+                 "$user@$addr" 'exit 0' 2>/dev/null; then ok=1; break; fi
           sleep 5
-          [ "$i" = 60 ] && { echo "ERROR: $addr never answered ssh"; exit 1; }
         done
-        id=$(ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-                 -o LogLevel=ERROR ${local.cfg.ssh.username}@$addr 'cat /etc/machine-id')
-        host=$(ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-                 -o LogLevel=ERROR ${local.cfg.ssh.username}@$addr 'hostnamectl --static')
+        if [ "$ok" != 1 ]; then
+          echo "ERROR: $addr never answered ssh. Try: virsh -c qemu:///system console <node>"
+          fail=1; continue
+        fi
+        read -r host id < <(ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              -o LogLevel=ERROR "$user@$addr" 'echo "$(hostnamectl --static) $(cat /etc/machine-id)"')
         echo "  $addr  $host  $id"
-        ids="$ids$id\n"
+        ids="$ids$id"$'\n'
       done
-      uniq_count=$(printf "$ids" | sort -u | grep -c .)
-      total=$(printf "$ids" | grep -c .)
-      if [ "$uniq_count" != "$total" ]; then
-        echo "ERROR: nodes share a machine-id - the image was not sealed correctly"
+      [ "$fail" = 0 ] || exit 1
+      total=$(printf '%s' "$ids" | grep -c .)
+      uniq=$(printf '%s' "$ids" | sort -u | grep -c .)
+      if [ "$total" != "$uniq" ]; then
+        echo "ERROR: nodes share a machine-id - the image was not sealed. Rebuild with 'make image'."
         exit 1
       fi
       echo "all nodes reachable, machine-ids unique"

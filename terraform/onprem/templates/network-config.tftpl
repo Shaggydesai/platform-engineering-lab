@@ -1,0 +1,21 @@
+# cloud-init network config v2 (netplan). The address is assigned here, inside the guest,
+# rather than by a libvirt DHCP reservation - one fewer moving part, and the address still
+# lives in Git.
+#
+# The interface is matched by pattern rather than named. Predictable interface names depend
+# on the machine type and bus, and hardcoding enp1s0 is the kind of assumption that breaks
+# silently when something changes underneath.
+version: 2
+ethernets:
+  primary:
+    match:
+      name: "en*"
+    dhcp4: false
+    dhcp6: false
+    addresses:
+      - ${address}/${prefix}
+    routes:
+      - to: default
+        via: ${gateway}
+    nameservers:
+      addresses: [${nameservers}]
