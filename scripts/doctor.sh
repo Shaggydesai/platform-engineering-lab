@@ -84,19 +84,34 @@ if grep -qi microsoft /proc/version 2>/dev/null; then
     /mnt/*) printf '  \033[31m[fail]\033[0m %-16s repo is on %s - clone it inside WSL (~/) instead. See ADR-0005.\n' "repo location" "$PWD"; ((fail++)) ;;
     *)      printf '  \033[32m[ ok ]\033[0m %-16s %s (native WSL filesystem)\n' "repo location" "$PWD"; ((ok++)) ;;
   esac
-  VMRUN=""
-  for p in "/mnt/c/Program Files (x86)/VMware/VMware Workstation/vmrun.exe" \
-           "/mnt/c/Program Files/VMware/VMware Workstation/vmrun.exe"; do
-    [ -x "$p" ] && { VMRUN="$p"; break; }
-  done
-  if [ -n "$VMRUN" ]; then
-    printf '  \033[32m[ ok ]\033[0m %-16s %s\n' "vmrun.exe" "$("$VMRUN" 2>&1 | head -1 | cut -c1-44)"; ((ok++))
+  # WSL regenerates /etc/hosts on every start unless told not to, which would silently
+  # delete the node entries 'make hosts' writes - and then helm and kubectl stop being
+  # able to resolve the control plane, for reasons that look nothing like the cause.
+  if grep -qE '^\s*generateHosts\s*=\s*false' /etc/wsl.conf 2>/dev/null; then
+    printf '  \033[32m[ ok ]\033[0m %-16s generateHosts=false, /etc/hosts is ours\n' "wsl.conf"; ((ok++))
   else
-    printf '  \033[33m[warn]\033[0m %-16s not found - is VMware Workstation installed?\n' "vmrun.exe"
-    printf '         %s\n' "find it with:  ls -d /mnt/c/Program*/VMware*/VMware*"; ((warn++))
+    printf '  \033[33m[warn]\033[0m %-16s WSL will rewrite /etc/hosts on next start - run: make hosts\n' "wsl.conf"; ((warn++))
   fi
 else
   printf '  \033[33m[warn]\033[0m %-16s not under WSL - see ADR-0005\n' "WSL"; ((warn++))
+fi
+
+echo
+echo "Cluster reachability"
+# The kubeconfig and the Cilium values both reach the API server by NAME, because
+# controlPlaneEndpoint is deliberately a name (ADR-0002). The nodes resolve each other
+# from cloud-init's /etc/hosts; this workstation needs the same entries.
+if [ -f clusters/onprem/nodes.json ] && command -v jq >/dev/null 2>&1; then
+  _dom=$(jq -r '.network.domain' clusters/onprem/nodes.json)
+  _unresolved=""
+  for _n in $(jq -r '.nodes[].name' clusters/onprem/nodes.json); do
+    getent hosts "$_n.$_dom" >/dev/null 2>&1 || _unresolved="$_unresolved $_n.$_dom"
+  done
+  if [ -z "$_unresolved" ]; then
+    printf '  \033[32m[ ok ]\033[0m %-16s all node names resolve\n' "node DNS"; ((ok++))
+  else
+    printf '  \033[31m[fail]\033[0m %-16s cannot resolve:%s - run: make hosts\n' "node DNS" "$_unresolved"; ((fail++))
+  fi
 fi
 
 echo

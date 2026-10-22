@@ -27,6 +27,10 @@ tools: ## Install the workstation toolchain inside WSL (idempotent)
 doctor: ## Check that the workstation has everything this project needs
 	@bash scripts/doctor.sh
 
+.PHONY: hosts
+hosts: ## Make the node names resolve from this workstation (/etc/hosts + wsl.conf)
+	@bash scripts/hosts-sync.sh
+
 .PHONY: status
 status: ## Show where we are (reads STATUS.md)
 	@sed -n '1,40p' STATUS.md
