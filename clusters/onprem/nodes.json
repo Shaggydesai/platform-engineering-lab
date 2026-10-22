@@ -12,6 +12,13 @@
       "1.1.1.1"
     ]
   },
+  "kubernetes": {
+    "comment": "Fixed in ADR-0007, before kubeadm ran. Changing either CIDR later means rebuilding the cluster, so they live here where the kubeadm config, the Cilium values and the Ansible roles all read the same number. Neither may overlap the node network above.",
+    "pod_cidr": "10.244.0.0/16",
+    "service_cidr": "10.96.0.0/12",
+    "control_plane_endpoint": "k8s-cp01.platform.local:6443",
+    "cni": "cilium"
+  },
   "ssh": {
     "username": "sagar",
     "public_key_file": "~/.ssh/id_ed25519.pub",

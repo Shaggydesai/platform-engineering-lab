@@ -34,12 +34,19 @@ make onprem-vms-status
 Module 01 is closed: the gate (`onprem-vms-destroy` then `onprem-vms`) passed with three
 reachable nodes and three distinct machine-ids.
 
-1. **Module 02** — `kubeadm init` on k8s-cp01 by hand, read every flag, join both workers,
-   install a CNI, and understand why the cluster is NotReady until it is there.
-2. Keep `make onprem-diagnose` in reach; it is the first thing to run when a node goes quiet.
-3. Before any cloud module: AWS and GCP budget alarms (ADR-0003) — still outstanding.
+Module 02 is written and ready to walk through. The CNI is decided (ADR-0007: Cilium, with
+kube-proxy kept until Module 04 removes it deliberately), and both CIDRs are recorded in
+`clusters/onprem/nodes.json` so nothing can disagree about them later.
 
-Runbook: docs/runbooks/01-onprem-vms.md
+1. **Work through `docs/runbooks/cluster-bootstrap.md`, steps 0 → 7.** It is written as a lab,
+   not a script: each step says what to look at and why. Two sessions, not one.
+2. Do not skip step 4 — the broken, `NotReady`, pre-CNI cluster is the most instructive state
+   this project will ever be in, and you only get to see it once.
+3. The gate: `make smoke` passes, a worker reboot rejoins unaided, and
+   `cilium connectivity test` passes.
+4. Before any cloud module: AWS and GCP budget alarms (ADR-0003) — still outstanding.
+
+Runbooks: `docs/runbooks/01-onprem-vms.md` (nodes) · `docs/runbooks/cluster-bootstrap.md` (cluster)
 
 ## Module 00 checklist
 

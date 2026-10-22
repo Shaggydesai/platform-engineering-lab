@@ -1,10 +1,19 @@
 #!/usr/bin/env bash
 # Cluster smoke test - Module 02 deliverable. Works against whatever kube context is current.
 set -euo pipefail
+#
+#   make smoke            interactive, asks which context it is about to touch
+#   YES=1 make smoke      no prompt - for Ansible (Module 03) and CI
+#
+# It creates a throwaway namespace and deletes it on exit, including on failure.
 NS=smoke-$RANDOM
 ctx=$(kubectl config current-context)
 echo "context: $ctx"
-read -rp "run the smoke test against '$ctx'? [y/N] " a; [ "$a" = y ] || exit 1
+if [ "${YES:-}" != 1 ]; then
+  # The context guard is not paranoia: this repo will have three contexts, two of
+  # them in the cloud, and the GKE one costs money.
+  read -rp "run the smoke test against '$ctx'? [y/N] " a; [ "$a" = y ] || exit 1
+fi
 
 cleanup() { kubectl delete ns "$NS" --wait=false >/dev/null 2>&1 || true; }
 trap cleanup EXIT
@@ -45,3 +54,10 @@ echo "    service reachable"
 
 echo
 echo "smoke test passed on $ctx"
+echo
+# Not a check, just context for whoever is reading the output. If the CNI is unhappy the
+# five checks above may still pass while something is quietly degraded.
+if command -v cilium >/dev/null 2>&1; then
+  cilium status --brief 2>/dev/null || true
+fi
+kubectl get nodes -o custom-columns=NODE:.metadata.name,STATUS:.status.conditions[-1].type,VERSION:.status.nodeInfo.kubeletVersion,RUNTIME:.status.nodeInfo.containerRuntimeVersion
