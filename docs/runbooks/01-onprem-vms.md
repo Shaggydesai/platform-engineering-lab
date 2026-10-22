@@ -137,11 +137,18 @@ all nodes reachable, machine-ids unique
 
 ## Known caveats
 
-**The cloud-init seed lives in /tmp.** `libvirt_cloudinit_disk` in 0.9 has no `pool`
-attribute and writes its ISO to `/tmp/terraform-provider-libvirt-cloudinit/`. That is fine
-while a node runs - cloud-init only reads it on first boot - but if the file is cleaned away,
-the domain will refuse to start because one of its disks is missing. If that happens,
-`terraform apply` recreates the ISO.
+**The seed ISO is staged in /tmp and then uploaded into the pool.** `libvirt_cloudinit_disk`
+writes its ISO to `os.TempDir()` and exposes `path` as computed only — there is no attribute to
+redirect it, which the provider source confirms. Inside WSL that is `/tmp`, cleared on every
+shutdown, and a domain whose seed file has vanished does not boot badly, it refuses to start.
+
+So `libvirt_volume.seed` uploads it into the storage pool and the domain attaches the pool
+volume. A node can then be started with plain `virsh start`, with no Terraform involved.
+
+What remains: after `/tmp` is cleared, `terraform apply` recreates the staging ISO and rewrites
+the pool volume with byte-identical content. The volume's path is derived from its name, so the
+domain's XML does not change and **the nodes are not rebooted** by it. Expect
+`3 to add, 3 to change` on the first apply after a WSL restart; that is this, and it is cheap.
 
 **"Update in-place" on a domain still reboots it.** Adding the console was planned as
 `3 to change, 0 to destroy` — which reads like a hot attach. It is not: the console log's first

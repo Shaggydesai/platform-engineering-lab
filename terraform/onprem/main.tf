@@ -141,6 +141,39 @@ resource "libvirt_cloudinit_disk" "node" {
   EOT
 }
 
+# The seed ISO, uploaded into the storage pool.
+#
+# libvirt_cloudinit_disk writes its ISO to os.TempDir() and the path is Computed, with no
+# attribute to override it - we read the provider source to be sure. On this workstation
+# os.TempDir() is /tmp inside WSL, which is cleared whenever WSL shuts down. The domains
+# then hold a disk whose backing file does not exist and will not start at all: not a
+# degraded boot, a refusal.
+#
+# So the temp file is treated as what it is - a staging artifact - and the seed itself
+# lives in the pool next to the node's root disk. This is the pattern the resource's own
+# documentation recommends, and it buys something concrete: a node can be started with
+# plain `virsh start`, with no Terraform and no regenerated ISO.
+resource "libvirt_volume" "seed" {
+  for_each = local.nodes
+
+  name = "${each.key}-seed.iso"
+  pool = var.pool
+
+  create = {
+    content = {
+      url = "file://${libvirt_cloudinit_disk.node[each.key].path}"
+    }
+  }
+
+  # raw, not qcow2 - this is an ISO 9660 image. Same lesson as the root disk, opposite
+  # answer: what matters is telling QEMU the truth about the file it is given.
+  target = {
+    format = {
+      type = "raw"
+    }
+  }
+}
+
 # ---------------------------------------------------------------- domains
 
 resource "libvirt_domain" "node" {
@@ -193,15 +226,17 @@ resource "libvirt_domain" "node" {
         }
       },
       {
-        # The cloud-init NoCloud seed. cloud-init finds it by its "cidata" filesystem label,
-        # so the bus and device name do not matter. raw is correct here - it is an ISO image.
+        # The cloud-init NoCloud seed, from the POOL - not from the provider's temp
+        # directory, which /tmp clears on every WSL shutdown. cloud-init finds it by its
+        # "cidata" filesystem label, so the bus and device name do not matter. raw is
+        # correct here: it is an ISO image.
         driver = {
           name = "qemu"
           type = "raw"
         }
         source = {
           file = {
-            file = libvirt_cloudinit_disk.node[each.key].path
+            file = libvirt_volume.seed[each.key].path
           }
         }
         target = {
