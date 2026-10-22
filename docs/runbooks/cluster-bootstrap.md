@@ -129,11 +129,29 @@ use a config file instead, for three reasons:
 - Module 03's Ansible role will template this exact file. Writing it now means the automation is
   a templating exercise rather than a redesign.
 
-On **k8s-cp01**:
+**The file lives in Git, at `clusters/onprem/kubeadm/init.yaml`.** From the WSL workstation:
 
 ```bash
-sudo mkdir -p /etc/kubernetes/kubeadm
-sudo tee /etc/kubernetes/kubeadm/init.yaml >/dev/null <<'EOF'
+make onprem-kubeadm-config
+```
+
+That copies it to `/etc/kubernetes/kubeadm/init.yaml` on the control plane and then checks four
+things there: the CIDRs and node address match `nodes.json`, the pinned `kubernetesVersion` matches
+the installed `kubeadm`, the copy's checksum is identical, and all **four** documents arrived.
+
+The last check exists because of a real failure. Pasting this file into an SSH session as a
+heredoc truncated when the terminal wrapped — and `kubeadm config validate` said `ok`, because it
+validates that the fields *present* are correct and cannot know what you meant to include. A
+truncated config that parses is a valid config. The `KubeletConfiguration` block vanished, which
+would have taken `resolvConf` with it and produced a CoreDNS loop an hour later, by which point
+nobody would connect the two events.
+
+The moral is not "paste more carefully". It is that configuration belongs in a file under version
+control, moved by a tool that can verify the move.
+
+The file, annotated — this is what `make onprem-kubeadm-config` sends:
+
+```yaml
 # ---------------------------------------------------------------------------
 # InitConfiguration: things true of THIS node, only at the moment of init.
 # ---------------------------------------------------------------------------
@@ -253,14 +271,11 @@ serializeImagePulls: false
 apiVersion: kubeproxy.config.k8s.io/v1alpha1
 kind: KubeProxyConfiguration
 mode: iptables
-EOF
 ```
 
-Check it before running it. kubeadm will tell you about deprecated or misspelled fields, and it
-costs nothing:
+Then pull the images, on the node:
 
 ```bash
-sudo kubeadm config validate --config /etc/kubernetes/kubeadm/init.yaml
 sudo kubeadm config images pull --config /etc/kubernetes/kubeadm/init.yaml
 ```
 

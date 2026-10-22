@@ -1,0 +1,126 @@
+# kubeadm configuration for the on-prem control plane.
+#
+#   make onprem-kubeadm-config     copy this to k8s-cp01 and validate it there
+#
+# This file is the RECORD of how the cluster was built. Module 03's Ansible role templates
+# it from clusters/onprem/nodes.json, which is why the values here are duplicated from that
+# file rather than invented: node name, address, and both CIDRs must match it exactly.
+#
+# Written against kubeadm.k8s.io/v1beta4, the config API for Kubernetes 1.31+. v1beta3 is
+# gone in 1.34, so a tutorial using it predates this cluster. One v1beta4 change that bites:
+# kubeletExtraArgs is a list of {name, value} objects, not a map.
+#
+# Full reasoning for every field: docs/runbooks/cluster-bootstrap.md, step 1.
+
+# ---------------------------------------------------------------------------
+# InitConfiguration: true of THIS node, only at the moment of init.
+# ---------------------------------------------------------------------------
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: InitConfiguration
+localAPIEndpoint:
+  # Must be the node's real address, not 0.0.0.0 - it is baked into the
+  # certificates and into every kubeconfig kubeadm generates.
+  advertiseAddress: 192.168.100.10
+  bindPort: 6443
+nodeRegistration:
+  name: k8s-cp01
+  # Explicit, so that a missing runtime fails with "socket not found" rather
+  # than "no runtime detected".
+  criSocket: unix:///run/containerd/containerd.sock
+  taints:
+    # kubeadm applies this by default. Written out so that removing it later is a
+    # visible edit to a file, not a forgotten kubectl command. With 11 vCPU of
+    # worker capacity there is no reason to, and a control plane sharing its 4 GB
+    # with workloads is a control plane that dies under load.
+    - key: node-role.kubernetes.io/control-plane
+      effect: NoSchedule
+
+---
+# ---------------------------------------------------------------------------
+# ClusterConfiguration: true of the CLUSTER. Stored in etcd and reused by every
+# future `kubeadm join` and `kubeadm upgrade`.
+# ---------------------------------------------------------------------------
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: ClusterConfiguration
+clusterName: onprem
+
+# Pinned to what is actually installed (`kubeadm version -o short`). Unset, kubeadm
+# chooses for itself; if it chose something newer than the held kubelet packages you
+# would run control-plane images from one release against a kubelet from another -
+# supported in one direction only, and obscure when it breaks. Pinning also removes a
+# network call from init.
+kubernetesVersion: v1.34.12
+
+# The most consequential line here, and the one most tutorials omit. This is the name
+# clients and joining nodes use to reach the API server. Omit it and everything
+# hardcodes 192.168.100.10, so adding a second control plane behind a load balancer
+# later means regenerating every certificate and rewriting every kubeconfig. Set to a
+# NAME now, that future change is a DNS change.
+#
+# It resolves because cloud-init wrote /etc/hosts on every node in Module 01.
+controlPlaneEndpoint: "k8s-cp01.platform.local:6443"
+
+networking:
+  # Fixed in ADR-0007, recorded in clusters/onprem/nodes.json. Neither may overlap
+  # 192.168.100.0/24, or a pod reaching for a node would route to a pod instead - a
+  # failure that looks like DNS and is not.
+  podSubnet: 10.244.0.0/16
+  serviceSubnet: 10.96.0.0/12
+  dnsDomain: cluster.local
+
+apiServer:
+  # Extra names the API server certificate is valid for. Without these, kubectl via any
+  # name other than the advertise address fails TLS verification - and you will reach it
+  # by several names.
+  certSANs:
+    - k8s-cp01
+    - k8s-cp01.platform.local
+    - 192.168.100.10
+    - 127.0.0.1
+
+etcd:
+  local:
+    dataDir: /var/lib/etcd
+
+---
+# ---------------------------------------------------------------------------
+# KubeletConfiguration: applies to EVERY node that joins, because kubeadm stores it
+# in a ConfigMap in kube-system. This is why a joining worker needs no local config.
+# ---------------------------------------------------------------------------
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+cgroupDriver: systemd
+
+# Ubuntu's /etc/resolv.conf is a symlink to systemd-resolved's STUB file, whose only
+# nameserver is 127.0.0.53 - a local listener. The kubelet hands the node's resolv.conf
+# to CoreDNS as its upstream, so CoreDNS would forward unresolved queries to a stub on
+# its own node, which forwards them back. CoreDNS detects that and refuses to start with
+# "Loop ... detected". It presents as cluster-wide DNS failure, which sends you looking
+# at CoreDNS rather than at the host. This points the kubelet at the file holding the
+# real upstream servers.
+resolvConf: /run/systemd/resolve/resolv.conf
+
+# Reserve resources for the OS and the kubelet. Without reservations the kubelet will
+# schedule pods until sshd is OOM-killed, and then the node is unreachable and you are
+# debugging over the serial console. On a 4 GB control plane this is not a nicety.
+systemReserved:
+  cpu: "200m"
+  memory: "256Mi"
+kubeReserved:
+  cpu: "200m"
+  memory: "256Mi"
+evictionHard:
+  memory.available: "200Mi"
+  nodefs.available: "10%"
+
+# Serial image pulls are the default and they make a three-node rollout crawl.
+serializeImagePulls: false
+
+---
+# ---------------------------------------------------------------------------
+# KubeProxyConfiguration. Present so Module 04 - which removes kube-proxy in favour of
+# Cilium's eBPF datapath - has a documented before state to compare against.
+# ---------------------------------------------------------------------------
+apiVersion: kubeproxy.config.k8s.io/v1alpha1
+kind: KubeProxyConfiguration
+mode: iptables

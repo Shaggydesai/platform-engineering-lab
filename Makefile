@@ -73,6 +73,10 @@ onprem-diagnose: ## Explain why a node is unreachable (NODE=k8s-cp01 for one)
 onprem-vms-destroy: ## Destroy the on-prem nodes (the golden image is kept)
 	@terraform -chdir=terraform/onprem destroy
 
+.PHONY: onprem-kubeadm-config
+onprem-kubeadm-config: ## Module 02 - copy the kubeadm config from Git to the control plane and validate it
+	@bash scripts/push-kubeadm-config.sh
+
 .PHONY: onprem-up
 onprem-up: ## Module 03 - build the whole on-prem cluster from nothing
 	@echo "not implemented yet - Module 03"; exit 1
