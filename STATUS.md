@@ -6,7 +6,7 @@
 
 **Last updated:** 2026-10-22
 **Current module:** 01 — The on-prem substrate, built from code
-**Overall progress:** 0 / 12 modules complete
+**Overall progress:** Module 00 complete, 01 in progress — 1 / 13
 
 ---
 
@@ -15,7 +15,7 @@
 | | |
 |:--|:--|
 | **On-prem cluster** | not built — Module 01 code written, image not yet built |
-| **GCP cluster** | not built |
+| **GCP cluster** | not built — account verified empty, ₹0 running |
 | **AWS cluster** | not built |
 | **Argo CD** | not installed |
 | **ShopVerse running** | no |
@@ -23,11 +23,14 @@
 
 ## The next action
 
-1. ~~Push the scaffold~~ — done, three commits are on GitHub.
-2. ~~Confirm C: is solid state~~ — done, Samsung NVMe confirmed.
-3. Clone the repo **inside WSL** (`~/platform-engineering-lab`, not `/mnt/c`) — ADR-0005.
-4. `make doctor` until it passes.
-5. Create the AWS and GCP accounts with budget alarms **before** any resource exists (ADR-0003).
+Module 00 is complete. GCP verified empty (no clusters, instances or disks) — the `kubectx`
+entry was a stale context pointing at a deleted cluster.
+
+1. Install `packer.exe` on Windows: `winget install --id HashiCorp.Packer -e`
+2. `make image` — builds the golden image (~20 min)
+3. `make onprem-vms` — produces the three nodes (~10 min)
+4. Run the destroy/rebuild gate before moving to Module 02
+5. Before any cloud module: AWS and GCP budget alarms (ADR-0003)
 
 Then Module 01, which is already written and waiting:
 
@@ -49,11 +52,12 @@ docs/runbooks/01-onprem-vms.md.
 - [x] Laptop specs captured → on-prem substrate chosen (ADR-0004)
 - [x] Confirm C: is solid state — Samsung NVMe (238 GB); D: is a Seagate HDD
 - [x] ADR-0005: WSL is the control workstation
-- [ ] Repo cloned inside the WSL filesystem
-- [ ] Install missing workstation tools until `make doctor` passes
+- [x] Repo cloned inside the WSL filesystem
+- [x] Install workstation tools — `make tools` installed packer, ansible, argocd, yq, jq, aws
 - [ ] AWS account + budget alarm at $5
 - [ ] GCP account + budget alert at ₹400
-- [ ] `make doctor` passes on the workstation
+- [x] `make doctor` passes — 16 ok, 0 warnings, 0 failures
+- [ ] `packer.exe` installed on the **Windows** side (ADR-0005)
 
 ## Session log
 
@@ -62,6 +66,7 @@ Keep this short. One line per session: what you did, what broke, what is next.
 | Date | Module | What happened | Next |
 |:--|:--|:--|:--|
 | 2026-10-17 | 00 | Project restarted. Decisions and scaffold written before any cluster exists. | Capture laptop specs, create repo |
+| 2026-10-22 | 01 | Toolchain installed, `make doctor` clean (16/0/0). Found that Packer cannot run in WSL — the vmware-iso builder executes local VMware binaries — so `make image` now syncs to C:\VMs\build and runs packer.exe through interop. ADR-0005 updated. | Install packer.exe on Windows, build the image |
 | 2026-10-22 | 01 | WSL confirmed available → ADR-0005: WSL becomes the control workstation, bash version of the VM script is now primary, PowerShell kept as fallback. GitHub App access granted, pushes work. | Build the image from WSL |
 | 2026-10-22 | 01 | Module 01 written: Packer golden image (autoinstall, containerd, kubeadm held, sealed identity) plus a clone script that discovers the NAT subnet instead of editing VMware's DHCP config. Not yet run. | Build the image, run the create/destroy round trip |
 | 2026-10-22 | 00 | Hardware captured: 32 GB, 12 threads, C: 106 GB SSD, D: 625 GB HDD. ADR-0004 fixes the substrate: 3 kubeadm VMs on the SSD, because etcd on a mechanical disk is a known failure mode. Repo created, scaffold ready to push. | Push scaffold, budget alarms, `make doctor` |

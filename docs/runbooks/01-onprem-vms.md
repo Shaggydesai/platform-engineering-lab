@@ -51,17 +51,21 @@ Everything runs from WSL (ADR-0005). The repository must live inside the WSL fil
 `/mnt/c` — `make doctor` checks this.
 
 ```bash
-# one-time: build the golden image
-cd packer/ubuntu-2404
-packer init .
-packer build .                       # ~20 minutes, watch the console on the first run
-
-# every time: produce the three nodes
-cd ../..
-make onprem-vms                      # or: ./scripts/onprem-vms.sh create
+make image                           # ~20 min, once. Packer runs on Windows (ADR-0005);
+                                     # this syncs to C:\VMs\build and invokes packer.exe.
+make onprem-vms                      # ~10 min, repeatable
 make onprem-vms-status
 make onprem-vms-destroy
 ```
+
+`make image` needs `packer.exe` on the **Windows** side:
+
+```powershell
+winget install --id HashiCorp.Packer -e
+```
+
+The Linux packer in WSL cannot drive VMware Workstation — the builder executes local VMware
+binaries that do not exist in WSL.
 
 Windows-native fallback, for a machine without WSL:
 
@@ -95,6 +99,7 @@ round trip works, Module 02 does not start.
 | Symptom | Cause | Fix |
 |:--|:--|:--|
 | Packer waits forever at `Waiting for SSH` | autoinstall did not start — the boot command mistyped into GRUB | Watch the console; the GRUB line should show `autoinstall ds=nocloud-net;s=http://...`. Increase the `<wait>` values on a slow disk. |
+| `packer.exe not found on Windows` | packer installed only in WSL | `winget install --id HashiCorp.Packer -e`, then reopen the shell |
 | `404` on the ISO URL | Ubuntu published a new point release | Update `iso_url`; the checksum is read from `SHA256SUMS` so it needs no change |
 | `getGuestIPAddress` never returns | open-vm-tools missing or not started | It is in `user-data` packages; check `systemctl status open-vm-tools` on the console |
 | Two nodes get the same address | the template was cloned without `uuid.action = "create"` | the script sets it; if you cloned by hand in the GUI, destroy and re-run |

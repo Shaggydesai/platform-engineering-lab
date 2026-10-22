@@ -34,8 +34,8 @@ status: ## Show where we are (reads STATUS.md)
 # ---------------------------------------------------------------- on-prem
 
 .PHONY: image
-image: ## Module 01 - build the golden Ubuntu image with Packer
-	@cd packer/ubuntu-2404 && packer init . && packer build .
+image: ## Module 01 - build the golden Ubuntu image (Packer runs on Windows, see ADR-0005)
+	@bash scripts/build-image.sh
 
 .PHONY: onprem-vms
 onprem-vms: ## Module 01 - clone the three on-prem VMs from the golden image

@@ -28,7 +28,8 @@ that edits the files is the same kind of shell that runs them.
 | git, make, ssh | WSL | same line endings and permissions as the nodes |
 | kubectl, helm, argocd | WSL | native builds, no path translation |
 | Ansible (Module 03) | WSL | Ansible has no supported Windows control node |
-| Terraform, Packer | WSL or Windows | either works; prefer WSL for consistency |
+| Terraform | WSL | no local hypervisor involved |
+| **Packer (vmware-iso builder)** | **Windows** | it drives a local VMware install directly - see below |
 | VMware Workstation, `vmrun.exe` | Windows | called from WSL through interop |
 
 The repository is cloned **inside the WSL filesystem** (`~/platform-engineering-lab`), not under
@@ -37,6 +38,25 @@ which breaks `chmod +x` on scripts and SSH key modes.
 
 `scripts/onprem-vms.sh` becomes the primary VM lifecycle tool. `scripts/onprem-vms.ps1` is kept as
 the Windows-native fallback for a machine without WSL; the two must stay behaviourally identical.
+
+## Why Packer is the exception
+
+Packer's `vmware-iso` builder does not talk to VMware over an API. It executes the local VMware
+binaries - `vmrun`, `vmware-vdiskmanager`, `vmware` - to create and drive the VM. Inside WSL those
+are Linux binaries that do not exist, because VMware Workstation is a Windows application.
+
+It is possible to fake it: put shell wrappers named `vmrun` and `vmware-vdiskmanager` on the WSL
+PATH that exec the `.exe` through interop and translate every path. That is precisely the kind of
+clever workaround Rule 2 of the roadmap exists to refuse - it would work until it did not, at the
+worst possible moment.
+
+So `packer.exe` is installed on Windows, and `scripts/build-image.sh` syncs `packer/ubuntu-2404`
+to `C:\VMs\build` and invokes it there through interop. Git remains the source of truth;
+`C:\VMs\build` is a disposable artifact that is recreated on every build. The one thing the sync
+must not do is convert line endings - the provisioner scripts run inside a Linux guest - so the
+script checks for CRLF and refuses to build if it finds any.
+
+Everything else - Terraform, Ansible, kubectl, helm, the VM lifecycle script - stays in WSL.
 
 ## Two caveats that are not obvious
 

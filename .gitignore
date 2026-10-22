@@ -23,6 +23,11 @@ gcp-sa-*.json
 .aws/
 .gcp/
 
+# Packer - generated locally, contains your public key and local paths
+**/variables.auto.pkrvars.hcl
+packer/**/output-*/
+packer/**/manifest.json
+
 # Ansible
 *.retry
 ansible/inventory/*.local.yml
