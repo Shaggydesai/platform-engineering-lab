@@ -18,8 +18,8 @@ Ubuntu cloud image (official, cloud-init ready)
    ▼
 packer/ubuntu-2404/output/ubuntu-2404-k8s.qcow2      (20 GB base)
    │
-   │   terraform apply       ~2 min, every time
-   │     libvirt NAT network with static DHCP reservations
+   │   terraform apply       ~30 s, every time
+   │     libvirt NAT network
    │     one copy-on-write volume per node, sized up from the base
    │     one cloud-init seed per node: hostname, SSH key, /etc/hosts
    │     verification: every node answers SSH, no two share a machine-id
@@ -42,9 +42,11 @@ Terraform and this is where that becomes true rather than aspirational.
 EC2 and GCE use. Modules 08 and 09 are then the same pattern with a different provider rather
 than a different skill.
 
-**Addresses are static DHCP reservations declared in `nodes.json`.** The nodes boot with plain
-DHCP, exactly as a cloud instance does, while the addresses are fixed in version control. No DHCP
-server configuration is ever edited by hand.
+**Addresses are declared in `nodes.json` and applied by cloud-init inside the guest.** An earlier
+draft used libvirt DHCP reservations, which meant pinning MAC addresses and depending on lease
+timing — two more things that can be subtly wrong. Netplan inside the node is one fewer moving
+part, and the addresses still live in version control, which was the whole point. No DHCP server
+configuration is ever edited by hand either way.
 
 **`nodes.json` is read by both Terraform and (from Module 03) Ansible**, so the inventory cannot
 drift from reality.
@@ -73,7 +75,7 @@ autoMemoryReclaim=gradual
 
 then `wsl --shutdown`. `make doctor` fails loudly if this was not done.
 
-## The gate for this module
+## The gate for this module — **passed 2026-10-22**
 
 ```bash
 make onprem-vms-destroy
@@ -83,6 +85,15 @@ make onprem-vms
 Passes when all three nodes return on `.10/.11/.12` with the right hostnames and three distinct
 machine-ids. Terraform's verification step checks the machine-ids itself and fails the apply if
 two match. Until that round trip works, Module 02 does not start.
+
+The passing run, for reference — 28 seconds from `apply` to verified:
+
+```text
+192.168.100.10  k8s-cp01  9ef4200f38314554b1ba657b05921780
+192.168.100.11  k8s-w01   25e924f7fde747f39e64749fc04c89df
+192.168.100.12  k8s-w02   5315dce9c2764cc6bb3ff9fabe48b000
+all nodes reachable, machine-ids unique
+```
 
 ## How it breaks
 
@@ -94,7 +105,8 @@ two match. Until that round trip works, Module 02 does not start.
 | `storage pool default missing` | fresh libvirt install | `make tools` defines and starts it |
 | Packer hangs at `Waiting for SSH` | the cidata seed was not read | check `variables.auto.pkrvars.hcl` has a real key; `packer build -debug` |
 | `COW volume smaller than backing file` | a node's `disk_gb` is below the Packer `disk_size` | nodes size **up** from the 20 GB base, never down |
-| `wait_for_lease` times out | the node did not DHCP | `virsh console <node>` and watch the boot |
+| Node pings but SSH is refused | cloud-init is still running; it writes the authorized key late in first boot | wait 20 s, or `virsh console <node>` to watch it finish |
+| Node never answers after a host reboot | domains are `autostart = false` by design, so nothing starts behind your back | `make onprem-vms` — it is idempotent and starts them |
 | Nodes share a machine-id | the image was not sealed | re-run `make image`; `99-seal.sh` empties `/etc/machine-id` |
 | WSL disk keeps growing after destroys | `ext4.vhdx` keeps its high-water mark | `make reclaim` |
 | A node is slow | three nesting layers: Hyper-V → WSL2 → KVM → guest | expected; measure before trading WSL away (ADR-0006) |

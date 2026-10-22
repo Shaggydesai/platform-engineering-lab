@@ -5,8 +5,8 @@
 > not stall like the last one.
 
 **Last updated:** 2026-10-22
-**Current module:** 01 — The on-prem substrate, built from code
-**Overall progress:** Module 00 complete, 01 in progress — 1 / 13
+**Current module:** 02 — Kubernetes by hand, with kubeadm
+**Overall progress:** Modules 00 and 01 complete — 2 / 13
 
 ---
 
@@ -14,23 +14,30 @@
 
 | | |
 |:--|:--|
-| **On-prem cluster** | not built — Module 01 rewritten on libvirt (ADR-0006), image not yet built |
+| **On-prem nodes** | **built and verified** — k8s-cp01 .10, k8s-w01 .11, k8s-w02 .12, destroy/apply round trip passes |
+| **On-prem cluster** | no Kubernetes yet — Module 02 |
 | **GCP cluster** | not built — account verified empty, ₹0 running |
 | **AWS cluster** | not built |
 | **Argo CD** | not installed |
 | **ShopVerse running** | no |
 | **Monthly spend** | ₹0 |
 
+To bring the nodes back after a reboot or a `wsl --shutdown`:
+
+```bash
+make onprem-vms            # idempotent; recreates only what is missing
+make onprem-vms-status
+```
+
 ## The next action
 
-Module 00 complete. GCP verified empty. Substrate switched to KVM/libvirt (ADR-0006).
+Module 01 is closed: the gate (`onprem-vms-destroy` then `onprem-vms`) passed with three
+reachable nodes and three distinct machine-ids.
 
-1. `.wslconfig` — raise WSL memory to 26GB, then `wsl --shutdown` (nodes need 20GB, WSL caps at 15)
-2. `make tools` then `exec su - $USER` (libvirt group needs a new login shell)
-3. `make doctor` — now checks /dev/kvm, libvirtd, the storage pool and memory headroom
-4. `make image` (~3 min) then `make onprem-vms` (~2 min)
-5. The gate: `make onprem-vms-destroy && make onprem-vms`
-6. Before any cloud module: AWS and GCP budget alarms (ADR-0003)
+1. **Module 02** — `kubeadm init` on k8s-cp01 by hand, read every flag, join both workers,
+   install a CNI, and understand why the cluster is NotReady until it is there.
+2. Keep `make onprem-diagnose` in reach; it is the first thing to run when a node goes quiet.
+3. Before any cloud module: AWS and GCP budget alarms (ADR-0003) — still outstanding.
 
 Runbook: docs/runbooks/01-onprem-vms.md
 
@@ -48,9 +55,19 @@ Runbook: docs/runbooks/01-onprem-vms.md
 - [x] Install workstation tools — `make tools` installed packer, ansible, argocd, yq, jq, aws
 - [ ] AWS account + budget alarm at $5
 - [ ] GCP account + budget alert at ₹400
-- [x] `make doctor` passes — 16 ok, 0 warnings, 0 failures
+- [x] `make doctor` passes — 20 ok, 0 warnings, 0 failures
 - [x] ADR-0006: libvirt/KVM replaces VMware — Terraform owns Layer 0 properly
-- [ ] `.wslconfig` memory raised to 26GB
+- [x] `.wslconfig` memory raised
+
+## Module 01 checklist
+
+- [x] Packer golden image from Ubuntu's official cloud image — 3 min, 2.8 GB, sealed
+- [x] Terraform owns the network, the volumes, the seeds and the domains
+- [x] Provider pinned exactly (0.9.9) and the config written against the dumped schema
+- [x] Every node reachable on its declared address
+- [x] Three distinct machine-ids — the seal works
+- [x] **The gate: `make onprem-vms-destroy` then `make onprem-vms`, clean**
+- [ ] Serial console on the domains, so a boot can be watched rather than inferred
 
 ## Session log
 
@@ -58,6 +75,7 @@ Keep this short. One line per session: what you did, what broke, what is next.
 
 | Date | Module | What happened | Next |
 |:--|:--|:--|:--|
+| 2026-10-22 | 01 | **Module 01 done.** Nodes were created but unreachable: domains running, CPU time flat at 5.8s, no lease, no SSH. The QEMU command line showed `"driver":"raw"` — `devices.disks[].driver` had been omitted, libvirt defaults to raw, and QEMU read the qcow2 header as a partition table. Adding `driver = { name = "qemu", type = "qcow2" }` fixed it; destroy/apply round trip now passes in 28s. | Module 02: kubeadm by hand |
 | 2026-10-17 | 00 | Project restarted. Decisions and scaffold written before any cluster exists. | Capture laptop specs, create repo |
 | 2026-10-22 | 01 | Sagar asked why VMware rather than QEMU. KVM confirmed working in WSL2, so the substrate switched to libvirt — the deciding argument being that Terraform can own Layer 0 for real, with cloud-init matching how the cloud modules will work. Module 01 rewritten: Packer qemu builder from Ubuntu's cloud image, Terraform libvirt stack. Not yet run. | Raise WSL memory, make tools, make image |
 | 2026-10-22 | 01 | Toolchain installed, `make doctor` clean (16/0/0). Found that Packer cannot run in WSL — the vmware-iso builder executes local VMware binaries — so `make image` now syncs to C:\VMs\build and runs packer.exe through interop. ADR-0005 updated. | Install packer.exe on Windows, build the image |

@@ -5,12 +5,20 @@
 #   ./scripts/diagnose-node.sh k8s-cp01       # one node
 #
 # Ordered by the questions that actually matter, cheapest first:
-#   1. Does the domain exist and is it running?
-#   2. Does its disk have a backing file - i.e. is there an OS on it at all?
-#   3. Can QEMU read the cloud-init seed? Without it there is no user and no network.
-#   4. What did QEMU and libvirt say?
-#   5. Is there a network, a bridge, and a lease?
-#   6. What is on the screen right now?
+#   1. Does the domain exist and is it running - and is it BURNING CPU or has it given up?
+#   2. What format did QEMU open the root disk as? (the raw/qcow2 bug of 2026-10-22)
+#   3. Does that disk have a backing file - i.e. is there an OS on it at all?
+#   4. Can QEMU read the cloud-init seed? Without it there is no user and no network.
+#   5. What did QEMU and libvirt say?
+#   6. Is there a network, a bridge, and a lease?
+#
+# Two lessons from the first real use of this script, both encoded below:
+#   - `qemu-img info` on a running domain fails with a write-lock error unless you pass
+#     --force-share. The first version of this script did not, so its single most
+#     important check printed an error instead of an answer.
+#   - The question "what format is this disk?" has two answers: what the FILE is, and what
+#     QEMU was TOLD it is. Only the second one is ever wrong, and only QEMU's command line
+#     in the domain log knows it. That line is where the bug was actually found.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -39,15 +47,40 @@ for n in "${nodes[@]}"; do
   sub "domain state"
   $V dominfo "$n" 2>&1 | grep -E 'State|CPU|Used memory|Autostart' || echo "  domain not found"
 
-  sub "is it actually executing? (cpu time should climb between runs)"
+  sub "is it actually executing? (run twice - cpu time must CLIMB)"
+  # A booting VM burns CPU. A VM that found nothing bootable sits at ~5s forever. Flat CPU
+  # time is not "still booting", it is "gave up" - and it means look at the disk, not the
+  # network.
   $V domstats "$n" --vcpu 2>&1 | grep -E 'vcpu.0.time|state' || true
+
+  sub "what format did QEMU OPEN the root disk as? <-- READ THIS FIRST"
+  # libvirt defaults a disk with no <driver> element to type="raw". QEMU then hands the
+  # guest the qcow2 header as though it were a partition table: the VM boots, finds no
+  # bootloader, and stops. Everything downstream - no lease, no ping, no SSH - is a
+  # consequence, so checking this first saves chasing three symptoms of one cause.
+  if sudo test -r "/var/log/libvirt/qemu/$n.log"; then
+    fmt=$(sudo grep -o '"node-name":"libvirt-[0-9]*-format","read-only":[a-z]*,"driver":"[a-z0-9]*"' \
+            "/var/log/libvirt/qemu/$n.log" | tail -4)
+    if [[ -z "$fmt" ]]; then
+      echo "  (no -blockdev format line in the log; libvirt may be using an older syntax)"
+    else
+      echo "$fmt" | sed 's/^/  /'
+      if echo "$fmt" | grep -q '"read-only":false,"driver":"raw"'; then
+        echo
+        echo "  *** The writable disk was opened as RAW. If the file is qcow2 this is the bug. ***"
+        echo "  *** Fix: devices.disks[0].driver = { name = \"qemu\", type = \"qcow2\" }       ***"
+      fi
+    fi
+  fi
 
   sub "root disk - BACKING FILE IS THE KEY LINE"
   # If 'backing file' is absent, the volume is blank: there is no operating system on it,
   # the VM is sitting at a boot prompt, and nothing will ever answer SSH.
+  # --force-share is required while the domain is running; without it QEMU refuses to open
+  # the image because the VM holds a write lock, and this check tells you nothing.
   disk=$($V domblklist "$n" 2>/dev/null | awk '/vda/{print $2}')
   echo "  path: ${disk:-<none>}"
-  [[ -n "$disk" ]] && sudo qemu-img info "$disk" 2>&1 | sed 's/^/  /'
+  [[ -n "$disk" ]] && sudo qemu-img info --force-share "$disk" 2>&1 | sed 's/^/  /'
 
   sub "cloud-init seed - QEMU MUST BE ABLE TO READ THIS"
   # No readable seed means no user, no SSH key and no network config, so no SSH - even
@@ -91,8 +124,12 @@ hr "next"
 cat <<'EOT'
   Read the output in this order:
 
-  1. "backing file" missing on vda  -> the node disk is blank, no OS. Volume/backing-store bug.
-  2. seed not readable by libvirt-qemu -> cloud-init never ran. No user, no network, no SSH.
-  3. qemu log shows an error        -> the VM never started properly.
-  4. domain running, cpu time climbing, no lease -> it booted but networking did not come up.
+  1. cpu time FLAT across two runs   -> it is not booting. Go to 2 and 3, ignore the network.
+  2. writable disk opened as "raw"   -> QEMU read the qcow2 header as a partition table.
+                                        Add driver = { name = "qemu", type = "qcow2" }.
+  3. "backing file" missing on vda   -> the volume is blank, no OS. Backing-store bug.
+  4. seed not readable by libvirt-qemu -> cloud-init never ran. No user, no network, no SSH.
+  5. qemu log shows an error         -> the VM never started properly.
+  6. cpu time CLIMBING but no lease  -> it is booting; networking or cloud-init is the problem.
+                                        This is the only branch where the network matters.
 EOT
