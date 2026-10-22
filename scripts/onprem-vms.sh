@@ -18,6 +18,13 @@ ACTION="${1:-create}"
 FORCE="${2:-}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIG="${CONFIG:-$REPO_ROOT/clusters/onprem/nodes.json}"
+# VMware Workstation installs to different paths depending on the build.
+if [[ -z "${VMRUN:-}" ]]; then
+  for _p in "/mnt/c/Program Files (x86)/VMware/VMware Workstation/vmrun.exe" \
+            "/mnt/c/Program Files/VMware/VMware Workstation/vmrun.exe"; do
+    [[ -x "$_p" ]] && { VMRUN="$_p"; break; }
+  done
+fi
 VMRUN="${VMRUN:-/mnt/c/Program Files (x86)/VMware/VMware Workstation/vmrun.exe}"
 
 c_step=$'\033[36m'; c_ok=$'\033[32m'; c_warn=$'\033[33m'; c_err=$'\033[31m'; c_off=$'\033[0m'
@@ -34,9 +41,9 @@ preflight() {
   grep -qi microsoft /proc/version \
     || die "not running under WSL. Use scripts/onprem-vms.ps1 from PowerShell instead."
   [[ -x "$VMRUN" ]] \
-    || die "vmrun.exe not found at:
-       $VMRUN
-     Set VMRUN=/mnt/c/path/to/vmrun.exe if VMware is installed elsewhere."
+    || die "vmrun.exe not found. Looked in both Program Files locations.
+     Find it with:   ls -d /mnt/c/Program*/VMware*/VMware*
+     Then:           VMRUN='/mnt/c/.../vmrun.exe' ./scripts/onprem-vms.sh $ACTION"
   "$VMRUN" -T ws list >/dev/null 2>&1 \
     || die "vmrun.exe is present but would not run. Check Windows interop:
        cat /proc/sys/fs/binfmt_misc/WSLInterop   (should say 'enabled')"

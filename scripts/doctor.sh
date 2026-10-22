@@ -3,10 +3,20 @@
 set -uo pipefail
 
 ok=0; warn=0; fail=0
+version_of() { # tools disagree about how to report their version
+  case "$1" in
+    kubectl) kubectl version --client 2>/dev/null | head -1 ;;
+    helm)    helm version --short 2>/dev/null ;;
+    argocd)  argocd version --client --short 2>/dev/null ;;
+    aws)     aws --version 2>&1 ;;
+    *)       "$1" --version 2>&1 | head -1 ;;
+  esac
+}
+
 check() { # name  command  required(yes|no)  hint
   local name="$1" cmd="$2" required="$3" hint="${4:-}"
   if command -v "$cmd" >/dev/null 2>&1; then
-    local v; v=$("$cmd" --version 2>&1 | head -1 | cut -c1-60)
+    local v; v=$(version_of "$cmd" | head -1 | cut -c1-60)
     printf '  \033[32m[ ok ]\033[0m %-16s %s\n' "$name" "$v"; ((ok++))
   elif [ "$required" = yes ]; then
     printf '  \033[31m[fail]\033[0m %-16s missing. %s\n' "$name" "$hint"; ((fail++))
@@ -41,11 +51,16 @@ if grep -qi microsoft /proc/version 2>/dev/null; then
     /mnt/*) printf '  \033[31m[fail]\033[0m %-16s repo is on %s - clone it inside WSL (~/) instead. See ADR-0005.\n' "repo location" "$PWD"; ((fail++)) ;;
     *)      printf '  \033[32m[ ok ]\033[0m %-16s %s (native WSL filesystem)\n' "repo location" "$PWD"; ((ok++)) ;;
   esac
-  VMRUN="/mnt/c/Program Files (x86)/VMware/VMware Workstation/vmrun.exe"
-  if [ -x "$VMRUN" ]; then
-    printf '  \033[32m[ ok ]\033[0m %-16s reachable through interop\n' "vmrun.exe"; ((ok++))
+  VMRUN=""
+  for p in "/mnt/c/Program Files (x86)/VMware/VMware Workstation/vmrun.exe" \
+           "/mnt/c/Program Files/VMware/VMware Workstation/vmrun.exe"; do
+    [ -x "$p" ] && { VMRUN="$p"; break; }
+  done
+  if [ -n "$VMRUN" ]; then
+    printf '  \033[32m[ ok ]\033[0m %-16s %s\n' "vmrun.exe" "$("$VMRUN" 2>&1 | head -1 | cut -c1-44)"; ((ok++))
   else
-    printf '  \033[33m[warn]\033[0m %-16s not found (needed from Module 01)\n' "vmrun.exe"; ((warn++))
+    printf '  \033[33m[warn]\033[0m %-16s not found - is VMware Workstation installed?\n' "vmrun.exe"
+    printf '         %s\n' "find it with:  ls -d /mnt/c/Program*/VMware*/VMware*"; ((warn++))
   fi
 else
   printf '  \033[33m[warn]\033[0m %-16s not under WSL - see ADR-0005\n' "WSL"; ((warn++))
@@ -59,10 +74,12 @@ if git -C . rev-parse >/dev/null 2>&1; then
   else
     printf '  \033[31m[fail]\033[0m %-16s missing - CRLF/BOM bugs incoming\n' ".gitattributes"; ((fail++))
   fi
-  if git grep -lI $'\r$' -- . >/dev/null 2>&1; then
-    printf '  \033[33m[warn]\033[0m %-16s CRLF found in tracked files\n' "line endings"; ((warn++))
+  # .ps1 and .bat are declared eol=crlf in .gitattributes, so CRLF there is correct.
+  bad_crlf=$(git grep -lI $'\r$' -- . 2>/dev/null | grep -vE '\.(ps1|bat)$' || true)
+  if [ -n "$bad_crlf" ]; then
+    printf '  \033[33m[warn]\033[0m %-16s CRLF in: %s\n' "line endings" "$(echo "$bad_crlf" | tr '\n' ' ')"; ((warn++))
   else
-    printf '  \033[32m[ ok ]\033[0m %-16s no CRLF in tracked files\n' "line endings"; ((ok++))
+    printf '  \033[32m[ ok ]\033[0m %-16s correct (CRLF only where .gitattributes asks for it)\n' "line endings"; ((ok++))
   fi
 fi
 

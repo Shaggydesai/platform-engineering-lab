@@ -19,6 +19,10 @@ help: ## Show this help
 
 # ---------------------------------------------------------------- workstation
 
+.PHONY: tools
+tools: ## Install the workstation toolchain inside WSL (idempotent)
+	@bash scripts/install-tools.sh
+
 .PHONY: doctor
 doctor: ## Check that the workstation has everything this project needs
 	@bash scripts/doctor.sh
@@ -30,9 +34,8 @@ status: ## Show where we are (reads STATUS.md)
 # ---------------------------------------------------------------- on-prem
 
 .PHONY: image
-image: ## Module 01 - build the golden Ubuntu image with Packer (run from Windows)
-	@echo "run on the Windows workstation:"
-	@echo "  cd packer/ubuntu-2404 && packer init . && packer build ."
+image: ## Module 01 - build the golden Ubuntu image with Packer
+	@cd packer/ubuntu-2404 && packer init . && packer build .
 
 .PHONY: onprem-vms
 onprem-vms: ## Module 01 - clone the three on-prem VMs from the golden image
