@@ -42,7 +42,7 @@ onprem-vms: ## Module 01 - build the three on-prem nodes (terraform apply)
 	@terraform -chdir=terraform/onprem init -input=false
 	@terraform -chdir=terraform/onprem apply -auto-approve
 
-.PHONY: onprem-vms-status
+.PHONY: onprem-vms-plan
 onprem-vms-plan: ## Show what would change without changing it
 	@terraform -chdir=terraform/onprem plan
 
