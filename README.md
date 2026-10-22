@@ -92,6 +92,7 @@ make cost-check    # fails loudly if anything billable survived
 | [0001](docs/adr/0001-three-substrates-one-platform.md) | Three substrates, one platform definition |
 | [0002](docs/adr/0002-gitops-ownership-model.md) | GitOps ownership model — who owns what, decided before anything is installed |
 | [0003](docs/adr/0003-cost-guardrails.md) | Cost guardrails for free-tier-only cloud use |
+| [0004](docs/adr/0004-onprem-substrate.md) | On-prem substrate and VM sizing — three kubeadm VMs on the SSD |
 
 ## The workload
 
