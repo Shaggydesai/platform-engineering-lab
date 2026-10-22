@@ -1,0 +1,59 @@
+#cloud-config
+# Ubuntu 24.04 autoinstall. This file replaces every screen of the installer that the previous
+# attempt clicked through by hand - language, keyboard, storage layout, user, SSH.
+#
+# Nothing here assigns identity: the hostname is a placeholder that the clone script overwrites,
+# and 99-seal.sh removes the machine-id and SSH host keys before the image is sealed.
+autoinstall:
+  version: 1
+
+  locale: en_US.UTF-8
+  keyboard:
+    layout: us
+
+  # Let the installer use DHCP. Static addressing is applied per node at clone time, which is
+  # why this project never edits VMware's DHCP configuration - that cost the last attempt an
+  # entire evening and taught nothing.
+  network:
+    version: 2
+    ethernets:
+      any:
+        match:
+          name: "en*"
+        dhcp4: true
+
+  storage:
+    layout:
+      name: lvm
+      # LVM because growing /var later is a twenty-second operation instead of a rebuild.
+      # Kubernetes nodes fill /var with images and logs; this is not hypothetical.
+
+  identity:
+    hostname: ubuntu-template          # placeholder - overwritten per node at clone time
+    username: sagar
+    # Build-time password only. 40-harden.sh disables password authentication over SSH
+    # before the image is sealed; key auth is what remains.
+    # Regenerate with:  openssl passwd -6 'your-password'
+    password: "$6$eAwkZ8yi7Az2VIib$3pwyRy3T4BHxU3ZOTkWjQiiDzETdalFSuLqW4SdSniABbqwQBjjynOnjB/N68au853B/LegRjg62kXtAPNEbg/"
+
+  ssh:
+    install-server: true
+    allow-pw: true                     # needed for Packer's first connection; hardened later
+
+  packages:
+    - open-vm-tools                    # required: vmrun getGuestIPAddress depends on it
+    - curl
+    - gnupg
+    - ca-certificates
+    - apt-transport-https
+
+  # Keep the installer minimal and fast; everything else is installed by the provisioners
+  # where it is visible in version control rather than buried in an answer file.
+  updates: security
+  shutdown: reboot
+
+  late-commands:
+    - echo 'sagar ALL=(ALL) NOPASSWD:ALL' > /target/etc/sudoers.d/90-sagar
+    - chmod 440 /target/etc/sudoers.d/90-sagar
+    # Predictable interface naming, so netplan templates are the same on every node
+    - curtin in-target --target=/target -- systemctl enable ssh

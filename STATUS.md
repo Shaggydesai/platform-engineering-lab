@@ -5,7 +5,7 @@
 > not stall like the last one.
 
 **Last updated:** 2026-10-22
-**Current module:** 00 — Foundations (repository, decisions, guardrails)
+**Current module:** 01 — The on-prem substrate, built from code
 **Overall progress:** 0 / 12 modules complete
 
 ---
@@ -14,7 +14,7 @@
 
 | | |
 |:--|:--|
-| **On-prem cluster** | not built — substrate decided (3 VMs, kubeadm, on C:) — see ADR-0004 |
+| **On-prem cluster** | not built — Module 01 code written, image not yet built |
 | **GCP cluster** | not built |
 | **AWS cluster** | not built |
 | **Argo CD** | not installed |
@@ -28,7 +28,15 @@
 3. Create the AWS and GCP accounts with budget alarms **before** any resource exists (ADR-0003).
 4. `make doctor` until it passes.
 
-Then Module 01: build the three VMs from code.
+Then Module 01, which is already written and waiting:
+
+```powershell
+cd packer\ubuntu-2404 ; packer init . ; packer build .      # ~20 min, once
+cd ..\.. ; .\scripts\onprem-vms.ps1 -Action create          # ~10 min, repeatable
+```
+
+Gate: destroy all three VMs, rebuild, and get identical nodes back. See
+docs/runbooks/01-onprem-vms.md.
 
 ## Module 00 checklist
 
@@ -51,4 +59,5 @@ Keep this short. One line per session: what you did, what broke, what is next.
 | Date | Module | What happened | Next |
 |:--|:--|:--|:--|
 | 2026-10-17 | 00 | Project restarted. Decisions and scaffold written before any cluster exists. | Capture laptop specs, create repo |
+| 2026-10-22 | 01 | Module 01 written: Packer golden image (autoinstall, containerd, kubeadm held, sealed identity) plus a clone script that discovers the NAT subnet instead of editing VMware's DHCP config. Not yet run. | Build the image, run the create/destroy round trip |
 | 2026-10-22 | 00 | Hardware captured: 32 GB, 12 threads, C: 106 GB SSD, D: 625 GB HDD. ADR-0004 fixes the substrate: 3 kubeadm VMs on the SSD, because etcd on a mechanical disk is a known failure mode. Repo created, scaffold ready to push. | Push scaffold, budget alarms, `make doctor` |

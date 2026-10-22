@@ -29,9 +29,22 @@ status: ## Show where we are (reads STATUS.md)
 
 # ---------------------------------------------------------------- on-prem
 
+.PHONY: image
+image: ## Module 01 - build the golden Ubuntu image with Packer (run from Windows)
+	@echo "run on the Windows workstation:"
+	@echo "  cd packer/ubuntu-2404 && packer init . && packer build ."
+
 .PHONY: onprem-vms
-onprem-vms: ## Module 01 - build the on-prem VMs from code
-	@echo "not implemented yet - Module 01"; exit 1
+onprem-vms: ## Module 01 - clone the three on-prem VMs from the golden image
+	@powershell.exe -ExecutionPolicy Bypass -File scripts/onprem-vms.ps1 -Action create
+
+.PHONY: onprem-vms-status
+onprem-vms-status: ## Show the on-prem VMs and their addresses
+	@powershell.exe -ExecutionPolicy Bypass -File scripts/onprem-vms.ps1 -Action status
+
+.PHONY: onprem-vms-destroy
+onprem-vms-destroy: ## Destroy the on-prem VMs (the image is kept)
+	@powershell.exe -ExecutionPolicy Bypass -File scripts/onprem-vms.ps1 -Action destroy
 
 .PHONY: onprem-up
 onprem-up: ## Module 03 - build the whole on-prem cluster from nothing
