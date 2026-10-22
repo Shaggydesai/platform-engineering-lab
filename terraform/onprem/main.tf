@@ -165,11 +165,24 @@ resource "libvirt_volume" "seed" {
     }
   }
 
-  # raw, not qcow2 - this is an ISO 9660 image. Same lesson as the root disk, opposite
-  # answer: what matters is telling QEMU the truth about the file it is given.
+  # "iso", not "raw" - and this is a genuinely confusing corner, because the same file has
+  # two different correct formats depending on who is asking.
+  #
+  #   STORAGE format (here): what the file IS. libvirt probes it, finds an ISO 9660
+  #     filesystem, and calls it "iso". Declaring "raw" makes the provider fail with
+  #     "produced an unexpected new value: was raw, but now iso" - it does not reconcile
+  #     its own declared value with what libvirt reports back. That is a provider bug, but
+  #     "iso" is also simply the true answer.
+  #
+  #   DISK DRIVER type (in the domain below): how QEMU should OPEN it. There is no "iso"
+  #     block driver; QEMU reads the image as a flat sequence of bytes and the guest's
+  #     kernel interprets the ISO 9660 inside. So that one stays "raw".
+  #
+  # Both are right at once. "raw" there means "do not interpret this", not "this file is
+  # unformatted" - which is exactly the distinction the qcow2 incident turned on.
   target = {
     format = {
-      type = "raw"
+      type = "iso"
     }
   }
 }

@@ -130,6 +130,7 @@ all nodes reachable, machine-ids unique
 | `COW volume smaller than backing file` | a node's `disk_gb` is below the Packer `disk_size` | nodes size **up** from the 20 GB base, never down |
 | Node pings but SSH is refused | cloud-init is still running; it writes the authorized key late in first boot | wait 20 s, or `make onprem-boot-log NODE=<node>` to watch it finish |
 | The console log is empty while the domain runs | nothing reached the serial port, so the guest never got as far as GRUB | the disk is the suspect, not the network — check the `driver` row above |
+| `Provider produced inconsistent result: .target.format.type: was "raw", but now "iso"` | the seed volume was declared `raw`; libvirt probes the file, finds ISO 9660 and reports `iso` | declare `type = "iso"` on `libvirt_volume.seed`. The domain's disk `driver` stays `raw` — see the comment in `main.tf`, the two mean different things |
 | Node never answers after a host reboot | domains are `autostart = false` by design, so nothing starts behind your back | `make onprem-vms` — it is idempotent and starts them |
 | Nodes share a machine-id | the image was not sealed | re-run `make image`; `99-seal.sh` empties `/etc/machine-id` |
 | WSL disk keeps growing after destroys | `ext4.vhdx` keeps its high-water mark | `make reclaim` |
