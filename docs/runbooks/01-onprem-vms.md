@@ -120,6 +120,27 @@ while a node runs - cloud-init only reads it on first boot - but if the file is 
 the domain will refuse to start because one of its disks is missing. If that happens,
 `terraform apply` recreates the ISO.
 
+**"Update in-place" on a domain still reboots it.** Adding the console was planned as
+`3 to change, 0 to destroy` — which reads like a hot attach. It is not: the console log's first
+entry is a complete boot, kernel line one onward, timestamped at the moment of the apply. The
+provider redefined the domain and restarted it.
+
+This is harmless today and will not be from Module 02 onward. **Once Kubernetes is running, a
+Terraform change to `devices`, `cpu`, `memory` or `os` reboots every node it touches**, and three
+nodes rebooting at once takes etcd with it. From Module 02:
+
+```bash
+make onprem-vms-plan          # read it. "update in-place" on a domain means a reboot.
+```
+
+and if a domain must change, drain and do them one at a time:
+
+```bash
+kubectl drain k8s-w01 --ignore-daemonsets --delete-emptydir-data
+terraform -chdir=terraform/onprem apply -target='libvirt_domain.node["k8s-w01"]'
+kubectl uncordon k8s-w01
+```
+
 **There is no graphics device, deliberately.** `virsh screenshot` will not work. For a headless
 server a text console is strictly more useful — it is copyable, greppable, and recorded — and a
 VNC port is one more listening socket to secure for no benefit.

@@ -38,9 +38,6 @@ Module 02 is written and ready to walk through. The CNI is decided (ADR-0007: Ci
 kube-proxy kept until Module 04 removes it deliberately), and both CIDRs are recorded in
 `clusters/onprem/nodes.json` so nothing can disagree about them later.
 
-0. `make onprem-vms` once more — it adds a serial console to each domain, so Terraform will
-   replace the three domains (about 30 seconds). Then `make onprem-boot-log NODE=k8s-cp01`
-   shows you a boot for the first time.
 1. **Work through `docs/runbooks/cluster-bootstrap.md`, steps 0 → 7.** It is written as a lab,
    not a script: each step says what to look at and why. Two sessions, not one.
 2. Do not skip step 4 — the broken, `NotReady`, pre-CNI cluster is the most instructive state
@@ -85,6 +82,7 @@ Keep this short. One line per session: what you did, what broke, what is next.
 
 | Date | Module | What happened | Next |
 |:--|:--|:--|:--|
+| 2026-10-22 | 01 | Serial console added to every domain — interactive on loopback and recorded to a file. It paid for itself immediately: the first boot log proved the qcow2 fix (`vda: vda1 vda14 vda15 vda16` — a partition table, where before QEMU saw none) and revealed that a Terraform "update in-place" on a domain silently **reboots** it. That is harmless now and would take etcd down from Module 02, so it is written up in the runbook. Image now disables ufw and boots to multi-user. | Module 02 step 0 |
 | 2026-10-22 | 01 | **Module 01 done.** Nodes were created but unreachable: domains running, CPU time flat at 5.8s, no lease, no SSH. The QEMU command line showed `"driver":"raw"` — `devices.disks[].driver` had been omitted, libvirt defaults to raw, and QEMU read the qcow2 header as a partition table. Adding `driver = { name = "qemu", type = "qcow2" }` fixed it; destroy/apply round trip now passes in 28s. | Module 02: kubeadm by hand |
 | 2026-10-17 | 00 | Project restarted. Decisions and scaffold written before any cluster exists. | Capture laptop specs, create repo |
 | 2026-10-22 | 01 | Sagar asked why VMware rather than QEMU. KVM confirmed working in WSL2, so the substrate switched to libvirt — the deciding argument being that Terraform can own Layer 0 for real, with cloud-init matching how the cloud modules will work. Module 01 rewritten: Packer qemu builder from Ubuntu's cloud image, Terraform libvirt stack. Not yet run. | Raise WSL memory, make tools, make image |

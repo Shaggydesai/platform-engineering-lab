@@ -94,10 +94,23 @@ timedatectl | grep -E 'synchronized|NTP'
 
 # 7. every node can name every other node, because cloud-init wrote /etc/hosts
 getent hosts k8s-cp01.platform.local k8s-w01 k8s-w02
+
+# 8. no host firewall. Kubernetes expects to own the host's packet filtering: kube-proxy
+#    and Cilium each write their own rules, and a second firewall with a default-deny
+#    policy fights them. It does not fail cleanly either - the cluster appears to work
+#    and then loses some traffic depending on which node a pod landed on.
+sudo ufw status || echo "ufw not installed - fine"
+sudo iptables -S | head -5      # should be the three default ACCEPT policies and nothing else
 ```
 
 Expect: `SystemdCgroup = true`, both sysctls `= 1`, both modules loaded, no swap, three holds,
-kubelet `enabled` but `activating`/`failed`, clock synchronised, all three names resolving.
+kubelet `enabled` but `activating`/`failed`, clock synchronised, all three names resolving, and
+ufw `inactive`.
+
+> **If `ufw` reports `active`**, stop and rebuild the image rather than disabling it by hand on
+> three nodes: `40-harden.sh` disables it, so an active ufw means the nodes predate that change.
+> `make image && make onprem-vms-destroy && make onprem-vms` costs four minutes, and fixing the
+> image is the difference between a fix that survives the next rebuild and one that does not.
 
 > **If `timedatectl` says the clock is not synchronised**, fix it before continuing:
 > `sudo systemctl restart chrony && sleep 5 && chronyc tracking`. A clock that is minutes out
