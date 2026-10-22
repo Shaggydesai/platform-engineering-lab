@@ -226,14 +226,14 @@ resource "terraform_data" "verify" {
       for addr in ${join(" ", [for n in local.cfg.nodes : n.address])}; do
         echo "waiting for $addr"
         ok=0
-        for i in $(seq 1 60); do
+        for i in $(seq 1 24); do
           if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
                  -o ConnectTimeout=5 -o LogLevel=ERROR \
                  "$user@$addr" 'exit 0' 2>/dev/null; then ok=1; break; fi
           sleep 5
         done
         if [ "$ok" != 1 ]; then
-          echo "ERROR: $addr never answered ssh. Try: virsh -c qemu:///system console <node>"
+          echo "ERROR: $addr did not answer ssh within 2 minutes. Run: make onprem-diagnose"
           fail=1; continue
         fi
         read -r host id < <(ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \

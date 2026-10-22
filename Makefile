@@ -57,6 +57,10 @@ onprem-vms-status: ## Show the on-prem nodes and their addresses
 	@virsh -c qemu:///system list --all
 	@terraform -chdir=terraform/onprem output -json nodes 2>/dev/null | jq -r 'to_entries[] | "\(.key)\t\(.value.role)\t\(.value.address)"' || true
 
+.PHONY: onprem-diagnose
+onprem-diagnose: ## Explain why a node is unreachable (NODE=k8s-cp01 for one)
+	@bash scripts/diagnose-node.sh $(NODE)
+
 .PHONY: onprem-vms-destroy
 onprem-vms-destroy: ## Destroy the on-prem nodes (the golden image is kept)
 	@terraform -chdir=terraform/onprem destroy
