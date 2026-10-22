@@ -70,10 +70,33 @@ Prerequisite, once, from PowerShell — WSL defaults to half your RAM and the no
 memory=26GB
 processors=10
 nestedVirtualization=true
+
+# autoMemoryReclaim is NOT a [wsl2] key. Put it here or WSL prints
+# "Unknown key 'wsl2.autoMemoryReclaim'" on every start and ignores it.
+[experimental]
 autoMemoryReclaim=gradual
 ```
 
 then `wsl --shutdown`. `make doctor` fails loudly if this was not done.
+
+## After WSL restarts
+
+Whenever WSL shuts down — `wsl --shutdown`, a Windows restart, or just long enough idle — libvirt
+stops with it and the nodes are left defined but not running. SSH then fails with **no route to
+host**, because the `virbr1` bridge is gone too.
+
+```bash
+make onprem-vms            # idempotent: starts what exists, creates only what is missing
+make onprem-vms-status
+```
+
+Nothing is lost. The node disks are files in the libvirt pool, so anything on them — including
+`/var/lib/etcd` — survives. The control plane comes back by itself, because the kubelet is a
+systemd unit and the static pod manifests are on disk; no `kubeadm` command is needed or wanted.
+
+This is worth doing deliberately once, because "the host went away without warning" is the one
+failure a laptop lab will hand you repeatedly, and knowing the recovery is one idempotent command
+is the difference between a lab you use and a lab you are afraid of.
 
 ## The gate for this module — **passed 2026-10-22**
 
