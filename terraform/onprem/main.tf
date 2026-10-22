@@ -162,6 +162,15 @@ resource "libvirt_domain" "node" {
     disks = [
       {
         # The node's root disk.
+        #
+        # The driver block is NOT optional. libvirt defaults to type "raw", so without it
+        # QEMU hands the guest the qcow2 header as though it were a partition table: the
+        # VM boots, finds nothing bootable, and sits there forever with no network and no
+        # SSH. The QEMU command line is where this shows up - look for "driver":"raw".
+        driver = {
+          name = "qemu"
+          type = "qcow2"
+        }
         source = {
           file = {
             file = libvirt_volume.node[each.key].path
@@ -174,7 +183,11 @@ resource "libvirt_domain" "node" {
       },
       {
         # The cloud-init NoCloud seed. cloud-init finds it by its "cidata" filesystem label,
-        # so the bus and device name do not matter.
+        # so the bus and device name do not matter. raw is correct here - it is an ISO image.
+        driver = {
+          name = "qemu"
+          type = "raw"
+        }
         source = {
           file = {
             file = libvirt_cloudinit_disk.node[each.key].path

@@ -88,6 +88,7 @@ two match. Until that round trip works, Module 02 does not start.
 
 | Symptom | Cause | Fix |
 |:--|:--|:--|
+| Domain runs, CPU time flat at ~5s, no lease, no ping, no SSH | the disk `driver` block was omitted, so libvirt defaulted to `type="raw"` and QEMU read the qcow2 header as a partition table | set `driver = { name = "qemu", type = "qcow2" }` on the disk. Confirm with `sudo grep 'driver.:.raw' /var/log/libvirt/qemu/<node>.log` |
 | `/dev/kvm not writable` | not in the kvm/libvirt groups yet | `make tools`, then `exec su - $USER` |
 | `cannot reach qemu:///system` | same, or libvirtd not running | `sudo systemctl enable --now libvirtd` |
 | `storage pool default missing` | fresh libvirt install | `make tools` defines and starts it |
@@ -97,6 +98,18 @@ two match. Until that round trip works, Module 02 does not start.
 | Nodes share a machine-id | the image was not sealed | re-run `make image`; `99-seal.sh` empties `/etc/machine-id` |
 | WSL disk keeps growing after destroys | `ext4.vhdx` keeps its high-water mark | `make reclaim` |
 | A node is slow | three nesting layers: Hyper-V → WSL2 → KVM → guest | expected; measure before trading WSL away (ADR-0006) |
+
+## Known caveats
+
+**The cloud-init seed lives in /tmp.** `libvirt_cloudinit_disk` in 0.9 has no `pool`
+attribute and writes its ISO to `/tmp/terraform-provider-libvirt-cloudinit/`. That is fine
+while a node runs - cloud-init only reads it on first boot - but if the file is cleaned away,
+the domain will refuse to start because one of its disks is missing. If that happens,
+`terraform apply` recreates the ISO.
+
+**There is no serial console or graphics device yet.** `virsh console` and `virsh screenshot`
+will not work until those are added to `devices`. `make onprem-diagnose` falls back to the
+QEMU log, which is where the raw/qcow2 bug above was actually found.
 
 ## Reaching a node from a Windows browser
 
