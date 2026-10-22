@@ -15,7 +15,8 @@
 | | |
 |:--|:--|
 | **On-prem nodes** | **built and verified** — k8s-cp01 .10, k8s-w01 .11, k8s-w02 .12, destroy/apply round trip passes |
-| **On-prem cluster** | no Kubernetes yet — Module 02 |
+| **On-prem cluster** | control plane initialised, v1.34.12 — `NotReady` until Cilium, workers not joined |
+| **Certificates expire** | **2027-10-22** — `sudo kubeadm certs renew all` before then, or nothing works |
 | **GCP cluster** | not built — account verified empty, ₹0 running |
 | **AWS cluster** | not built |
 | **Argo CD** | not installed |

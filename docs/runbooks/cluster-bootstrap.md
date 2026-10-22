@@ -398,10 +398,16 @@ visible: host-network components first, then the network, then everything that n
 Now look at the pieces:
 
 ```bash
-# the static pods have no owner - nothing created them, the kubelet just runs them
-kubectl -n kube-system get pod kube-apiserver-k8s-cp01 -o jsonpath='{.metadata.ownerReferences}'; echo
+# What owns a static pod? Not a Deployment or a DaemonSet - the NODE does.
+kubectl -n kube-system get pod kube-apiserver-k8s-cp01 \
+  -o jsonpath='{.metadata.ownerReferences}'; echo
+# [{"apiVersion":"v1","controller":true,"kind":"Node","name":"k8s-cp01",...}]
 
-# prove it: the manifest on disk IS the deployment mechanism
+kubectl -n kube-system get pod kube-apiserver-k8s-cp01 \
+  -o jsonpath='{.metadata.annotations}' | tr ',' '\n' | grep mirror
+# "kubernetes.io/config.mirror":"..."
+
+# prove the manifest on disk IS the deployment mechanism
 sudo ls -l /etc/kubernetes/manifests/
 
 # etcd holds everything. Talk to it directly, once, so it is not a black box.
@@ -421,18 +427,35 @@ sudo kubeadm certs check-expiration | head -15
 > fixes it, but only if you know that is the question. In Module 03 the Ansible role will check
 > this; for now, note the date in `STATUS.md`.
 
-An experiment worth doing, because it makes static pods concrete:
+**That annotation is the whole trick.** A static pod's API object is a *mirror pod*: a read-only
+copy the kubelet publishes so that `kubectl get pods` can show you something. It is not the pod.
+The real pod is a container the kubelet started from a file, and the API server is reading a
+reflection of it — which is how the API server's own pod can appear in the API server.
+
+The ownership is upside-down from everything else in Kubernetes. Normally the desired state lives
+in etcd and a controller makes reality match it. Here reality lives on disk and the API object
+is downstream of it.
+
+Two experiments, in this order, because the contrast is the lesson:
 
 ```bash
+# 1. Delete the API object. Nothing happens to the component.
+kubectl -n kube-system delete pod kube-scheduler-k8s-cp01
+kubectl -n kube-system get pod | grep scheduler     # back within a second, same age-ish
+sudo crictl ps | grep scheduler                      # the container never restarted
+```
+
+```bash
+# 2. Move the file. The component actually stops.
 sudo mv /etc/kubernetes/manifests/kube-scheduler.yaml /tmp/
 sleep 20; kubectl -n kube-system get pod | grep scheduler   # gone
 sudo mv /tmp/kube-scheduler.yaml /etc/kubernetes/manifests/
 sleep 20; kubectl -n kube-system get pod | grep scheduler   # back
 ```
 
-You just deleted and restored a control-plane component by moving a file. No API call, no
-controller. That is what "static pod" means, and it is also your recovery path when the API
-server itself will not start.
+The first deletes a reflection and the kubelet redraws it. The second changes the thing being
+reflected. This is also your recovery path when the API server itself will not start: you cannot
+`kubectl` your way out of that, but you can always edit a file.
 
 ---
 
