@@ -1,0 +1,66 @@
+# Cilium values for the on-prem cluster.
+#
+#   helm install cilium cilium/cilium --version 1.20.3 \
+#     --namespace kube-system -f ansible/roles/cilium/files/cilium-values.yaml
+#
+# This file lives under ansible/roles/cilium/ because that is where it is GOING. In
+# Module 02 it is applied by hand - the one manual install in this project, permitted
+# because the CNI is Layer 1 and Argo CD cannot run without a pod network (ADR-0002).
+# Module 03 wraps this exact file in an Ansible role, unchanged.
+#
+# Every choice here is justified in docs/adr/0007-cni-choice.md. Pinned deliberately:
+# a CNI that changes version on its own is a cluster that changes behaviour on its own.
+
+ipam:
+  # cluster-pool: the Cilium operator carves per-node ranges out of the pod CIDR itself,
+  # rather than trusting Node.spec.podCIDR from kube-controller-manager. One component
+  # owns address allocation instead of two agreeing about it.
+  mode: cluster-pool
+  operator:
+    clusterPoolIPv4PodCIDRList:
+      - 10.244.0.0/16
+    clusterPoolIPv4MaskSize: 24      # 254 pods per node, up to 256 nodes - ample
+
+# VXLAN rather than native routing. Native routing is faster but needs the underlay to
+# route pod CIDRs between nodes; libvirt's NAT network will not, and GKE and EKS each do
+# something different again. One encapsulation mode that behaves identically on all three
+# substrates is worth more here than throughput.
+routingMode: tunnel
+tunnelProtocol: vxlan
+
+# OFF for now, on purpose. kube-proxy stays so that Module 04 can remove it as a
+# deliberate before/after exercise rather than as a mystery, and so that the first
+# bootstrap has three suspects when a Service does not answer instead of four.
+kubeProxyReplacement: false
+
+# Tell cilium-agent how to reach the API server DIRECTLY, by name and port, instead of
+# through the kubernetes.default ClusterIP. That ClusterIP is programmed by kube-proxy -
+# so without this, Cilium depends on kube-proxy to start, and when Module 04 removes
+# kube-proxy nothing can start at all.
+#
+# The name resolves because cloud-init wrote /etc/hosts on every node in Module 01.
+k8sServiceHost: k8s-cp01.platform.local
+k8sServicePort: 6443
+
+# One replica: there is one control-plane node, and the chart's default of two would leave
+# a pod permanently Pending behind an anti-affinity rule you then have to go and read.
+operator:
+  replicas: 1
+
+# Hubble is why this is worth the extra memory: it answers "which packet was dropped, by
+# which policy, between which two pods" - the question that is otherwise unanswerable.
+# The UI is an in-cluster component and therefore Layer 3, so it arrives via Argo CD in
+# Module 10, not by hand.
+hubble:
+  enabled: true
+  relay:
+    enabled: true
+  ui:
+    enabled: false
+
+# Small nodes. Keep the agent honest about what it costs, and make it visible in
+# `kubectl describe node` rather than invisible.
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
