@@ -1,115 +1,118 @@
-# Runbook: on-prem VMs
+# Runbook: on-prem nodes
 
-**Owner:** Terraform/Packer layer (Layer 0 in ADR-0002)
+**Owner:** Terraform (Layer 0 in ADR-0002)
 **Module:** 01
+**Substrate:** QEMU/KVM via libvirt, inside WSL (ADR-0006)
 
 ## What this does
 
-Produces three identical Ubuntu 24.04 nodes from one golden image, each with its own identity and
-a stable address, in roughly ten minutes of unattended work.
+Produces three Ubuntu 24.04 nodes from one golden image, each with its own identity and a fixed
+address, in about five minutes — repeatably, from code.
 
 ```text
-packer build                     once, ~20 min
-   │   Ubuntu autoinstall (http/user-data) - no installer screens
-   │   base packages, containerd, kubeadm/kubelet/kubectl (held), hardening
-   │   seal: machine-id emptied, SSH host keys removed, cloud-init cleaned
+Ubuntu cloud image (official, cloud-init ready)
+   │   packer build          ~3 min, once
+   │     hardening, containerd (systemd cgroups), kubeadm/kubelet/kubectl held,
+   │     kernel modules, sysctls, swap off, chrony, qemu-guest-agent
+   │     seal: machine-id emptied, host keys removed, cloud-init state cleared
    ▼
-C:/VMs/templates/ubuntu-2404-k8s/ubuntu-2404-k8s.vmx
+packer/ubuntu-2404/output/ubuntu-2404-k8s.qcow2      (20 GB base)
    │
-   │   onprem-vms.ps1 -Action create     every time, ~10 min
-   │     snapshot 'base' → three linked clones
-   │     resize per role, uuid.action=create (new UUID + MAC)
-   │     boot → read DHCP lease → discover NAT subnet
-   │     set hostname, machine-id, SSH host keys, static IP, /etc/hosts
-   │     reboot onto the static address and verify
+   │   terraform apply       ~2 min, every time
+   │     libvirt NAT network with static DHCP reservations
+   │     one copy-on-write volume per node, sized up from the base
+   │     one cloud-init seed per node: hostname, SSH key, /etc/hosts
+   │     verification: every node answers SSH, no two share a machine-id
    ▼
-k8s-cp01 .10   k8s-w01 .11   k8s-w02 .12
+k8s-cp01 192.168.100.10   k8s-w01 .11   k8s-w02 .12
 ```
 
 ## Why it is built this way
 
-**The image holds everything common; the clone script holds everything unique.** Hostname,
-machine-id, SSH host keys and IP address are identity. Bake identity into an image and the clones
-collide — two machines with one machine-id fight over DHCP leases and confuse journald, and it
-surfaces hours later as something that looks unrelated.
+**The image holds what is common; cloud-init holds what is unique.** Hostname, machine-id, SSH
+host keys and address are identity. Bake identity into an image and the clones collide — two
+machines sharing a machine-id fight over DHCP leases and confuse journald, and it surfaces hours
+later looking unrelated.
 
-**The NAT subnet is discovered, not configured.** The first clone boots on DHCP, reports its
-address through open-vm-tools, and the script derives the subnet from it. Static addresses are
-then assigned at `.10`, `.11`, `.12` — VMware's NAT pool starts at `.128`, so there is no overlap
-and no reason to ever touch `vmnetdhcp.conf`. The previous attempt at this platform spent an
-evening editing that file with PowerShell string replacement; this avoids the entire category.
+**Terraform owns it, not a script.** `terraform plan` shows what will change before it changes;
+`terraform destroy` removes everything; state makes the lab diffable. ADR-0002 assigns Layer 0 to
+Terraform and this is where that becomes true rather than aspirational.
 
-**Remote commands are base64-encoded.** Sending a bash script through PowerShell, then `ssh`, then
-`sudo`, means three layers of quoting. Encoding removes the problem rather than escaping around
-it.
+**cloud-init, from Ubuntu's cloud image.** The same mechanism and the same artefact family that
+EC2 and GCE use. Modules 08 and 09 are then the same pattern with a different provider rather
+than a different skill.
 
-**Templates go on C:.** See ADR-0004 — etcd fsyncs every write and D: is mechanical.
+**Addresses are static DHCP reservations declared in `nodes.json`.** The nodes boot with plain
+DHCP, exactly as a cloud instance does, while the addresses are fixed in version control. No DHCP
+server configuration is ever edited by hand.
+
+**`nodes.json` is read by both Terraform and (from Module 03) Ansible**, so the inventory cannot
+drift from reality.
 
 ## Run it
 
-Everything runs from WSL (ADR-0005). The repository must live inside the WSL filesystem, not on
-`/mnt/c` — `make doctor` checks this.
-
 ```bash
-make image                           # ~20 min, once. Packer runs on Windows (ADR-0005);
-                                     # this syncs to C:\VMs\build and invokes packer.exe.
-make onprem-vms                      # ~10 min, repeatable
+make tools          # once: qemu, libvirt, terraform, packer. Adds you to the libvirt group.
+exec su - $USER     # group membership needs a new login shell
+make doctor         # must pass, including /dev/kvm and WSL memory
+make image          # ~3 min
+make onprem-vms     # ~2 min
 make onprem-vms-status
-make onprem-vms-destroy
 ```
 
-`make image` needs `packer.exe` on the **Windows** side:
+Prerequisite, once, from PowerShell — WSL defaults to half your RAM and the nodes need 20 GB:
 
-```powershell
-winget install --id HashiCorp.Packer -e
+```ini
+# C:\Users\<user>\.wslconfig
+[wsl2]
+memory=26GB
+processors=10
+nestedVirtualization=true
+autoMemoryReclaim=gradual
 ```
 
-The Linux packer in WSL cannot drive VMware Workstation — the builder executes local VMware
-binaries that do not exist in WSL.
-
-Windows-native fallback, for a machine without WSL:
-
-```powershell
-.\scripts\onprem-vms.ps1 -Action create
-```
-
-Before the first build, create `packer/ubuntu-2404/variables.auto.pkrvars.hcl`:
-
-```hcl
-ssh_public_key = "ssh-ed25519 AAAA... sagar@workstation"
-```
-
-Without it the image keeps password authentication enabled and prints a warning.
+then `wsl --shutdown`. `make doctor` fails loudly if this was not done.
 
 ## The gate for this module
 
-Destroy everything, rebuild it, and confirm the result is identical:
-
-```powershell
-.\scripts\onprem-vms.ps1 -Action destroy -Force
-.\scripts\onprem-vms.ps1 -Action create
+```bash
+make onprem-vms-destroy
+make onprem-vms
 ```
 
-Passes when all three nodes come back on `.10/.11/.12`, with the right hostnames, three distinct
-machine-ids (the script checks this and fails loudly if not), and SSH working by key. Until that
-round trip works, Module 02 does not start.
+Passes when all three nodes return on `.10/.11/.12` with the right hostnames and three distinct
+machine-ids. Terraform's verification step checks the machine-ids itself and fails the apply if
+two match. Until that round trip works, Module 02 does not start.
 
 ## How it breaks
 
 | Symptom | Cause | Fix |
 |:--|:--|:--|
-| Packer waits forever at `Waiting for SSH` | autoinstall did not start — the boot command mistyped into GRUB | Watch the console; the GRUB line should show `autoinstall ds=nocloud-net;s=http://...`. Increase the `<wait>` values on a slow disk. |
-| `packer.exe not found on Windows` | packer installed only in WSL | `winget install --id HashiCorp.Packer -e`, then reopen the shell |
-| `404` on the ISO URL | Ubuntu published a new point release | Update `iso_url`; the checksum is read from `SHA256SUMS` so it needs no change |
-| `getGuestIPAddress` never returns | open-vm-tools missing or not started | It is in `user-data` packages; check `systemctl status open-vm-tools` on the console |
-| Two nodes get the same address | the template was cloned without `uuid.action = "create"` | the script sets it; if you cloned by hand in the GUI, destroy and re-run |
-| SSH refuses the key after a rebuild | host key changed, as it should | `ssh-keygen -R <ip>`; the script already ignores known_hosts |
-| Node boots but has no network after reboot | cloud-init re-applied its own netplan | `99-disable-network-config.cfg` prevents it; confirm it exists |
-| WSL cannot ping the VM at all | WSL2 does not route to vmnet8 | add `networkingMode=mirrored` to `.wslconfig`, then `wsl --shutdown`. The script detects this and says so. |
-| VMs feel slow | WSL2 forces VMware to run under the Windows Hypervisor Platform | expected; see ADR-0005. Measure before trading WSL away. |
-| `.vmx` will not load | file written with a BOM | the script writes ASCII explicitly; do not edit `.vmx` files with `Set-Content` |
+| `/dev/kvm not writable` | not in the kvm/libvirt groups yet | `make tools`, then `exec su - $USER` |
+| `cannot reach qemu:///system` | same, or libvirtd not running | `sudo systemctl enable --now libvirtd` |
+| `storage pool default missing` | fresh libvirt install | `make tools` defines and starts it |
+| Packer hangs at `Waiting for SSH` | the cidata seed was not read | check `variables.auto.pkrvars.hcl` has a real key; `packer build -debug` |
+| `COW volume smaller than backing file` | a node's `disk_gb` is below the Packer `disk_size` | nodes size **up** from the 20 GB base, never down |
+| `wait_for_lease` times out | the node did not DHCP | `virsh console <node>` and watch the boot |
+| Nodes share a machine-id | the image was not sealed | re-run `make image`; `99-seal.sh` empties `/etc/machine-id` |
+| WSL disk keeps growing after destroys | `ext4.vhdx` keeps its high-water mark | `make reclaim` |
+| A node is slow | three nesting layers: Hyper-V → WSL2 → KVM → guest | expected; measure before trading WSL away (ADR-0006) |
+
+## Reaching a node from a Windows browser
+
+The nodes live on libvirt's NAT network inside WSL, so Windows cannot route to them directly. One
+forwarding rule covers the whole platform, because all ingress arrives on a single Gateway address
+and SNI separates the hostnames:
+
+```bash
+# from WSL, once the Gateway has an address (Module 05)
+socat TCP-LISTEN:8443,fork,reuseaddr TCP:192.168.100.200:443
+```
+
+Then point Windows at `localhost:8443` with a `hosts` entry for the platform hostname. This is set
+up properly in Module 06, when there is something to look at.
 
 ## Cost of a rebuild
 
-About ten minutes, unattended. That number matters: once rebuilding is cheap, you stop protecting
-the cluster and start experimenting with it, which is the entire point of having a lab.
+About two minutes for the nodes, three more if the image also needs rebuilding. That number is the
+point: when rebuilding is cheap you stop protecting the cluster and start experimenting with it.
