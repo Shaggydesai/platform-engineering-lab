@@ -105,15 +105,26 @@ for n in "${nodes[@]}"; do
   sub "qemu log (last 25 lines)"
   sudo tail -25 "/var/log/libvirt/qemu/$n.log" 2>&1 | sed 's/^/  /'
 
-  sub "console screenshot"
-  if $V screenshot "$n" "/tmp/$n.ppm" >/dev/null 2>&1; then
-    if command -v convert >/dev/null 2>&1; then
-      convert "/tmp/$n.ppm" "/tmp/$n.png" 2>/dev/null && echo "  /tmp/$n.png"
-    else
-      echo "  /tmp/$n.ppm  (install imagemagick to convert: sudo apt install -y imagemagick)"
-    fi
+  sub "serial console - last 30 lines of the recorded boot"
+  # This is the thing whose absence made the raw/qcow2 bug take an hour. The console is
+  # recorded to a file whether or not anyone was attached, so a boot that failed while
+  # you were asleep is still readable.
+  clog="/var/log/libvirt/qemu/$n-console.log"
+  if sudo test -s "$clog"; then
+    sudo tail -30 "$clog" | sed 's/^/  /'
+    echo "  --- full log: make onprem-boot-log NODE=$n"
   else
-    echo "  screenshot unavailable (no graphics device configured on this domain)"
+    echo "  $clog is empty or missing."
+    echo "  If the domain is running, nothing has reached the serial port - which means"
+    echo "  the guest never got as far as GRUB. Check the disk format above."
+  fi
+
+  sub "interactive console"
+  cport=$(( 12300 + $(jq -r --arg n "$n" '.nodes[]|select(.name==$n)|.address' "$CONFIG" | awk -F. '{print $4}') ))
+  if ss -ltn 2>/dev/null | grep -q "127.0.0.1:$cport"; then
+    echo "  listening on 127.0.0.1:$cport  ->  make onprem-console NODE=$n"
+  else
+    echo "  nothing listening on 127.0.0.1:$cport (domain not running?)"
   fi
 
   sub "reachability from WSL"

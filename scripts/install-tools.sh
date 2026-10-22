@@ -29,7 +29,8 @@ if want apt; then
   sudo apt-get update -qq
   sudo apt-get install -y -qq \
     curl wget git make unzip gnupg ca-certificates lsb-release \
-    jq python3-pip pipx bash-completion
+    jq python3-pip pipx bash-completion \
+    socat genisoimage
   ok 'installed'
 fi
 

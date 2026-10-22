@@ -8,6 +8,8 @@ output "nodes" {
       memory  = "${n.memory_mb / 1024} GB"
       disk    = "${n.disk_gb} GB"
       ssh     = "ssh ${local.cfg.ssh.username}@${n.address}"
+      console = "make onprem-console NODE=${name}"
+      boot_log = local.console_log[name]
     }
   }
 }
@@ -21,7 +23,8 @@ output "verify_commands" {
   description = "Run these by hand if something looks wrong."
   value = {
     list_domains = "virsh -c qemu:///system list --all"
-    console      = "virsh -c qemu:///system console <node>   # escape with Ctrl-]"
+    console      = "make onprem-console NODE=<node>      # interactive, escape with Ctrl-]"
+    boot_log     = "sudo tail -f /var/log/libvirt/qemu/<node>-console.log"
     net_dhcp     = "virsh -c qemu:///system net-dumpxml ${local.net.name}"
     ssh          = "ssh ${local.cfg.ssh.username}@${[for n in local.cfg.nodes : n.address][0]}"
   }

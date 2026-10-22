@@ -38,6 +38,9 @@ Module 02 is written and ready to walk through. The CNI is decided (ADR-0007: Ci
 kube-proxy kept until Module 04 removes it deliberately), and both CIDRs are recorded in
 `clusters/onprem/nodes.json` so nothing can disagree about them later.
 
+0. `make onprem-vms` once more — it adds a serial console to each domain, so Terraform will
+   replace the three domains (about 30 seconds). Then `make onprem-boot-log NODE=k8s-cp01`
+   shows you a boot for the first time.
 1. **Work through `docs/runbooks/cluster-bootstrap.md`, steps 0 → 7.** It is written as a lab,
    not a script: each step says what to look at and why. Two sessions, not one.
 2. Do not skip step 4 — the broken, `NotReady`, pre-CNI cluster is the most instructive state
@@ -74,7 +77,7 @@ Runbooks: `docs/runbooks/01-onprem-vms.md` (nodes) · `docs/runbooks/cluster-boo
 - [x] Every node reachable on its declared address
 - [x] Three distinct machine-ids — the seal works
 - [x] **The gate: `make onprem-vms-destroy` then `make onprem-vms`, clean**
-- [ ] Serial console on the domains, so a boot can be watched rather than inferred
+- [x] Serial console on every domain — interactive **and** recorded to a file
 
 ## Session log
 

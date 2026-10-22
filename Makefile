@@ -57,6 +57,14 @@ onprem-vms-status: ## Show the on-prem nodes and their addresses
 	@virsh -c qemu:///system list --all
 	@terraform -chdir=terraform/onprem output -json nodes 2>/dev/null | jq -r 'to_entries[] | "\(.key)\t\(.value.role)\t\(.value.address)"' || true
 
+.PHONY: onprem-console
+onprem-console: ## Attach to a node's serial console (NODE=k8s-cp01) - detach with Ctrl-]
+	@bash scripts/console.sh $(NODE)
+
+.PHONY: onprem-boot-log
+onprem-boot-log: ## Follow a node's recorded console log (NODE=k8s-cp01)
+	@bash scripts/console.sh $(NODE) --log
+
 .PHONY: onprem-diagnose
 onprem-diagnose: ## Explain why a node is unreachable (NODE=k8s-cp01 for one)
 	@bash scripts/diagnose-node.sh $(NODE)

@@ -105,7 +105,8 @@ all nodes reachable, machine-ids unique
 | `storage pool default missing` | fresh libvirt install | `make tools` defines and starts it |
 | Packer hangs at `Waiting for SSH` | the cidata seed was not read | check `variables.auto.pkrvars.hcl` has a real key; `packer build -debug` |
 | `COW volume smaller than backing file` | a node's `disk_gb` is below the Packer `disk_size` | nodes size **up** from the 20 GB base, never down |
-| Node pings but SSH is refused | cloud-init is still running; it writes the authorized key late in first boot | wait 20 s, or `virsh console <node>` to watch it finish |
+| Node pings but SSH is refused | cloud-init is still running; it writes the authorized key late in first boot | wait 20 s, or `make onprem-boot-log NODE=<node>` to watch it finish |
+| The console log is empty while the domain runs | nothing reached the serial port, so the guest never got as far as GRUB | the disk is the suspect, not the network — check the `driver` row above |
 | Node never answers after a host reboot | domains are `autostart = false` by design, so nothing starts behind your back | `make onprem-vms` — it is idempotent and starts them |
 | Nodes share a machine-id | the image was not sealed | re-run `make image`; `99-seal.sh` empties `/etc/machine-id` |
 | WSL disk keeps growing after destroys | `ext4.vhdx` keeps its high-water mark | `make reclaim` |
@@ -119,9 +120,37 @@ while a node runs - cloud-init only reads it on first boot - but if the file is 
 the domain will refuse to start because one of its disks is missing. If that happens,
 `terraform apply` recreates the ISO.
 
-**There is no serial console or graphics device yet.** `virsh console` and `virsh screenshot`
-will not work until those are added to `devices`. `make onprem-diagnose` falls back to the
-QEMU log, which is where the raw/qcow2 bug above was actually found.
+**There is no graphics device, deliberately.** `virsh screenshot` will not work. For a headless
+server a text console is strictly more useful — it is copyable, greppable, and recorded — and a
+VNC port is one more listening socket to secure for no benefit.
+
+## Watching a node boot
+
+Every node has a serial console, and it does two things at once:
+
+```bash
+make onprem-console  NODE=k8s-cp01    # interactive. Enter for a login prompt, Ctrl-] to detach
+make onprem-boot-log NODE=k8s-cp01    # the recorded log, followed
+./scripts/console.sh k8s-cp01 --last  # just the most recent boot
+```
+
+The recording is the important half. `virsh console` only shows what happens *after* you attach,
+which is useless for a boot that failed overnight — and that gap is exactly what made the
+raw/qcow2 bug above take an hour to find. Everything from GRUB onward is appended to
+`/var/log/libvirt/qemu/<node>-console.log`, with `append = "on"` so a reboot does not erase the
+evidence of why it rebooted.
+
+It works because Ubuntu's cloud image already boots with `console=ttyS0` on the kernel command
+line; libvirt presents a console whose target type is `serial` to the guest as `ttyS0`.
+
+The interactive side is a raw TCP chardev that libvirt binds to **127.0.0.1 only**. There is no
+authentication on it and the node has a passwordless-sudo user, so it is a root shell to anything
+that can reach the port. Loopback is not an accident, and it is the reason the protocol is `raw`
+rather than `telnet` — raw gives `socat` a clean terminal instead of telnet negotiation bytes in
+the stream.
+
+Ports are derived from the address rather than declared, so there is no second list to keep in
+sync: `.10 → 12310`, `.11 → 12311`, `.12 → 12312`.
 
 ## Reaching a node from a Windows browser
 

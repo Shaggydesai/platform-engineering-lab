@@ -31,6 +31,17 @@ locals {
   hosts_entries = join("\n", [
     for n in local.cfg.nodes : "${n.address} ${n.name} ${n.name}.${local.net.domain}"
   ])
+
+  # One serial console port per node, derived from the address rather than declared, so
+  # there is no second list to keep in sync: .10 -> 12310, .11 -> 12311, .12 -> 12312.
+  # Bound to 127.0.0.1 only - this is a debugging socket with no authentication, and it
+  # would be a root shell to anything that could reach it.
+  console_port = {
+    for n in local.cfg.nodes :
+    n.name => 12300 + tonumber(element(split(".", n.address), 3))
+  }
+
+  console_log = { for n in local.cfg.nodes : n.name => "/var/log/libvirt/qemu/${n.name}-console.log" }
 }
 
 # ---------------------------------------------------------------- network
@@ -210,6 +221,59 @@ resource "libvirt_domain" "node" {
           network = {
             network = libvirt_network.platform.name
           }
+        }
+      }
+    ]
+
+    # ------------------------------------------------------------------ console
+    #
+    # Omitting this was the real mistake behind the raw/qcow2 incident. The nodes were
+    # unreachable and there was no way to SEE the boot, so the cause had to be inferred
+    # from QEMU's command line. A lab whose premise is breaking things must be able to
+    # watch a machine fail.
+    #
+    # Ubuntu's cloud image already boots with console=ttyS0 on the kernel command line,
+    # so everything from GRUB onwards lands here. Two capabilities from one device:
+    #
+    #   log   every boot is appended to a file on the host, recorded whether or not
+    #         anyone was watching. This is strictly better than `virsh console`, which
+    #         only shows you what happens after you attach.
+    #   tcp   an interactive console on 127.0.0.1, for the cases where you must TYPE -
+    #         GRUB, single-user mode, or a netplan change that killed the network.
+    #         `make onprem-console NODE=k8s-cp01`
+    #
+    # protocol type is "raw" rather than "telnet" deliberately: raw means socat or nc
+    # gives a clean terminal, where telnet negotiation injects IAC bytes into the stream.
+    #
+    # Only `consoles` is defined, not `serials`. libvirt presents a console whose target
+    # type is "serial" to the guest AS the serial port, so defining both would be two
+    # declarations of one device - and they must then agree exactly or the domain will
+    # not start.
+    #
+    # Schema verified against the provider's own acceptance tests
+    # (internal/provider/domain_resource_test.go, TestAccDomainResource_console*), which
+    # is the only description of a 0.9.9 attribute that is guaranteed to be current.
+    consoles = [
+      {
+        source = {
+          tcp = {
+            mode    = "bind"
+            host    = "127.0.0.1"
+            service = tostring(local.console_port[each.key])
+            tls     = "no"
+          }
+        }
+        protocol = {
+          type = "raw"
+        }
+        target = {
+          type = "serial"
+          port = 0
+        }
+        log = {
+          # append, so a reboot does not destroy the evidence of why it rebooted.
+          file   = local.console_log[each.key]
+          append = "on"
         }
       }
     ]
