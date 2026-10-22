@@ -127,6 +127,17 @@ controller.
 **Costly.** ~250 MB per node, and a debugging surface that needs `cilium-dbg` and `hubble`
 rather than `iptables`. The control plane at 4 GB has less headroom than it would with Flannel.
 
+**More components than expected.** The install produced three things per node, not one:
+`cilium` (the agent), `cilium-envoy` (a separate DaemonSet) and `cilium-operator`. Envoy is no
+longer embedded in the agent; it runs alongside it and is what serves L7 policy and Gateway API.
+That is not waste — Module 05 needs it, and it is the component that replaces the separate
+ingress controller Calico would have required — but it is roughly another 100 MB per node that
+the comparison table above did not account for. Measured, the real figure is closer to 350 MB.
+
+**Hubble Relay is installed without TLS**, which the chart warns about. Recorded in
+`docs/parking-lot.md` rather than fixed, because issuing certificates by hand would create
+precisely the hand-made component ADR-0002 Rule 3 forbids. It is revisited in Module 10.
+
 **Risk.** If Cilium becomes the thing that stalls this project, the escape hatch is Calico: pod
 CIDR and service CIDR are unchanged, so it is a cluster rebuild rather than a redesign — about
 ten minutes, given Module 01. That escape hatch is the reason this decision is safe to make
