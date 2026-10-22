@@ -23,6 +23,9 @@ gcp-sa-*.json
 .aws/
 .gcp/
 
+# Packer output - a multi-GB qcow2, never committed
+packer/**/output/
+
 # Packer - generated locally, contains your public key and local paths
 **/variables.auto.pkrvars.hcl
 packer/**/output-*/

@@ -33,6 +33,31 @@ if want apt; then
   ok 'installed'
 fi
 
+# ---------------------------------------------------------------- KVM / libvirt
+
+if want libvirt; then
+  step 'QEMU, KVM and libvirt'
+  sudo apt-get install -y -qq \
+    qemu-kvm libvirt-daemon-system libvirt-clients virtinst \
+    bridge-utils dnsmasq-base cloud-image-utils genisoimage
+  sudo usermod -aG libvirt,kvm "$USER"
+  sudo systemctl enable --now libvirtd
+  # The default storage pool is where node disks live. It is not always defined on a fresh install.
+  if ! sudo virsh pool-info default >/dev/null 2>&1; then
+    sudo mkdir -p /var/lib/libvirt/images
+    sudo virsh pool-define-as default dir --target /var/lib/libvirt/images
+    sudo virsh pool-build default || true
+    sudo virsh pool-start default
+    sudo virsh pool-autostart default
+    ok 'default storage pool created'
+  else
+    sudo virsh pool-start default 2>/dev/null || true
+    skip 'default storage pool already present'
+  fi
+  ok "$(virsh --version 2>/dev/null | sed 's/^/libvirt /')"
+  echo '    note: group membership needs a new login shell. Run: exec su - $USER'
+fi
+
 # ---------------------------------------------------------------- HashiCorp: terraform, packer
 
 if want packer || want terraform; then

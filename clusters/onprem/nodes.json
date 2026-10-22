@@ -1,24 +1,21 @@
 {
   "cluster": "onprem",
-  "comment": "Single source of truth for the on-prem nodes. The clone script reads it, and Ansible will read the same file in Module 03 so the inventory can never disagree with reality. Sizing rationale is in docs/adr/0004-onprem-substrate.md.",
-  "template": {
-    "vmx": "C:/VMs/templates/ubuntu-2404-k8s/ubuntu-2404-k8s.vmx",
-    "snapshot": "base"
-  },
-  "vm_directory": "C:/VMs/onprem",
+  "comment": "Single source of truth for the on-prem nodes. Terraform reads it to build them and Ansible reads it in Module 03 to generate the inventory, so the two can never disagree. Sizing rationale: docs/adr/0004-onprem-substrate.md.",
   "network": {
-    "comment": "host_offset is the last octet of the static address. The subnet is DISCOVERED from the first clone's DHCP lease, so VMware's DHCP configuration is never edited. Offsets stay well below the NAT pool, which starts at .128.",
-    "gateway_offset": 2,
-    "prefix": 24,
-    "nameservers": ["8.8.8.8", "1.1.1.1"]
+    "name": "platform",
+    "comment": "libvirt NAT network. Addresses are static DHCP reservations keyed on MAC, declared here and created by Terraform - nothing is hand-configured and nothing drifts on reboot.",
+    "domain": "platform.local",
+    "cidr": "192.168.100.0/24",
+    "gateway": "192.168.100.1"
   },
   "ssh": {
     "username": "sagar",
-    "private_key": "~/.ssh/id_ed25519"
+    "public_key_file": "~/.ssh/id_ed25519.pub",
+    "private_key_file": "~/.ssh/id_ed25519"
   },
   "nodes": [
-    { "name": "k8s-cp01", "role": "control-plane", "cpus": 2, "memory_mb": 4096,  "host_offset": 10 },
-    { "name": "k8s-w01",  "role": "worker",        "cpus": 3, "memory_mb": 8192,  "host_offset": 11 },
-    { "name": "k8s-w02",  "role": "worker",        "cpus": 3, "memory_mb": 8192,  "host_offset": 12 }
+    { "name": "k8s-cp01", "role": "control-plane", "cpus": 2, "memory_mb": 4096, "disk_gb": 30, "address": "192.168.100.10", "mac": "52:54:00:b0:0b:10" },
+    { "name": "k8s-w01",  "role": "worker",        "cpus": 3, "memory_mb": 8192, "disk_gb": 35, "address": "192.168.100.11", "mac": "52:54:00:b0:0b:11" },
+    { "name": "k8s-w02",  "role": "worker",        "cpus": 3, "memory_mb": 8192, "disk_gb": 35, "address": "192.168.100.12", "mac": "52:54:00:b0:0b:12" }
   ]
 }

@@ -30,6 +30,39 @@ check git       git       yes  "https://git-scm.com"
 check kubectl   kubectl   yes  "https://kubernetes.io/docs/tasks/tools/"
 check helm      helm      yes  "https://helm.sh/docs/intro/install/  (note: Helm 4 is current)"
 
+echo "Virtualisation (ADR-0006)"
+if [ -e /dev/kvm ]; then
+  if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+    printf '  \033[32m[ ok ]\033[0m %-16s present and writable\n' "/dev/kvm"; ((ok++))
+  else
+    printf '  \033[31m[fail]\033[0m %-16s present but not writable - run: sudo usermod -aG kvm,libvirt $USER, then a new login shell\n' "/dev/kvm"; ((fail++))
+  fi
+else
+  printf '  \033[31m[fail]\033[0m %-16s missing - nested virtualisation is off. See ADR-0006.\n' "/dev/kvm"; ((fail++))
+fi
+if command -v virsh >/dev/null 2>&1; then
+  if virsh -c qemu:///system list >/dev/null 2>&1; then
+    printf '  \033[32m[ ok ]\033[0m %-16s qemu:///system reachable\n' "libvirt"; ((ok++))
+    if virsh -c qemu:///system pool-info default >/dev/null 2>&1; then
+      printf '  \033[32m[ ok ]\033[0m %-16s default pool present\n' "storage pool"; ((ok++))
+    else
+      printf '  \033[31m[fail]\033[0m %-16s default pool missing - run: make tools\n' "storage pool"; ((fail++))
+    fi
+  else
+    printf '  \033[31m[fail]\033[0m %-16s cannot reach qemu:///system - are you in the libvirt group? New login shell needed.\n' "libvirt"; ((fail++))
+  fi
+else
+  printf '  \033[33m[warn]\033[0m %-16s not installed - run: make tools\n' "virsh"; ((warn++))
+fi
+# The three nodes need 20 GB; WSL defaults to half of host RAM.
+mem_gb=$(free -g | awk '/Mem:/ {print $2}')
+need_gb=$(( $(jq '[.nodes[].memory_mb] | add' clusters/onprem/nodes.json 2>/dev/null || echo 20480) / 1024 ))
+if [ "$mem_gb" -ge $(( need_gb + 4 )) ]; then
+  printf '  \033[32m[ ok ]\033[0m %-16s %sGB available, nodes need %sGB\n' "WSL memory" "$mem_gb" "$need_gb"; ((ok++))
+else
+  printf '  \033[31m[fail]\033[0m %-16s %sGB available, nodes need %sGB + headroom. Set memory=26GB in .wslconfig, then wsl --shutdown.\n' "WSL memory" "$mem_gb" "$need_gb"; ((fail++))
+fi
+
 echo "Module 01-03"
 check terraform terraform no   "https://developer.hashicorp.com/terraform/install"
 check ansible   ansible   no   "pipx install ansible-core"

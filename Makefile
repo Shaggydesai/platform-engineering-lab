@@ -34,20 +34,26 @@ status: ## Show where we are (reads STATUS.md)
 # ---------------------------------------------------------------- on-prem
 
 .PHONY: image
-image: ## Module 01 - build the golden Ubuntu image (Packer runs on Windows, see ADR-0005)
+image: ## Module 01 - build the golden image with Packer (~3 min, from Ubuntu's cloud image)
 	@bash scripts/build-image.sh
 
 .PHONY: onprem-vms
-onprem-vms: ## Module 01 - clone the three on-prem VMs from the golden image
-	@bash scripts/onprem-vms.sh create
+onprem-vms: ## Module 01 - build the three on-prem nodes (terraform apply)
+	@terraform -chdir=terraform/onprem init -input=false
+	@terraform -chdir=terraform/onprem apply -auto-approve
 
 .PHONY: onprem-vms-status
-onprem-vms-status: ## Show the on-prem VMs and their addresses
-	@bash scripts/onprem-vms.sh status
+onprem-vms-plan: ## Show what would change without changing it
+	@terraform -chdir=terraform/onprem plan
+
+.PHONY: onprem-vms-status
+onprem-vms-status: ## Show the on-prem nodes and their addresses
+	@virsh -c qemu:///system list --all
+	@terraform -chdir=terraform/onprem output -json nodes 2>/dev/null | jq -r 'to_entries[] | "\(.key)\t\(.value.role)\t\(.value.address)"' || true
 
 .PHONY: onprem-vms-destroy
-onprem-vms-destroy: ## Destroy the on-prem VMs (the image is kept)
-	@bash scripts/onprem-vms.sh destroy
+onprem-vms-destroy: ## Destroy the on-prem nodes (the golden image is kept)
+	@terraform -chdir=terraform/onprem destroy
 
 .PHONY: onprem-up
 onprem-up: ## Module 03 - build the whole on-prem cluster from nothing
@@ -68,6 +74,13 @@ up: ## Create the cloud environment  (ENV=gcp|aws)
 down: ## Destroy the cloud environment  (ENV=gcp|aws) - ALWAYS run before ending a session
 	@test "$(ENV)" != "onprem" || { echo "use onprem-down for on-prem"; exit 1; }
 	@echo "not implemented yet - Module 08 (gcp) / Module 09 (aws)"; exit 1
+
+.PHONY: reclaim
+reclaim: ## Compact WSL's virtual disk after destroying VMs (ADR-0006)
+	@echo "Run from PowerShell, with WSL shut down:"
+	@echo "  wsl --shutdown"
+	@echo "  Optimize-VHD -Path \$$env:LOCALAPPDATA\\Packages\\CanonicalGroupLimited*\\LocalState\\ext4.vhdx -Mode Full"
+	@echo "(Hyper-V module required; otherwise use diskpart 'compact vdisk')"
 
 .PHONY: cost-check
 cost-check: ## Fail loudly if anything billable is still running in either cloud

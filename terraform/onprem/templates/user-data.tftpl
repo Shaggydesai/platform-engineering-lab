@@ -1,0 +1,40 @@
+#cloud-config
+# Per-node identity. The golden image is identical on every node; everything that makes a node
+# THIS node arrives here, at first boot, from Terraform.
+
+hostname: ${hostname}
+fqdn: ${hostname}.${domain}
+prefer_fqdn_over_hostname: false
+
+users:
+  - name: ${username}
+    groups: [sudo, adm]
+    shell: /bin/bash
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    lock_passwd: true
+    ssh_authorized_keys:
+      - ${public_key}
+
+ssh_pwauth: false
+# The image was sealed without host keys; cloud-init regenerates a unique set per node.
+ssh_deletekeys: true
+ssh_genkeytypes: [ed25519, rsa]
+
+write_files:
+  - path: /etc/hosts.platform
+    permissions: "0644"
+    content: |
+      ${indent(6, hosts_entries)}
+  - path: /etc/platform-role
+    permissions: "0644"
+    content: |
+      ${role}
+
+runcmd:
+  # Every node can name every other node before any cluster DNS exists.
+  - [ bash, -c, "sed -i '/ k8s-/d' /etc/hosts && cat /etc/hosts.platform >> /etc/hosts" ]
+  # The machine-id was emptied when the image was sealed; make sure this boot has a unique one.
+  - [ bash, -c, "[ -s /etc/machine-id ] || systemd-machine-id-setup" ]
+  - [ systemctl, enable, --now, qemu-guest-agent ]
+
+final_message: "${hostname} ready after $UPTIME seconds"

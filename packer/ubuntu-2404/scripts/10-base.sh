@@ -20,6 +20,10 @@ timedatectl set-timezone UTC
 # image avoids a reboot on every node later.
 systemctl enable --now iscsid || true
 
+# qemu-guest-agent lets libvirt report the guest's address and shut it down cleanly.
+apt-get -y install qemu-guest-agent
+systemctl enable qemu-guest-agent
+
 # Swap off, permanently. kubelet refuses to start with swap enabled unless explicitly told to.
 swapoff -a
 sed -i.bak -E '/\sswap\s|swap\.img/s/^/#/' /etc/fstab

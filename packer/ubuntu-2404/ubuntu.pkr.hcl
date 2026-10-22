@@ -1,34 +1,38 @@
 // Golden image for every on-prem Kubernetes node.
 //
-// What goes IN the image: the operating system, hardening, the container runtime, the
-// Kubernetes packages, kernel modules and sysctls - everything identical on all three nodes.
+// Built from Ubuntu's official cloud image rather than installed from an ISO. The cloud image is
+// the same artefact family AWS and GCE boot, it already contains cloud-init, and it removes the
+// autoinstall boot_command - which was the single most timing-fragile step in the previous design.
+// Build time drops from roughly twenty minutes to about three.
 //
-// What deliberately stays OUT: hostname, machine-id, SSH host keys, IP address, and any
-// cluster membership. Those are identity, and identity is assigned at clone time by
-// scripts/onprem-vms.ps1. Baking identity into an image is what makes two nodes collide.
+// What goes IN the image: hardening, the container runtime, the Kubernetes packages, kernel
+// modules and sysctls - everything identical on all three nodes.
 //
-// Build:  packer init . && packer build .
+// What stays OUT: hostname, machine-id, SSH host keys, IP address, cluster membership. Those are
+// identity, and identity is assigned by cloud-init at boot, from Terraform. Baking identity into
+// an image is what makes clones collide.
+//
+//   packer init . && packer build .
 
 packer {
   required_version = ">= 1.9.0"
   required_plugins {
-    vmware = {
+    qemu = {
       version = ">= 1.1.0"
-      source  = "github.com/hashicorp/vmware"
+      source  = "github.com/hashicorp/qemu"
     }
   }
 }
 
-variable "iso_url" {
+variable "cloud_image_url" {
   type        = string
-  default     = "https://releases.ubuntu.com/24.04/ubuntu-24.04.5-live-server-amd64.iso"
-  description = "If this 404s, Ubuntu published a new point release - check https://releases.ubuntu.com/24.04/"
+  default     = "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
+  description = "Ubuntu 24.04 LTS generic cloud image, qcow2."
 }
 
-variable "iso_checksum" {
+variable "cloud_image_checksum" {
   type    = string
-  // Reads the official SHA256SUMS instead of hardcoding a hash that goes stale.
-  default = "file:https://releases.ubuntu.com/24.04/SHA256SUMS"
+  default = "file:https://cloud-images.ubuntu.com/noble/current/SHA256SUMS"
 }
 
 variable "ssh_username" {
@@ -36,91 +40,77 @@ variable "ssh_username" {
   default = "sagar"
 }
 
-variable "ssh_password" {
-  type        = string
-  default     = "platform"
-  description = "Build-time only. Password auth is disabled by 30-harden.sh before the image is sealed."
-  sensitive   = true
-}
-
 variable "ssh_public_key" {
   type        = string
-  default     = ""
-  description = "Your workstation's public key, injected into the image. Set it in variables.auto.pkrvars.hcl."
+  description = "Injected into the image via the build-time cloud-init seed. Set in variables.auto.pkrvars.hcl."
 }
 
-variable "output_directory" {
-  type        = string
-  default     = "C:/VMs/templates/ubuntu-2404-k8s"
-  description = "MUST live on the SSD (C:). See ADR-0004 - etcd on the mechanical disk is a known failure mode."
+variable "ssh_private_key_file" {
+  type    = string
+  default = "~/.ssh/id_ed25519"
 }
 
 variable "k8s_minor" {
   type        = string
   default     = "v1.34"
-  description = "Kubernetes package repository minor version."
+  description = "Kubernetes package repository minor version. Pinned deliberately - see 30-kubernetes.sh."
 }
 
-source "vmware-iso" "ubuntu" {
-  // --- installation media
-  iso_url      = var.iso_url
-  iso_checksum = var.iso_checksum
+variable "output_directory" {
+  type    = string
+  default = "output"
+}
 
-  // --- virtual hardware: the template is modest; clones are resized per role
-  guest_os_type    = "ubuntu-64"
+source "qemu" "ubuntu" {
+  // The source is a disk image, not installation media.
+  iso_url      = var.cloud_image_url
+  iso_checksum = var.cloud_image_checksum
+  disk_image   = true
+
+  // Keep the base small: every node volume is copy-on-write from this, and libvirt
+  // refuses to create a COW volume smaller than its backing file. Nodes size up, never down.
+  disk_size        = "20G"
+  format           = "qcow2"
+  accelerator      = "kvm"
   cpus             = 2
   memory           = 2048
-  disk_size        = 35840          // 35 GB, thin provisioned
-  disk_type_id     = "0"            // single growable virtual disk
-  network          = "nat"
-  network_adapter_type = "vmxnet3"
-  sound            = false
-  usb              = false
-  version          = "21"
+  headless         = true           // no display in WSL; watch progress in Packer's output
+  net_device       = "virtio-net"
+  disk_interface   = "virtio"
 
-  // --- autoinstall: Packer serves http/ over HTTP, the installer fetches it
-  http_directory = "http"
-  boot_wait      = "5s"
-  boot_command = [
-    "<wait3s>c<wait3s>",
-    "linux /casper/vmlinuz --- autoinstall ds=\"nocloud-net;s=http://{{ .HTTPIP }}:{{ .HTTPPort }}/\"<enter><wait5s>",
-    "initrd /casper/initrd<enter><wait5s>",
-    "boot<enter>"
-  ]
-
-  // --- how Packer talks to the machine once the installer finishes
-  communicator         = "ssh"
-  ssh_username         = var.ssh_username
-  ssh_password         = var.ssh_password
-  ssh_timeout          = "45m"      // autoinstall + first boot is slow; this is not a hang
-  ssh_handshake_attempts = 100
-  shutdown_command     = "echo '${var.ssh_password}' | sudo -S shutdown -P now"
-  shutdown_timeout     = "10m"
-
-  // --- output
-  output_directory = var.output_directory
-  vm_name          = "ubuntu-2404-k8s"
-  headless         = false          // watch the first build; set true once it is boring
-
-  vmx_data = {
-    "tools.syncTime"              = "TRUE"
-    "time.synchronize.continue"   = "TRUE"
-    "time.synchronize.restore"    = "TRUE"
-    "time.synchronize.resume.disk" = "TRUE"
-    "time.synchronize.shrink"     = "TRUE"
-    "virtualHW.version"           = "21"
+  // A NoCloud seed, attached as a CD labelled "cidata". cloud-init inside the image reads it on
+  // first boot and creates the user Packer then connects as. This is the same mechanism the
+  // Terraform stack uses later, which is the point: one way of configuring a machine.
+  cd_label = "cidata"
+  cd_content = {
+    "meta-data" = "instance-id: packer-build\nlocal-hostname: ubuntu-template\n"
+    "user-data" = templatefile("${path.root}/cloud-init/user-data.tftpl", {
+      username   = var.ssh_username
+      public_key = var.ssh_public_key
+    })
   }
+
+  communicator           = "ssh"
+  ssh_username           = var.ssh_username
+  ssh_private_key_file   = var.ssh_private_key_file
+  ssh_timeout            = "15m"
+  ssh_handshake_attempts = 100
+
+  shutdown_command = "sudo shutdown -P now"
+  shutdown_timeout = "5m"
+
+  output_directory = var.output_directory
+  vm_name          = "ubuntu-2404-k8s.qcow2"
 }
 
 build {
   name    = "ubuntu-2404-k8s"
-  sources = ["source.vmware-iso.ubuntu"]
+  sources = ["source.qemu.ubuntu"]
 
   provisioner "shell" {
-    execute_command = "echo '${var.ssh_password}' | {{ .Vars }} sudo -S -E bash '{{ .Path }}'"
+    execute_command = "{{ .Vars }} sudo -E bash '{{ .Path }}'"
     environment_vars = [
       "SSH_USERNAME=${var.ssh_username}",
-      "SSH_PUBLIC_KEY=${var.ssh_public_key}",
       "K8S_MINOR=${var.k8s_minor}",
     ]
     scripts = [
@@ -131,7 +121,6 @@ build {
       "scripts/40-harden.sh",
       "scripts/99-seal.sh",
     ]
-    expect_disconnect = false
   }
 
   post-processor "manifest" {

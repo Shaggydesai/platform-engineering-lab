@@ -40,7 +40,7 @@ in [ADR-0002](docs/adr/0002-gitops-ownership-model.md).
 
 | Layer | Owner | Scope |
 |:--|:--|:--|
-| 0 Infrastructure | Terraform | VMs, networks, cloud clusters, IAM |
+| 0 Infrastructure | Terraform | KVM domains, networks, cloud clusters, IAM |
 | 1 Machine config | Ansible | OS, containerd, kubeadm, kubelet |
 | 2 Cluster bootstrap | Ansible | Argo CD, and only Argo CD |
 | 3 In-cluster | Argo CD | platform add-ons and applications |
@@ -97,6 +97,7 @@ make cost-check    # fails loudly if anything billable survived
 | [0003](docs/adr/0003-cost-guardrails.md) | Cost guardrails for free-tier-only cloud use |
 | [0004](docs/adr/0004-onprem-substrate.md) | On-prem substrate and VM sizing — three kubeadm VMs on the SSD |
 | [0005](docs/adr/0005-wsl-as-control-workstation.md) | WSL is the control workstation — one shell, one set of line endings |
+| [0006](docs/adr/0006-libvirt-over-vmware.md) | libvirt/KVM instead of VMware — so Terraform can own Layer 0 for real |
 
 ## The workload
 

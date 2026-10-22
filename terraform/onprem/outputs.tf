@@ -1,0 +1,27 @@
+output "nodes" {
+  description = "What was built, and how to reach it."
+  value = {
+    for name, n in local.nodes : name => {
+      role    = n.role
+      address = n.address
+      cpus    = n.cpus
+      memory  = "${n.memory_mb / 1024} GB"
+      disk    = "${n.disk_gb} GB"
+      ssh     = "ssh ${local.cfg.ssh.username}@${n.address}"
+    }
+  }
+}
+
+output "control_plane" {
+  description = "Address of the control plane node, used by Module 02 and by Ansible."
+  value       = [for n in local.cfg.nodes : n.address if n.role == "control-plane"][0]
+}
+
+output "network" {
+  value = {
+    name    = local.net.name
+    cidr    = local.net.cidr
+    gateway = local.net.gateway
+    domain  = local.net.domain
+  }
+}

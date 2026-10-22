@@ -1,0 +1,14 @@
+#cloud-config
+# Build-time seed only. This creates the user Packer connects as; the image is sealed afterwards
+# and the real per-node configuration comes from Terraform at boot.
+hostname: ubuntu-template
+users:
+  - name: ${username}
+    groups: [sudo, adm]
+    shell: /bin/bash
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    lock_passwd: true
+    ssh_authorized_keys:
+      - ${public_key}
+ssh_pwauth: false
+package_update: false
