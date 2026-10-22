@@ -40,7 +40,13 @@ image: ## Module 01 - build the golden image with Packer (~3 min, from Ubuntu's 
 .PHONY: onprem-vms
 onprem-vms: ## Module 01 - build the three on-prem nodes (terraform apply)
 	@terraform -chdir=terraform/onprem init -input=false
+	@terraform -chdir=terraform/onprem validate
 	@terraform -chdir=terraform/onprem apply -auto-approve
+
+.PHONY: onprem-vms-validate
+onprem-vms-validate: ## Check the Terraform config against the real provider schema (no changes)
+	@terraform -chdir=terraform/onprem init -input=false -upgrade=false >/dev/null
+	@terraform -chdir=terraform/onprem validate
 
 .PHONY: onprem-vms-plan
 onprem-vms-plan: ## Show what would change without changing it
