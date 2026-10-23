@@ -559,6 +559,36 @@ kubectl get ciliumnode -o wide        # the per-node /24 the operator handed out
 `cilium connectivity test` exists and is thorough, but it creates about 30 pods and takes ten
 minutes on nodes this size. Run it once, at the end, while you make tea — not now.
 
+**Expect `check-log-errors` to fail on a lab cluster, and know why.** That test has two halves:
+errors in the current logs, and container restart counts. On a laptop the second half fails
+because the nodes have rebooted — WSL shutting down, a Terraform change to a domain, the reboot
+test itself — and the check cannot tell "restarted because its node rebooted" from "crashed".
+The previous container logs are garbage-collected by then, so it errs toward demanding
+investigation, which is the right default for a production cluster and noise here.
+
+Do not wave it away without checking. The counters are only innocent if the *logs* are clean:
+
+```bash
+# every restart should have been the node going down, not the container dying
+kubectl -n kube-system get pod -l k8s-app=cilium \
+  -o custom-columns='POD:.metadata.name,RESTARTS:.status.containerStatuses[*].restartCount,LASTSTATE:.status.containerStatuses[*].lastState.terminated.reason'
+
+# and nothing should be unhappy right now
+cilium status --wait
+kubectl -n kube-system logs -l k8s-app=cilium -c cilium-agent --since=10m | grep -iE 'level=(error|warning)' | head
+
+# then reset the counters and re-run ONLY that test
+kubectl -n kube-system rollout restart ds/cilium ds/cilium-envoy
+kubectl -n kube-system rollout status ds/cilium --timeout=180s
+cilium connectivity test --test check-log-errors
+```
+
+If it passes after a restart, the counters were the whole story. If it fails again with the same
+pods at zero restarts, something really is crashing and that is a different conversation.
+
+Module 03 gets a clean run for free: a cluster Ansible has just built from destroyed nodes has
+no reboot history at all, which is a small argument for that module beyond reproducibility.
+
 ---
 
 ## Step 6 — join the workers
