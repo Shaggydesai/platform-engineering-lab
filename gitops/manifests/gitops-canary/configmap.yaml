@@ -19,7 +19,7 @@ metadata:
     app.kubernetes.io/part-of: platform
 data:
   # Bump this to prove a commit reaches the cluster.
-  generation: "1"
+  generation: "2"
 
   # Why this exists at all, for whoever finds it in six months and wonders.
   purpose: |
