@@ -6,6 +6,25 @@
 # cluster on every run. So the whole role is gated on one file: /etc/kubernetes/admin.conf exists
 # if and only if this node has been initialised.
 
+- name: Make sure the kubeadm config directory exists
+  # `template` does not create parent directories, and /etc/kubernetes/kubeadm is ours - the
+  # kubeadm packages create /etc/kubernetes and /etc/kubernetes/manifests, not this.
+  #
+  # This task is missing from the Module 02 runbook's history because the directory was made
+  # by hand there, with `sudo mkdir -p`, before the heredoc. That hand-made directory then
+  # survived on the existing cluster, so the role passed every run against it and could only
+  # fail on a node that had never been touched by hand. Which is precisely what the
+  # destroy-and-rebuild gate is for: the bugs that hide in the difference between a machine
+  # you built and a machine you fixed.
+  ansible.builtin.file:
+    path: /etc/kubernetes/kubeadm
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  become: true
+  tags: [config]
+
 - name: Render the kubeadm configuration
   # The config is a template, not a copy, and every value that could drift comes from
   # nodes.json via the inventory (ADR-0008). Rendering it is safe on an initialised cluster:
@@ -74,6 +93,18 @@
   retries: 30
   delay: 5
   changed_when: false
+
+- name: Make sure the workstation has a ~/.kube directory
+  # Same class of bug as the one above, one machine over. It exists on this workstation only
+  # because Module 02 created it by hand, so a fresh clone on a fresh machine would hit it -
+  # and that is the claim the roadmap makes about this repository.
+  ansible.builtin.file:
+    path: "{{ kubeconfig_fetch_path | dirname }}"
+    state: directory
+    mode: "0700"
+  delegate_to: localhost
+  become: false
+  run_once: true
 
 - name: Fetch the admin kubeconfig to the workstation
   # PRISTINE. Nothing may modify this file afterwards.
