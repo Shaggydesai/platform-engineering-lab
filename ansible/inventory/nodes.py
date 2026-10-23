@@ -67,6 +67,7 @@ def build():
                 "kubernetes_version": k8s["version"],
                 "cilium_version": k8s["cilium_version"],
                 "argocd_chart_version": k8s["argocd_chart_version"],
+                "argocd_app_version": k8s["argocd_app_version"],
                 # Every node's name, so a role can assert resolution rather than assume it.
                 "all_node_names": [n["name"] for n in cfg["nodes"]],
                 # Workstation-side paths. Emitted here rather than in group_vars so that there

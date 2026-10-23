@@ -73,6 +73,35 @@
     msg: "Argo CD chart {{ argocd_current }} already installed, nothing to do"
   run_once: true
 
+- name: Confirm the chart installed the Argo CD version we expect
+  # The chart version and the Argo CD version are two different numbers, and only one of them
+  # is pinned. A chart patch release can carry a different app version, so this asserts what
+  # actually landed rather than trusting the pin to imply it.
+  #
+  # It matters because the argocd CLI on this workstation talks to this server, and a CLI far
+  # ahead of its server fails in ways that read like permissions problems.
+  ansible.builtin.command: >-
+    helm list --namespace argocd --filter '^argocd$' --output json
+  delegate_to: localhost
+  run_once: true
+  become: false
+  environment:
+    KUBECONFIG: "{{ kubeconfig_fetch_path }}"
+  register: argocd_installed_release
+  changed_when: false
+
+- name: The installed app version must match nodes.json
+  ansible.builtin.assert:
+    that: >-
+      (argocd_installed_release.stdout | from_json | first).app_version == argocd_app_version
+    fail_msg: >-
+      Chart {{ argocd_chart_version }} installed Argo CD
+      {{ (argocd_installed_release.stdout | from_json | first).app_version }}, but nodes.json
+      says {{ argocd_app_version }}. Check `helm search repo argo/argo-cd --versions`, which
+      prints CHART VERSION and APP VERSION side by side, and update whichever is wrong.
+    success_msg: "chart {{ argocd_chart_version }} -> Argo CD {{ argocd_app_version }}"
+  run_once: true
+
 - name: Wait for the application controller
   # The controller is what reconciles; without it the Applications below are inert objects.
   ansible.builtin.command: >-

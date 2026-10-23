@@ -21,7 +21,9 @@
     "version_comment": "The Kubernetes version must match what the Packer image installed and held (K8S_MINOR in packer/ubuntu-2404/scripts/30-kubernetes.sh). Ansible's preflight role asserts they agree and refuses to build a cluster if they do not, because a control plane newer than its kubelets is supported in one direction only and obscure when it breaks.",
     "version": "v1.34.12",
     "cilium_version": "1.20.3",
-    "argocd_chart_version": "10.8.3"
+    "argocd_comment": "Two different numbers. argocd_chart_version pins the HELM CHART; the chart decides which Argo CD it installs, and 10.11.0 carries Argo CD v3.5.5. Check both when moving the pin - `helm search repo argo/argo-cd --versions` prints CHART VERSION and APP VERSION side by side - and keep the app version's minor matching the argocd CLI in scripts/install-tools.sh, because a CLI far ahead of its server fails in ways that read like permissions problems.",
+    "argocd_chart_version": "10.11.0",
+    "argocd_app_version": "v3.5.5"
   },
   "ssh": {
     "username": "sagar",
