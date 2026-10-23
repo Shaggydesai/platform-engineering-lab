@@ -122,6 +122,18 @@ if git -C . rev-parse >/dev/null 2>&1; then
   else
     printf '  \033[31m[fail]\033[0m %-16s missing - CRLF/BOM bugs incoming\n' ".gitattributes"; ((fail++))
   fi
+  # From Module 04 onward, committing is how the cluster is changed. An unset identity fails
+  # at `git commit` with "Author identity unknown", which is a confusing place to discover it -
+  # you have already made the edit and are watching for a sync that will never come.
+  _gname=$(git config user.name 2>/dev/null || true)
+  _gmail=$(git config user.email 2>/dev/null || true)
+  if [ -n "$_gname" ] && [ -n "$_gmail" ]; then
+    printf '  \033[32m[ ok ]\033[0m %-16s %s <%s>\n' "git identity" "$_gname" "$_gmail"; ((ok++))
+  else
+    printf '  \033[31m[fail]\033[0m %-16s unset - you cannot commit, and committing is how the cluster changes now\n' "git identity"
+    printf '         %s\n' 'git config --global user.name "..."; git config --global user.email "..."'; ((fail++))
+  fi
+
   # .ps1 and .bat are declared eol=crlf in .gitattributes, so CRLF there is correct.
   bad_crlf=$(git grep -lI $'\r$' -- . 2>/dev/null | grep -vE '\.(ps1|bat)$' || true)
   if [ -n "$bad_crlf" ]; then
