@@ -72,7 +72,25 @@ make smoke
 *would* initialise an already-initialised cluster. Use it to review the rendered config diff, not
 as a safety net.
 
-## The gate for this module
+## The gate for this module — **passed 2026-10-23**
+
+Cluster rebuilt from destroyed machines in about four minutes with no manual steps; the second
+run reported `changed=0` on all three hosts.
+
+**Three bugs, each findable by exactly one of the three tests.** This is the part worth keeping:
+
+| Test | Bug it found | Why nothing else would |
+|:--|:--|:--|
+| `--syntax-check` | paths in `ansible.cfg` resolve against that file's directory, not the shell's | the only symptom is "No inventory was parsed" and then a misleading "role not found" |
+| Run twice on a live cluster | a task renamed the file `fetch` uses as its idempotency marker, so `fetch` re-downloaded forever | the first run looks fine; you need a second one to see it |
+| Destroy and rebuild | `template` does not create `/etc/kubernetes/kubeadm`, which existed only because Module 02 made it by hand | it passed every run against the live cluster, including the ones reporting `changed=0` |
+
+**Idempotency proves the gates work. Only a rebuild proves the roles are complete.** A cluster
+you have fixed by hand quietly supplies the things your automation forgot, and it will keep
+supplying them until the day you need to rebuild — which is the day you least want to be
+debugging.
+
+
 
 ```bash
 # 1. from nothing

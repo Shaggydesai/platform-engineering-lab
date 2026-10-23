@@ -5,8 +5,8 @@
 > not stall like the last one.
 
 **Last updated:** 2026-10-23
-**Current module:** 03 — Ansible: the bootstrap layer
-**Overall progress:** Modules 00, 01 and 02 complete — 3 / 13
+**Current module:** 04 — Argo CD and the first reconciliation
+**Overall progress:** Modules 00–03 complete — 4 / 13
 
 ---
 
@@ -15,7 +15,7 @@
 | | |
 |:--|:--|
 | **On-prem nodes** | **built and verified** — k8s-cp01 .10, k8s-w01 .11, k8s-w02 .12, destroy/apply round trip passes |
-| **On-prem cluster** | **running** — 3 nodes Ready, v1.34.12, Cilium 1.20.3, `make smoke` passes |
+| **On-prem cluster** | **running, and rebuildable from nothing in ~4 minutes** — 3 nodes, v1.34.12, Cilium 1.20.3 |
 | **Certificates expire** | **2027-10-22** — `sudo kubeadm certs renew all` before then, or nothing works |
 | **GCP cluster** | not built — account verified empty, ₹0 running |
 | **AWS cluster** | not built |
@@ -32,40 +32,38 @@ make onprem-vms-status
 
 ## The next action
 
-Module 01 is closed: the gate (`onprem-vms-destroy` then `onprem-vms`) passed with three
-reachable nodes and three distinct machine-ids.
-
-**Module 02 is closed.** `make smoke` passes on three nodes, a worker reboot rejoins unaided, and
-`cilium connectivity test` is green — 81 of 82 tests first time, and the one failure was
-`check-log-errors` objecting to restart counts caused by our own node reboots, which passed once
-the counters were reset.
-
-**Module 03 — Ansible: the bootstrap layer.** Everything done by hand in Module 02 becomes code.
-The gate, from the roadmap: `terraform destroy` the VMs, run `make onprem-up`, get a working
-cluster with **zero** manual steps — and running it twice reports no changes the second time.
-
-**The roles are written and syntax-checked; they have not been run.** Next:
+Module 03 is closed. The on-prem half of the roadmap's headline claim is now true: **a fresh
+clone plus three commands produces a working Kubernetes cluster**, and the third one is
+idempotent.
 
 ```bash
-make onprem-ping           # can Ansible reach all three?
-make onprem-preflight      # assert the image. Changes nothing, fails loudly.
-make onprem-up             # against the EXISTING cluster first - should be nearly all 'ok'
+make image           # once, ~3 min   golden image            (Module 01)
+make onprem-vms      #      ~1 min    three machines          (Module 01)
+make onprem-up       #      ~3 min    a cluster               (Module 03)
+make smoke           #      ~1 min    five checks             (Module 02)
 ```
 
-Running it against the cluster that already exists is the cheapest possible test of the gating
-logic: if `control_plane` or `workers` tries to re-initialise or re-join, the gate is wrong and
-nothing has been lost. Only then destroy and rebuild.
+**Module 04 — Argo CD and the first reconciliation.** Layer 2 of ADR-0002, and the layer that
+ADR says Ansible owns and Argo CD must not manage for itself until Module 11.
 
-Decided along the way — **ADR-0008: Packer owns machine configuration, Ansible asserts it.** The
-golden image already does swap, modules, sysctls, containerd and the packages; defining any of
-that twice would leave it with no owner (ADR-0002 Rule 4). So `preflight` checks and never
-changes, which also makes every `onprem-up` a regression test on the image.
+- Deliverables: an Ansible role for Argo CD; a root `Application` (app-of-apps); `AppProject`s;
+  repository credentials by a documented mechanism.
+- Done when a commit to this repository changes the cluster with no `kubectl`, and
+  `kubectl delete` on a managed resource is reverted by self-heal.
 
-Runbook: `docs/runbooks/03-ansible.md`
+Two decisions to make before writing the role, both of which the last attempt got wrong by
+making them late:
+
+1. **How Argo CD authenticates to this repository.** It is public, so read access needs no
+   credential at all — which is the right starting point, and the decision to record is what
+   happens when something private arrives (Module 07 decides secrets).
+2. **The `Application` layout**, so that two paths in Git can never render the same object
+   (ADR-0002 Rule 4). This is the shape the whole of Phase 2 hangs off.
 
 Before any cloud module: AWS and GCP budget alarms (ADR-0003) — still outstanding.
 
-Runbooks: `docs/runbooks/01-onprem-vms.md` (nodes) · `docs/runbooks/cluster-bootstrap.md` (cluster)
+Runbooks: `01-onprem-vms.md` (machines) · `cluster-bootstrap.md` (by hand, Module 02) ·
+`03-ansible.md` (automated, Module 03)
 
 ## Module 00 checklist
 
@@ -112,12 +110,24 @@ Runbooks: `docs/runbooks/01-onprem-vms.md` (nodes) · `docs/runbooks/cluster-boo
       counter reset, which confirmed the restarts were node reboots (`LASTSTATE: Unknown`)
 - [x] Notes added to the runbook where reality differed from what was written
 
+## Module 03 checklist
+
+- [x] ADR-0008: Packer owns machine configuration, Ansible asserts it
+- [x] Inventory generated from `nodes.json` — cannot describe a cluster that does not exist
+- [x] `preflight` asserts nine things about the image and changes nothing
+- [x] kubeadm config is a template rendered from the inventory, not a second copy of the CIDRs
+- [x] Cilium installed from the values file already in Git
+- [x] Idempotency gated on one file per role, not on `--force`
+- [x] **The gate: destroy the VMs, rebuild, `make onprem-up`, `make smoke` — zero manual steps**
+- [x] **The second run reports `changed=0` on all three hosts**
+
 ## Session log
 
 Keep this short. One line per session: what you did, what broke, what is next.
 
 | Date | Module | What happened | Next |
 |:--|:--|:--|:--|
+| 2026-10-23 | 03 | **Module 03 closed.** Cluster rebuilt from destroyed nodes in about four minutes with no manual steps, and the second run reports changed=0. Three bugs found, each only findable by a different test: running twice on a live cluster caught a task that renamed the file `fetch` uses as its idempotency marker (so `fetch` re-downloaded forever); the destroy-and-rebuild caught `template` not creating `/etc/kubernetes/kubeadm`, which existed only because Module 02 made it by hand; and `--syntax-check` caught paths in `ansible.cfg` resolving against the config file rather than the shell. Idempotency proves the gates work; only a rebuild proves the roles are complete. | Module 04 — Argo CD |
 | 2026-10-23 | 02 | **Module 02 closed.** Gate green: `make smoke`, a worker reboot rejoining unaided, and `cilium connectivity test`. Three lessons kept: `kubeadm config validate` says `ok` to a truncated file, so configuration moved into Git behind a script that checksums the copy and counts the documents; `make smoke` was testing one pod pair and reporting it as "pod-to-pod across nodes", so it now tests all six and keeps the namespace on failure; and the reboot test never saw `NotReady` because the VM came back inside the 40s grace period, which is documented along with the real six-minute eviction timeline. | Module 03 — Ansible |
 | 2026-10-23 | 02 | Cluster up: three nodes Ready on v1.34.12, Cilium 1.20.3, `make smoke` passing. Two things went wrong and both were worth it — a heredoc paste of the kubeadm config truncated silently while `kubeadm config validate` said `ok` (configuration now lives in Git and is copied by a script that checksums it and counts the documents), and `helm` could not resolve `k8s-cp01.platform.local` because cloud-init writes `/etc/hosts` on the nodes and never on the workstation (`make hosts`, plus `generateHosts=false` so WSL stops undoing it). Also found that `make smoke` only ever tested one pod pair, missing the worker-to-worker tunnel entirely. | Reboot test, connectivity test, then Module 03 |
 | 2026-10-22 | 01 | Serial console added to every domain — interactive on loopback and recorded to a file. It paid for itself immediately: the first boot log proved the qcow2 fix (`vda: vda1 vda14 vda15 vda16` — a partition table, where before QEMU saw none) and revealed that a Terraform "update in-place" on a domain silently **reboots** it. That is harmless now and would take etcd down from Module 02, so it is written up in the runbook. Image now disables ufw and boots to multi-user. | Module 02 step 0 |
