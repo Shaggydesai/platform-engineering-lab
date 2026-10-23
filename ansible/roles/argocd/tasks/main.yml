@@ -159,7 +159,8 @@
     msg: |
       Argo CD chart {{ argocd_chart_version }}, root Application platform-onprem: {{ argocd_root_status.stdout }}
 
-      UI:        make argocd-ui          (port-forward to https://localhost:8080)
+      UI:        make argocd-ui          (port-forward to http://localhost:8080)
+                 http, not https - server.insecure is on, see the values file
       Password:  make argocd-password    (from the Secret the chart generated - not in Git)
 
       From here, nothing in this cluster is installed by hand. Adding a component means adding
