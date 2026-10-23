@@ -20,7 +20,8 @@
     "cni": "cilium",
     "version_comment": "The Kubernetes version must match what the Packer image installed and held (K8S_MINOR in packer/ubuntu-2404/scripts/30-kubernetes.sh). Ansible's preflight role asserts they agree and refuses to build a cluster if they do not, because a control plane newer than its kubelets is supported in one direction only and obscure when it breaks.",
     "version": "v1.34.12",
-    "cilium_version": "1.20.3"
+    "cilium_version": "1.20.3",
+    "argocd_chart_version": "10.8.3"
   },
   "ssh": {
     "username": "sagar",

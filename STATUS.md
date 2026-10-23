@@ -5,7 +5,7 @@
 > not stall like the last one.
 
 **Last updated:** 2026-10-23
-**Current module:** 04 — Argo CD and the first reconciliation
+**Current module:** 04 — Argo CD and the first reconciliation (written, not yet run)
 **Overall progress:** Modules 00–03 complete — 4 / 13
 
 ---
@@ -32,38 +32,29 @@ make onprem-vms-status
 
 ## The next action
 
-Module 03 is closed. The on-prem half of the roadmap's headline claim is now true: **a fresh
-clone plus three commands produces a working Kubernetes cluster**, and the third one is
-idempotent.
+Module 04 is written and validated but **not yet run**. The decisions are recorded in ADR-0009;
+the code is the Ansible `argocd` role plus three files in `gitops/bootstrap/`.
 
 ```bash
-make image           # once, ~3 min   golden image            (Module 01)
-make onprem-vms      #      ~1 min    three machines          (Module 01)
-make onprem-up       #      ~3 min    a cluster               (Module 03)
-make smoke           #      ~1 min    five checks             (Module 02)
+git pull
+helm search repo argo/argo-cd --versions | head -3   # confirm 10.8.3 is still current
+make onprem-argocd                                   # just this role
+make gitops-status
 ```
 
-**Module 04 — Argo CD and the first reconciliation.** Layer 2 of ADR-0002, and the layer that
-ADR says Ansible owns and Argo CD must not manage for itself until Module 11.
+Then the two-part gate:
 
-- Deliverables: an Ansible role for Argo CD; a root `Application` (app-of-apps); `AppProject`s;
-  repository credentials by a documented mechanism.
-- Done when a commit to this repository changes the cluster with no `kubectl`, and
-  `kubectl delete` on a managed resource is reverted by self-heal.
+1. **A commit changes the cluster** — bump `generation` in
+   `gitops/manifests/gitops-canary/configmap.yaml`, push, and read the ConfigMap back.
+2. **`kubectl delete` is reverted** — delete that ConfigMap and watch self-heal restore it.
+   This is the half that matters: sync proves Argo CD *can* apply Git, self-heal proves Git is
+   **in charge**.
 
-Two decisions to make before writing the role, both of which the last attempt got wrong by
-making them late:
-
-1. **How Argo CD authenticates to this repository.** It is public, so read access needs no
-   credential at all — which is the right starting point, and the decision to record is what
-   happens when something private arrives (Module 07 decides secrets).
-2. **The `Application` layout**, so that two paths in Git can never render the same object
-   (ADR-0002 Rule 4). This is the shape the whole of Phase 2 hangs off.
+Then `make gitops-drift`, which is ADR-0002 Rule 1 turned into a query rather than a promise.
 
 Before any cloud module: AWS and GCP budget alarms (ADR-0003) — still outstanding.
 
-Runbooks: `01-onprem-vms.md` (machines) · `cluster-bootstrap.md` (by hand, Module 02) ·
-`03-ansible.md` (automated, Module 03)
+Runbooks: `01-onprem-vms.md` · `cluster-bootstrap.md` · `03-ansible.md` · `04-argocd.md`
 
 ## Module 00 checklist
 
@@ -120,6 +111,18 @@ Runbooks: `01-onprem-vms.md` (machines) · `cluster-bootstrap.md` (by hand, Modu
 - [x] Idempotency gated on one file per role, not on `--force`
 - [x] **The gate: destroy the VMs, rebuild, `make onprem-up`, `make smoke` — zero manual steps**
 - [x] **The second run reports `changed=0` on all three hosts**
+
+## Module 04 checklist
+
+- [x] ADR-0009: the seam is three objects, the layout, repo access, annotation tracking
+- [x] Ansible role for Argo CD, pinned chart, re-runnable when Argo CD is the broken thing
+- [x] Two `AppProject`s — `platform` trusted, `tenants` unable to create cluster-scoped objects
+- [x] Root `Application`, non-recursive, no finalizer
+- [x] A canary `Application` whose only job is to answer "is GitOps working right now?"
+- [x] `make gitops-drift` — finds anything running that nothing in Git claims
+- [ ] **Run it**
+- [ ] Gate part 1: a commit changes the cluster with no `kubectl`
+- [ ] Gate part 2: `kubectl delete` on a managed resource is reverted by self-heal
 
 ## Session log
 

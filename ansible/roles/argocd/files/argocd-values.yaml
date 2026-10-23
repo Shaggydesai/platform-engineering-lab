@@ -1,0 +1,97 @@
+# Argo CD values. Layer 2 of ADR-0002 - installed by Ansible, never by itself.
+#
+#   helm upgrade --install argocd argo/argo-cd --version <pinned> -n argocd -f this
+#
+# Applied by ansible/roles/argocd. Pinned deliberately: the tool that reconciles everything else
+# must not change version on its own.
+
+global:
+  # Used for generated URLs. There is no ingress until Module 05 brings Gateway API; until then
+  # the UI is reached by port-forward, and this name is what the UI will print in links.
+  domain: argocd.platform.local
+
+configs:
+  cm:
+    url: https://argocd.platform.local
+
+    # THE most important line in this file. Argo CD records which Application owns a resource;
+    # the older default did it with a LABEL, and Kubernetes label values stop at 63 characters.
+    # A long Application name plus a long resource name truncates silently, two resources end up
+    # looking like they belong to the same Application, and Argo CD prunes one of them. That is
+    # data loss from a string length.
+    #
+    # It must be set before anything is managed: changing it later means re-adopting every
+    # resource in the cluster. ADR-0009, Decision 4.
+    application.resourceTrackingMethod: annotation
+
+    # Default is 180s. Three minutes between pushing and seeing anything happen makes the
+    # feedback loop too slow to learn from, and on a cluster this small the polling costs
+    # nothing. A real cluster would leave this alone and use a webhook instead.
+    timeout.reconciliation: 60s
+
+    # Show the diff for resources Argo CD considers out of sync even when they are ignored.
+    # Useful while learning what "OutOfSync" actually means.
+    resource.compareoptions: |
+      ignoreAggregatedRoles: true
+
+  params:
+    # No TLS on the Argo CD server itself. It sits behind a loopback port-forward today, and
+    # from Module 05 behind a Gateway that terminates TLS - at which point the server's own
+    # certificate is a second TLS layer protecting nothing and complicating the Gateway.
+    #
+    # The moment this cluster is reachable from anywhere but this laptop, this line is wrong.
+    server.insecure: true
+
+# No SSO. One admin account, password in a Secret the chart generates (never in Git).
+dex:
+  enabled: false
+
+# Both off for now. They are genuinely useful and both cost memory on a 4 GB control plane, so
+# they arrive when something needs them:
+#   notifications  - Module 10, alongside the rest of observability
+#   applicationSet - Module 08, when there are two clusters to generate Applications for and
+#                    ADR-0009's "three explicit files" trade-off is worth revisiting
+notifications:
+  enabled: false
+applicationSet:
+  enabled: false
+
+# Single replica everywhere. This is one laptop; HA here would mean three Redis pods competing
+# for the same 4 GB and failing over to each other.
+controller:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 1Gi
+
+server:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+
+repoServer:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 256Mi
+    limits:
+      # The repo-server renders every chart, so this is the component that OOMs first when a
+      # chart is large. If a sync fails with an unexplained error in Module 05, look here.
+      memory: 1Gi
+
+redis:
+  enabled: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 256Mi

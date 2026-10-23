@@ -1,0 +1,71 @@
+# AppProjects. ANSIBLE APPLIES THIS FILE - see ADR-0009, Decision 1.
+#
+# These are in the seam rather than under the root Application because an Application that
+# references a missing project is REJECTED. Managing them with Argo CD would be a dependency
+# cycle solved with sync waves, which is complexity bought for nothing.
+#
+# An AppProject is a boundary, not a folder. It answers three questions about every Application
+# inside it: which repositories may it read, where may it deploy, and what kinds of object may
+# it create. Without one, every Application is implicitly allowed to do anything - which is fine
+# until a tenant workload can create ClusterRoleBindings.
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: platform
+  namespace: argocd
+spec:
+  description: >-
+    Platform components. Trusted: these are the things that make the cluster usable, and they
+    legitimately need cluster-scoped resources - CRDs, webhooks, storage classes, RBAC.
+
+  # Only this repository. The URL is listed even though the repository is public and needs no
+  # credential, because that is what makes adding one later a change to a Secret rather than a
+  # change to every Application (ADR-0009, Decision 3).
+  sourceRepos:
+    - https://github.com/Shaggydesai/platform-engineering-lab.git
+
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: '*'
+
+  clusterResourceWhitelist:
+    - group: '*'
+      kind: '*'
+  namespaceResourceWhitelist:
+    - group: '*'
+      kind: '*'
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: tenants
+  namespace: argocd
+spec:
+  description: >-
+    Tenant workloads - ShopVerse from Module 06 onwards. Untrusted by design: the point of the
+    platform is that a tenant cannot reach outside its own namespaces, and asserting that here
+    is cheaper than discovering it is false later.
+
+  sourceRepos:
+    - https://github.com/Shaggydesai/platform-engineering-lab.git
+
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: 'shopverse-*'
+
+  # No cluster-scoped resources at all. A tenant that can create a ClusterRoleBinding is not a
+  # tenant.
+  clusterResourceBlacklist:
+    - group: '*'
+      kind: '*'
+
+  # A tenant may create ordinary workloads but not the objects that define its own limits.
+  # Otherwise "we gave them a quota" means "we suggested a quota".
+  namespaceResourceBlacklist:
+    - group: ''
+      kind: ResourceQuota
+    - group: ''
+      kind: LimitRange
+    - group: networking.k8s.io
+      kind: NetworkPolicy

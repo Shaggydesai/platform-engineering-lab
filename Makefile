@@ -106,9 +106,36 @@ onprem-up: ## Module 03 - build the whole on-prem cluster from nothing
 onprem-config: ## Module 03 - re-render the kubeadm config only
 	@$(PLAYBOOK) ansible/playbooks/cluster.yml --tags config
 
+.PHONY: onprem-argocd
+onprem-argocd: ## Module 04 - install/repair Argo CD and re-apply the GitOps seam
+	@$(PLAYBOOK) ansible/playbooks/cluster.yml --tags argocd
+
 .PHONY: onprem-down
 onprem-down: ## Destroy the on-prem cluster (keeps the VMs)
 	@$(PLAYBOOK) ansible/playbooks/reset.yml
+
+# ---------------------------------------------------------------- gitops
+
+.PHONY: argocd-password
+argocd-password: ## Show the Argo CD admin password (from the Secret, never from Git)
+	@kubectl -n argocd get secret argocd-initial-admin-secret \
+	  -o jsonpath='{.data.password}' | base64 -d; echo
+
+.PHONY: argocd-ui
+argocd-ui: ## Port-forward the Argo CD UI to http://localhost:8080 (Ctrl-C to stop)
+	@echo "user: admin   password: $$(make -s argocd-password)"
+	@echo "open http://localhost:8080"
+	@kubectl -n argocd port-forward svc/argocd-server 8080:80
+
+.PHONY: gitops-status
+gitops-status: ## What Argo CD thinks the cluster should look like, and whether it agrees
+	@kubectl -n argocd get applications -o custom-columns=\
+'APP:.metadata.name,PROJECT:.spec.project,SYNC:.status.sync.status,HEALTH:.status.health.status,REVISION:.status.sync.revision' 2>/dev/null \
+	  || { echo "Argo CD is not installed - run: make onprem-argocd"; exit 1; }
+
+.PHONY: gitops-drift
+gitops-drift: ## Anything running that Argo CD does NOT own (ADR-0009's detectable rule)
+	@bash scripts/gitops-drift.sh
 
 # ---------------------------------------------------------------- cloud
 

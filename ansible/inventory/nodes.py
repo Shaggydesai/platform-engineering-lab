@@ -66,6 +66,7 @@ def build():
                 "cni": k8s["cni"],
                 "kubernetes_version": k8s["version"],
                 "cilium_version": k8s["cilium_version"],
+                "argocd_chart_version": k8s["argocd_chart_version"],
                 # Every node's name, so a role can assert resolution rather than assume it.
                 "all_node_names": [n["name"] for n in cfg["nodes"]],
                 # Workstation-side paths. Emitted here rather than in group_vars so that there
@@ -74,6 +75,9 @@ def build():
                 "repo_root": REPO,
                 "cilium_values_file": os.path.join(
                     REPO, "ansible", "roles", "cilium", "files", "cilium-values.yaml"
+                ),
+                "argocd_values_file": os.path.join(
+                    REPO, "ansible", "roles", "argocd", "files", "argocd-values.yaml"
                 ),
                 "kubeconfig_fetch_path": os.path.expanduser("~/.kube/onprem.conf"),
                 "kube_context": f"{cfg['cluster']}-admin",

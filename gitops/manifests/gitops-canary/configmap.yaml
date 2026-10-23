@@ -1,0 +1,28 @@
+# Managed by Argo CD. Edit this file, commit, push - the cluster follows.
+#
+# To prove reconciliation, change `generation` and push:
+#
+#   kubectl -n platform-canary get cm gitops-canary -o jsonpath='{.data.generation}'
+#
+# To prove self-heal, change it with kubectl instead and watch it revert:
+#
+#   kubectl -n platform-canary patch cm gitops-canary --type merge -p '{"data":{"generation":"tampered"}}'
+#   kubectl -n platform-canary get cm gitops-canary -o jsonpath='{.data.generation}'   # back
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gitops-canary
+  namespace: platform-canary
+  labels:
+    app.kubernetes.io/name: gitops-canary
+    app.kubernetes.io/part-of: platform
+data:
+  # Bump this to prove a commit reaches the cluster.
+  generation: "1"
+
+  # Why this exists at all, for whoever finds it in six months and wonders.
+  purpose: |
+    The cheapest possible answer to "is GitOps working right now?".
+    Owned by the gitops-canary Application: gitops/clusters/onprem/platform/gitops-canary.yaml
+    Rationale: docs/adr/0009-gitops-layout.md

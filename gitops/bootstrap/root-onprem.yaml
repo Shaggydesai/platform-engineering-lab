@@ -1,0 +1,56 @@
+# The root Application for the on-prem cluster - the app-of-apps.
+# ANSIBLE APPLIES THIS FILE. It is the seam between Layer 2 and Layer 3 (ADR-0009, Decision 1).
+#
+# This object manages nothing but other Applications. It watches ONE directory, NON-recursively,
+# and every file it finds there is an Application describing a platform component.
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-onprem
+  namespace: argocd
+  # NO finalizer, deliberately. With resources-finalizer.argocd.argoproj.io here, deleting this
+  # one object would cascade and destroy the platform. Without it, deleting it orphans the child
+  # Applications - they keep running, and re-applying this file re-adopts them, because they are
+  # still in Git.
+  #
+  # ADR-0002's stated risk is that Layer 2 is the single point of failure for recovery, so
+  # recovery has to be the cheap path: a mistyped `kubectl delete app` must not be an outage.
+  # The cascading version is a deliberate drill in Module 11, not an accident waiting here.
+
+spec:
+  project: platform
+
+  source:
+    repoURL: https://github.com/Shaggydesai/platform-engineering-lab.git
+    targetRevision: main
+    path: gitops/clusters/onprem/platform
+    directory:
+      # recurse: false is the line that makes ADR-0002 Rule 4 structural rather than a
+      # convention. With recurse: true over a wider path, Argo CD would also walk
+      # gitops/charts/ and manage those templates directly - the same objects the child
+      # Applications manage, two owners each. Both Applications then report Synced while
+      # fighting over fields, which is the hardest class of GitOps bug to see.
+      recurse: false
+      include: '*.yaml'
+
+  destination:
+    server: https://kubernetes.default.svc
+    # The child Application objects live in argocd; the workloads they describe do not.
+    namespace: argocd
+
+  syncPolicy:
+    automated:
+      # prune: an Application file deleted from Git means the Application is deleted from the
+      # cluster. Without it, removing a component from Git leaves it running forever and Git
+      # stops being the description of the cluster.
+      prune: true
+      # selfHeal: a hand-edited child Application is reverted. This is the half of the Module 04
+      # gate that proves GitOps is actually in charge rather than merely present.
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

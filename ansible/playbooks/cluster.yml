@@ -46,6 +46,16 @@
     - workers
   tags: [workers]
 
+- name: Install Argo CD and hand it the seam
+  # After the workers, because Argo CD needs somewhere to run that is not the tainted control
+  # plane. Layer 2 of ADR-0002: installed by Ansible, and re-runnable precisely when Argo CD is
+  # the broken thing. ADR-0009 defines what it is allowed to apply.
+  hosts: control_plane
+  gather_facts: false
+  roles:
+    - argocd
+  tags: [argocd, gitops]
+
 - name: Verify what was built
   hosts: control_plane
   gather_facts: false

@@ -1,0 +1,46 @@
+# The first child Application, and a permanent one.
+#
+# It deploys nothing useful on purpose: a namespace and a ConfigMap. Its job is to be the
+# cheapest possible answer to "is GitOps actually working right now?" - a question that is
+# otherwise answered by inspecting a real component and guessing whether its state is Argo CD's
+# doing or a leftover from something you did by hand.
+#
+# It is also the Module 04 gate. Change the ConfigMap in Git and the cluster changes with no
+# kubectl; delete the ConfigMap with kubectl and self-heal puts it back.
+#
+# Why it is plain manifests rather than a wrapper chart: ADR-0002 Rule 3 requires wrapper charts
+# for every in-cluster COMPONENT, so that nothing exists as a command in someone's shell history.
+# This is not a component - it has no upstream chart to wrap and no values to carry. Making it a
+# chart would be ceremony that teaches the wrong lesson about when the rule applies.
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: gitops-canary
+  namespace: argocd
+  finalizers:
+    # Children DO carry the finalizer (ADR-0009): deleting this Application removes the
+    # resources it created, rather than orphaning them. That is what makes `prune` on the root
+    # Application actually clean up when a component is removed from Git.
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+
+  source:
+    repoURL: https://github.com/Shaggydesai/platform-engineering-lab.git
+    targetRevision: main
+    path: gitops/manifests/gitops-canary
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: platform-canary
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      # The namespace is created by Argo CD rather than by a manifest in the directory. Either
+      # works; this way the namespace is unambiguously owned by the Application that needs it,
+      # and removing the Application removes the namespace.
+      - CreateNamespace=true
