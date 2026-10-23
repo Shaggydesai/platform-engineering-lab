@@ -76,40 +76,35 @@
   changed_when: false
 
 - name: Fetch the admin kubeconfig to the workstation
+  # PRISTINE. Nothing may modify this file afterwards.
+  #
+  # `fetch` is idempotent by comparing the remote checksum against the local copy - but only
+  # if the local copy is still a copy. An earlier version of this role renamed the kubectl
+  # context inside this very file, so every subsequent run found a local file that no longer
+  # matched the remote one and re-downloaded it, reporting changed forever. Making the rename
+  # task report "unchanged" did not help, because the problem was not the report: it was that
+  # the task mutated another task's idempotency marker.
+  #
+  # The lesson generalises. A file that a later step edits in place cannot also be the thing
+  # an earlier step compares against.
   ansible.builtin.fetch:
     src: /etc/kubernetes/admin.conf
     dest: "{{ kubeconfig_fetch_path }}"
     flat: true
   become: true
 
-- name: Rename the context to something readable next to the cloud contexts
-  # kubernetes-admin@onprem beside gke_shopverse-lab_asia-south1-a_shopverse-lab is how people
-  # run the wrong command against the wrong cluster.
-  ansible.builtin.command: >-
-    kubectl --kubeconfig {{ kubeconfig_fetch_path }}
-    config rename-context kubernetes-admin@{{ cluster_name }} {{ kube_context }}
-  delegate_to: localhost
-  become: false
-  register: cp_rename
-  # changed_when: false, and not as a cover-up. The file this renames is the one the previous
-  # task just fetched, so it ALWAYS arrives carrying kubeadm's original context name and the
-  # rename always succeeds - reporting "changed" every run forever, which would make the
-  # Module 03 gate ("changed=0 on a second run") permanently unreachable and train us to
-  # ignore it.
+- name: Merge it into the workstation's kubeconfig under a readable context name
+  # One task does the renaming and the merging, in a temporary file, and reports changed only
+  # when the real kubeconfig actually moved. The fetched copy is never touched.
   #
-  # Nothing on the cluster or the workstation is altered here: this normalises a temporary
-  # artifact on its way to the merge task below, and THAT task compares before and after and
-  # reports changed only when the real kubeconfig moved.
-  changed_when: false
-  failed_when:
-    - cp_rename.rc != 0
-    - "'no context exists' not in cp_rename.stderr"
-
-- name: Merge it into the workstation's kubeconfig, replacing any stale copy
-  # A rebuilt cluster has a new CA, so an old merged context does not just go stale - it fails
-  # TLS verification in a way that reads like a network problem. kubectl's merge lets the FIRST
-  # file win for a duplicate name, so the stale entries must be deleted before merging, not
-  # after.
+  # Why rename at all: kubernetes-admin@onprem sitting beside
+  # gke_shopverse-lab_asia-south1-a_shopverse-lab is how people run the wrong command against
+  # the wrong cluster, and one of those two costs money.
+  #
+  # Why delete before merging: a rebuilt cluster has a NEW CA, so a stale context does not
+  # merely go out of date - it fails TLS verification in a way that reads like a network
+  # problem. kubectl's merge lets the FIRST file win for a duplicate name, so the old entries
+  # have to go before the merge rather than after.
   ansible.builtin.shell:
     executable: /bin/bash
     cmd: |
@@ -119,13 +114,23 @@
       mkdir -p "$HOME/.kube"
       touch "$main"
       before=$(sha256sum < "$main")
-      kubectl --kubeconfig "$main" config delete-context {{ kube_context }}   >/dev/null 2>&1 || true
-      kubectl --kubeconfig "$main" config delete-cluster {{ cluster_name }}   >/dev/null 2>&1 || true
-      kubectl --kubeconfig "$main" config delete-user kubernetes-admin        >/dev/null 2>&1 || true
+
+      # Normalise the context name in a COPY, never in the fetched file.
+      incoming=$(mktemp)
+      trap 'rm -f "$incoming" "${merged:-}"' EXIT
+      cp {{ kubeconfig_fetch_path }} "$incoming"
+      kubectl --kubeconfig "$incoming" \
+        config rename-context kubernetes-admin@{{ cluster_name }} {{ kube_context }} >/dev/null 2>&1 || true
+
+      kubectl --kubeconfig "$main" config delete-context {{ kube_context }} >/dev/null 2>&1 || true
+      kubectl --kubeconfig "$main" config delete-cluster {{ cluster_name }} >/dev/null 2>&1 || true
+      kubectl --kubeconfig "$main" config delete-user kubernetes-admin      >/dev/null 2>&1 || true
+
       merged=$(mktemp)
-      KUBECONFIG="$main:{{ kubeconfig_fetch_path }}" kubectl config view --flatten > "$merged"
-      mv "$merged" "$main"
+      KUBECONFIG="$main:$incoming" kubectl config view --flatten > "$merged"
+      cp "$merged" "$main"
       kubectl --kubeconfig "$main" config use-context {{ kube_context }} >/dev/null
+
       after=$(sha256sum < "$main")
       [ "$before" = "$after" ] && echo UNCHANGED || echo UPDATED
   delegate_to: localhost
