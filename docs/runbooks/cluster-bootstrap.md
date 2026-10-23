@@ -577,11 +577,21 @@ kubectl -n kube-system get pod -l k8s-app=cilium \
 cilium status --wait
 kubectl -n kube-system logs -l k8s-app=cilium -c cilium-agent --since=10m | grep -iE 'level=(error|warning)' | head
 
-# then reset the counters and re-run ONLY that test
-kubectl -n kube-system rollout restart ds/cilium ds/cilium-envoy
+# then reset the counters and re-run ONLY that test. All FOUR workloads - it is easy to
+# restart the two DaemonSets and forget that hubble-relay and the operator are Deployments,
+# and then the test still fails on the one you missed.
+kubectl -n kube-system rollout restart ds/cilium ds/cilium-envoy \
+                                       deploy/hubble-relay deploy/cilium-operator
 kubectl -n kube-system rollout status ds/cilium --timeout=180s
+kubectl -n kube-system rollout status deploy/hubble-relay --timeout=120s
 cilium connectivity test --test check-log-errors
 ```
+
+`LASTSTATE` is the column that settles it. **`Unknown`** is what the kubelet records when it
+cannot determine why a container ended — the signature of the machine disappearing underneath
+it, which is exactly what a reboot or a `virsh destroy` looks like from inside. A container that
+actually failed says `Error`, `OOMKilled` or `Completed`. One word, and it is the difference
+between "the node rebooted" and "something is wrong".
 
 If it passes after a restart, the counters were the whole story. If it fails again with the same
 pods at zero restarts, something really is crashing and that is a different conversation.
