@@ -650,6 +650,58 @@ A node must rejoin a cluster after a reboot with nobody doing anything, because 
 enabled and its certificate is on disk. If it does not come back, the usual cause is swap
 re-enabling itself or a kubelet unit that was started but never enabled.
 
+**Expect the watch to show nothing.** On a fast VM the reboot completes before Kubernetes
+notices it happened: the node never goes `NotReady` and its `AGE` keeps climbing, because the
+Node object was never re-registered. That is not the test failing — it is
+`--node-monitor-grace-period` doing its job, and it is worth understanding, because it is also
+the reason `kubectl get nodes` can show `Ready` for a machine that is already gone.
+
+The timeline the control plane actually runs:
+
+| | |
+|:--|:--|
+| kubelet renews its Lease | every **10s** |
+| no renewal for `--node-monitor-grace-period` | **40s** → node becomes `NotReady` |
+| `node.kubernetes.io/not-ready:NoExecute` taint applied | immediately after |
+| pods' default `tolerationSeconds` for that taint | **300s** → eviction begins |
+
+So a node is unreachable for nearly **six minutes** before its pods are rescheduled. On a lab
+that is a curiosity; on a platform with tenants it is the number you get asked about after an
+incident, and it is tunable in neither direction for free — shorten it and a slow node flaps,
+lengthen it and outages last longer.
+
+### The harder version, worth ten minutes
+
+A reboot tests the node. Killing a node tests the *cluster*. This is the one experiment in
+Module 02 that shows the scheduler reacting to a failure rather than to a request:
+
+```bash
+# hard power-off, not a reboot. Note which node hubble-relay is on first.
+kubectl -n kube-system get pod -o wide | grep hubble
+virsh -c qemu:///system destroy k8s-w01
+
+date; kubectl get nodes -w          # ~40s to NotReady
+# leave it. In another window:
+kubectl -n kube-system get pod -o wide -w | grep hubble
+```
+
+At roughly 40 seconds the node goes `NotReady`. Then **nothing happens for five minutes** — the
+pods are still listed as `Running` on a machine that no longer exists, which is the single most
+misleading state Kubernetes will ever show you. At about 5m40s the eviction fires and
+`hubble-relay` is recreated on `k8s-w02`.
+
+Then bring it back:
+
+```bash
+make onprem-vms                     # starts the destroyed domain
+kubectl get nodes -w                # Ready within a minute
+kubectl -n kube-system get pod -o wide | grep hubble
+```
+
+`hubble-relay` **stays on `k8s-w02`**. Kubernetes reschedules on failure and never rebalances on
+recovery — nothing moves a running pod. That asymmetry surprises people repeatedly, and it is
+why "the cluster recovered" and "the cluster is back how it was" are different claims.
+
 > **A guest reboot is not a host reboot.** The domains are `autostart = false` (Module 01), so
 > after `wsl --shutdown` or a laptop restart, nothing comes back on its own: run
 > `make onprem-vms`, which is idempotent. That is deliberate — a lab that starts 20 GB of VMs

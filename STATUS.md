@@ -89,7 +89,9 @@ Runbooks: `docs/runbooks/01-onprem-vms.md` (nodes) · `docs/runbooks/cluster-boo
 - [x] Cilium 1.20.3 installed from a values file in Git
 - [x] Both workers joined, labelled, `cluster-pool` IPAM giving each node its own /24
 - [x] `make smoke` passes — now across every ordered pod pair, not just one
-- [ ] A worker reboot rejoins unaided
+- [x] A worker reboot rejoins unaided — and did it faster than the 40s grace period, so the
+      control plane never saw it leave. Node failure handling is therefore still untested;
+      the `virsh destroy` experiment in the runbook is how to test it properly.
 - [ ] `cilium connectivity test` passes
 - [ ] Notes added to the runbook where reality differed from what was written
 
