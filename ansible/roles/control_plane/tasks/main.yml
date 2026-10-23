@@ -1,0 +1,131 @@
+---
+# control_plane: turn one prepared machine into a Kubernetes control plane.
+#
+# Idempotency here is not cosmetic. `kubeadm init` on an already-initialised node fails at
+# preflight, and the tempting fix - `kubeadm reset` first - would destroy etcd and therefore the
+# cluster on every run. So the whole role is gated on one file: /etc/kubernetes/admin.conf exists
+# if and only if this node has been initialised.
+
+- name: Render the kubeadm configuration
+  # The config is a template, not a copy, and every value that could drift comes from
+  # nodes.json via the inventory (ADR-0008). Rendering it is safe on an initialised cluster:
+  # kubeadm only reads it during init and upgrade.
+  ansible.builtin.template:
+    src: kubeadm-init.yaml.j2
+    dest: /etc/kubernetes/kubeadm/init.yaml
+    owner: root
+    group: root
+    mode: "0600"
+  become: true
+  tags: [config]
+
+- name: Validate the rendered configuration
+  # Cheap, and it catches a misspelled field before init rather than during it. It does NOT
+  # catch a config that is missing a document - Module 02 learned that the hard way - which is
+  # why the template is rendered from one source rather than assembled.
+  ansible.builtin.command: kubeadm config validate --config /etc/kubernetes/kubeadm/init.yaml
+  become: true
+  changed_when: false
+  tags: [config]
+
+- name: Has this node already been initialised?
+  ansible.builtin.stat:
+    path: /etc/kubernetes/admin.conf
+  become: true
+  register: cp_admin_conf
+
+- name: Initialise the control plane
+  when: not cp_admin_conf.stat.exists
+  block:
+    - name: Pre-pull the control-plane images
+      # Separate from init so that a slow or broken registry fails as "cannot pull images"
+      # rather than as "init timed out waiting for the kubelet".
+      ansible.builtin.command: kubeadm config images pull --config /etc/kubernetes/kubeadm/init.yaml
+      become: true
+      changed_when: true
+
+    - name: kubeadm init
+      ansible.builtin.command: kubeadm init --config /etc/kubernetes/kubeadm/init.yaml
+      become: true
+      register: cp_init
+      changed_when: true
+
+    - name: Keep the init output on the node
+      # It records the phases that ran and the certificate hashes. Worth having when something
+      # is wrong weeks later. The join token inside it expires in 24 hours, so this is not a
+      # durable credential - but it is still not something to copy into Git.
+      ansible.builtin.copy:
+        content: "{{ cp_init.stdout }}\n"
+        dest: /root/kubeadm-init.log
+        owner: root
+        group: root
+        mode: "0600"
+      become: true
+
+- name: Wait for the API server to report ready
+  # `kubeadm init` returning is not the same as the API server being usable: the static pods
+  # are still settling. Everything after this talks to the API, so wait here once rather than
+  # retrying in five later tasks.
+  ansible.builtin.command: >-
+    kubectl --kubeconfig /etc/kubernetes/admin.conf get --raw /readyz
+  become: true
+  register: cp_readyz
+  until: cp_readyz.rc == 0 and 'ok' in cp_readyz.stdout
+  retries: 30
+  delay: 5
+  changed_when: false
+
+- name: Fetch the admin kubeconfig to the workstation
+  ansible.builtin.fetch:
+    src: /etc/kubernetes/admin.conf
+    dest: "{{ kubeconfig_fetch_path }}"
+    flat: true
+  become: true
+
+- name: Rename the context to something readable next to the cloud contexts
+  # kubernetes-admin@onprem beside gke_shopverse-lab_asia-south1-a_shopverse-lab is how people
+  # run the wrong command against the wrong cluster.
+  ansible.builtin.command: >-
+    kubectl --kubeconfig {{ kubeconfig_fetch_path }}
+    config rename-context kubernetes-admin@{{ cluster_name }} {{ kube_context }}
+  delegate_to: localhost
+  become: false
+  register: cp_rename
+  changed_when: "'renamed' in cp_rename.stdout"
+  failed_when:
+    - cp_rename.rc != 0
+    - "'no context exists' not in cp_rename.stderr"
+
+- name: Merge it into the workstation's kubeconfig, replacing any stale copy
+  # A rebuilt cluster has a new CA, so an old merged context does not just go stale - it fails
+  # TLS verification in a way that reads like a network problem. kubectl's merge lets the FIRST
+  # file win for a duplicate name, so the stale entries must be deleted before merging, not
+  # after.
+  ansible.builtin.shell:
+    executable: /bin/bash
+    cmd: |
+      set -uo pipefail
+      umask 077
+      main="$HOME/.kube/config"
+      mkdir -p "$HOME/.kube"
+      touch "$main"
+      before=$(sha256sum < "$main")
+      kubectl --kubeconfig "$main" config delete-context {{ kube_context }}   >/dev/null 2>&1 || true
+      kubectl --kubeconfig "$main" config delete-cluster {{ cluster_name }}   >/dev/null 2>&1 || true
+      kubectl --kubeconfig "$main" config delete-user kubernetes-admin        >/dev/null 2>&1 || true
+      merged=$(mktemp)
+      KUBECONFIG="$main:{{ kubeconfig_fetch_path }}" kubectl config view --flatten > "$merged"
+      mv "$merged" "$main"
+      kubectl --kubeconfig "$main" config use-context {{ kube_context }} >/dev/null
+      after=$(sha256sum < "$main")
+      [ "$before" = "$after" ] && echo UNCHANGED || echo UPDATED
+  delegate_to: localhost
+  become: false
+  register: cp_merge
+  changed_when: "'UPDATED' in cp_merge.stdout"
+
+- name: Report
+  ansible.builtin.debug:
+    msg: >-
+      Control plane ready at {{ control_plane_endpoint }}.
+      kubectl context: {{ kube_context }}

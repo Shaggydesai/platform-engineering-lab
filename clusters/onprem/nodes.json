@@ -17,7 +17,10 @@
     "pod_cidr": "10.244.0.0/16",
     "service_cidr": "10.96.0.0/12",
     "control_plane_endpoint": "k8s-cp01.platform.local:6443",
-    "cni": "cilium"
+    "cni": "cilium",
+    "version_comment": "The Kubernetes version must match what the Packer image installed and held (K8S_MINOR in packer/ubuntu-2404/scripts/30-kubernetes.sh). Ansible's preflight role asserts they agree and refuses to build a cluster if they do not, because a control plane newer than its kubelets is supported in one direction only and obscure when it breaks.",
+    "version": "v1.34.12",
+    "cilium_version": "1.20.3"
   },
   "ssh": {
     "username": "sagar",

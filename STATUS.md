@@ -44,11 +44,24 @@ the counters were reset.
 The gate, from the roadmap: `terraform destroy` the VMs, run `make onprem-up`, get a working
 cluster with **zero** manual steps — and running it twice reports no changes the second time.
 
-The groundwork is already in place, which was the point of refusing to paste things into a
-terminal: `clusters/onprem/kubeadm/init.yaml` and `ansible/roles/cilium/files/cilium-values.yaml`
-are files in Git, so Module 03 is a templating exercise rather than a reconstruction from shell
-history. `clusters/onprem/nodes.json` becomes the inventory source, so the inventory cannot
-disagree with what Terraform built.
+**The roles are written and syntax-checked; they have not been run.** Next:
+
+```bash
+make onprem-ping           # can Ansible reach all three?
+make onprem-preflight      # assert the image. Changes nothing, fails loudly.
+make onprem-up             # against the EXISTING cluster first - should be nearly all 'ok'
+```
+
+Running it against the cluster that already exists is the cheapest possible test of the gating
+logic: if `control_plane` or `workers` tries to re-initialise or re-join, the gate is wrong and
+nothing has been lost. Only then destroy and rebuild.
+
+Decided along the way — **ADR-0008: Packer owns machine configuration, Ansible asserts it.** The
+golden image already does swap, modules, sysctls, containerd and the packages; defining any of
+that twice would leave it with no owner (ADR-0002 Rule 4). So `preflight` checks and never
+changes, which also makes every `onprem-up` a regression test on the image.
+
+Runbook: `docs/runbooks/03-ansible.md`
 
 Before any cloud module: AWS and GCP budget alarms (ADR-0003) — still outstanding.
 

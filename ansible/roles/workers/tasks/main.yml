@@ -1,0 +1,62 @@
+---
+# workers: join the worker nodes.
+#
+# Gated on /etc/kubernetes/kubelet.conf, which exists if and only if this node has joined. A
+# second `kubeadm join` fails at preflight, and the obvious workaround - `kubeadm reset` first -
+# would evict everything running on the node every time the playbook ran.
+#
+# A join is short because almost nothing is local: the node fetches the cluster CA, reads the
+# kubelet-config ConfigMap the control plane uploaded during init (which is how it inherits
+# resolvConf and the memory reservations without a local config file), submits a CSR, gets it
+# auto-approved, and starts. That is the payoff of kubeadm's upload-config phase.
+
+- name: Has this node already joined?
+  ansible.builtin.stat:
+    path: /etc/kubernetes/kubelet.conf
+  become: true
+  register: worker_kubelet_conf
+
+- name: Join the cluster
+  when: not worker_kubelet_conf.stat.exists
+  block:
+    - name: Mint a fresh bootstrap token
+      # Tokens live 24 hours by design, so the one from `kubeadm init` is usually gone. Minting
+      # one per join is cheap and avoids storing a credential anywhere.
+      #
+      # The printed command carries two halves and both matter: --token authenticates the NODE
+      # TO THE CLUSTER, and --discovery-token-ca-cert-hash authenticates the CLUSTER TO THE
+      # NODE. The second is a fingerprint of the cluster CA and is what stops a joining worker
+      # handing its credentials to an impostor API server.
+      ansible.builtin.command: kubeadm token create --print-join-command
+      become: true
+      delegate_to: "{{ control_plane_name }}"
+      register: worker_join_cmd
+      changed_when: true
+      no_log: true
+
+    - name: kubeadm join
+      ansible.builtin.command: "{{ worker_join_cmd.stdout }}"
+      become: true
+      changed_when: true
+      no_log: true
+      # no_log on both: the command line contains a live credential, and Ansible's output ends
+      # up in terminals, scrollback and CI logs.
+
+    - name: Confirm the kubelet is running
+      ansible.builtin.systemd_service:
+        name: kubelet
+        state: started
+        enabled: true
+      become: true
+
+- name: Label the node as a worker
+  # Set from the control plane, because Kubernetes will not let a kubelet give itself a
+  # node-role label - a node that can label itself can label itself into any scheduling
+  # decision it likes.
+  ansible.builtin.command: >-
+    kubectl --kubeconfig /etc/kubernetes/admin.conf
+    label node {{ inventory_hostname }} node-role.kubernetes.io/worker= --overwrite
+  become: true
+  delegate_to: "{{ control_plane_name }}"
+  register: worker_label
+  changed_when: "'not labeled' not in worker_label.stdout"

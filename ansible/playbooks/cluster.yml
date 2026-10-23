@@ -1,0 +1,89 @@
+---
+# Build the on-prem Kubernetes cluster from three prepared machines.
+#
+#   make onprem-up       this playbook
+#   make onprem-check    --check --diff, changes nothing
+#   make onprem-config   re-render the kubeadm config only
+#
+# Everything Module 02 did by hand, in the order it was done by hand, and for the same reasons.
+# The runbook docs/runbooks/cluster-bootstrap.md explains WHY each step exists; this file is the
+# executable form of it, and the two must not drift.
+#
+# The gate for Module 03: `terraform destroy` the nodes, `make onprem-vms`, run this, and get a
+# working cluster with no manual steps - then run it again and see changed=0.
+
+- name: Assert the image did its job
+  hosts: all
+  gather_facts: true
+  roles:
+    - preflight
+  tags: [preflight]
+
+- name: Bootstrap the control plane
+  hosts: control_plane
+  gather_facts: false
+  roles:
+    - control_plane
+  tags: [control-plane, config]
+
+- name: Install the CNI
+  # Before the workers join, so that a joining node finds a pod network already waiting and
+  # goes Ready once rather than twice. Nothing breaks if the order is reversed - it is just
+  # fewer state transitions to read.
+  hosts: control_plane
+  gather_facts: false
+  roles:
+    - cilium
+  tags: [cni]
+
+- name: Join the workers
+  hosts: workers
+  gather_facts: false
+  # One at a time. With two workers it barely matters; the habit matters, because this same
+  # playbook is what will eventually touch a cluster that has something running on it.
+  serial: 1
+  roles:
+    - workers
+  tags: [workers]
+
+- name: Verify what was built
+  hosts: control_plane
+  gather_facts: false
+  tags: [verify]
+  tasks:
+    - name: Wait for the CNI agent on the newly joined workers
+      ansible.builtin.command: >-
+        kubectl --namespace kube-system rollout status daemonset/cilium --timeout=180s
+      delegate_to: localhost
+      become: false
+      environment:
+        KUBECONFIG: "{{ kubeconfig_fetch_path }}"
+      changed_when: false
+
+    - name: Every node Ready
+      ansible.builtin.command: kubectl wait --for=condition=Ready nodes --all --timeout=180s
+      delegate_to: localhost
+      become: false
+      environment:
+        KUBECONFIG: "{{ kubeconfig_fetch_path }}"
+      changed_when: false
+
+    - name: The cluster, as built
+      ansible.builtin.command: >-
+        kubectl get nodes -o custom-columns=NODE:.metadata.name,STATUS:.status.conditions[-1].type,ROLES:.metadata.labels.kubernetes\.io/role,VERSION:.status.nodeInfo.kubeletVersion
+      delegate_to: localhost
+      become: false
+      environment:
+        KUBECONFIG: "{{ kubeconfig_fetch_path }}"
+      register: final_nodes
+      changed_when: false
+
+    - name: Report
+      ansible.builtin.debug:
+        msg: |
+          {{ final_nodes.stdout }}
+
+          Next: make smoke
+          If this was the second consecutive run, every task above should have reported
+          ok rather than changed. Anything that says changed on a second run is a task
+          that is not idempotent, and that is a bug to fix now rather than to live with.

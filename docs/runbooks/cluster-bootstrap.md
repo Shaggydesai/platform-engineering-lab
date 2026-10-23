@@ -129,17 +129,18 @@ use a config file instead, for three reasons:
 - Module 03's Ansible role will template this exact file. Writing it now means the automation is
   a templating exercise rather than a redesign.
 
-**The file lives in Git, at `clusters/onprem/kubeadm/init.yaml`.** From the WSL workstation:
+**The file lives in Git.** Module 02 kept it at `clusters/onprem/kubeadm/init.yaml` and copied it
+with a script that checksummed the result and counted the documents. **Module 03 took ownership
+of it**: it is now a Jinja template at
+`ansible/roles/control_plane/templates/kubeadm-init.yaml.j2`, rendered from `nodes.json` by the
+`control_plane` role, so the values cannot disagree with the inventory rather than being compared
+against it.
 
 ```bash
-make onprem-kubeadm-config
+make onprem-config       # render and validate it, nothing else
 ```
 
-That copies it to `/etc/kubernetes/kubeadm/init.yaml` on the control plane and then checks four
-things there: the CIDRs and node address match `nodes.json`, the pinned `kubernetesVersion` matches
-the installed `kubeadm`, the copy's checksum is identical, and all **four** documents arrived.
-
-The last check exists because of a real failure. Pasting this file into an SSH session as a
+The original script existed because of a real failure. Pasting this file into an SSH session as a
 heredoc truncated when the terminal wrapped — and `kubeadm config validate` said `ok`, because it
 validates that the fields *present* are correct and cannot know what you meant to include. A
 truncated config that parses is a valid config. The `KubeletConfiguration` block vanished, which
@@ -149,7 +150,8 @@ nobody would connect the two events.
 The moral is not "paste more carefully". It is that configuration belongs in a file under version
 control, moved by a tool that can verify the move.
 
-The file, annotated — this is what `make onprem-kubeadm-config` sends:
+The file, annotated. In Module 03 the literal values below are Jinja expressions drawn from
+`nodes.json`; the reasoning in the comments is unchanged, which is the point:
 
 ```yaml
 # ---------------------------------------------------------------------------

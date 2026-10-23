@@ -77,17 +77,38 @@ onprem-diagnose: ## Explain why a node is unreachable (NODE=k8s-cp01 for one)
 onprem-vms-destroy: ## Destroy the on-prem nodes (the golden image is kept)
 	@terraform -chdir=terraform/onprem destroy
 
-.PHONY: onprem-kubeadm-config
-onprem-kubeadm-config: ## Module 02 - copy the kubeadm config from Git to the control plane and validate it
-	@bash scripts/push-kubeadm-config.sh
+# Ansible reads its config relative to the CURRENT DIRECTORY, not to ansible.cfg's own
+# location, so every target below runs from the repository root.
+ANSIBLE_ENV  := ANSIBLE_CONFIG=ansible/ansible.cfg
+PLAYBOOK     := $(ANSIBLE_ENV) ansible-playbook
+
+.PHONY: onprem-ping
+onprem-ping: ## Module 03 - can Ansible reach all three nodes?
+	@$(ANSIBLE_ENV) ansible all -m ping
+
+.PHONY: onprem-inventory
+onprem-inventory: ## Module 03 - show the inventory derived from nodes.json
+	@$(ANSIBLE_ENV) ansible-inventory --graph --vars
+
+.PHONY: onprem-preflight
+onprem-preflight: ## Module 03 - assert the golden image did its job (changes nothing)
+	@$(PLAYBOOK) ansible/playbooks/cluster.yml --tags preflight
+
+.PHONY: onprem-check
+onprem-check: ## Module 03 - dry run the whole cluster playbook (--check --diff)
+	@$(PLAYBOOK) ansible/playbooks/cluster.yml --check --diff
 
 .PHONY: onprem-up
 onprem-up: ## Module 03 - build the whole on-prem cluster from nothing
-	@echo "not implemented yet - Module 03"; exit 1
+	@$(PLAYBOOK) ansible/playbooks/cluster.yml
+
+.PHONY: onprem-config
+onprem-config: ## Module 03 - re-render the kubeadm config only
+	@$(PLAYBOOK) ansible/playbooks/cluster.yml --tags config
 
 .PHONY: onprem-down
 onprem-down: ## Destroy the on-prem cluster (keeps the VMs)
-	@echo "not implemented yet - Module 03"; exit 1
+	@$(PLAYBOOK) ansible/playbooks/reset.yml
 
 # ---------------------------------------------------------------- cloud
 

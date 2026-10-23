@@ -1,0 +1,73 @@
+---
+# Tear the CLUSTER down and leave the machines standing.
+#
+#   make onprem-down
+#
+# This exists so that the Module 03 gate can be tested without rebuilding VMs: reset, then
+# `make onprem-up`, and you have proven the playbook builds a cluster from prepared machines.
+# The full gate still destroys the VMs too, because a prepared machine that has hosted a
+# cluster is not quite the same as a fresh one, and the difference is where bugs hide.
+#
+# Workers first, control plane last. Resetting the control plane first would leave the workers
+# unable to reach an API server to deregister from, which works but produces a slower, noisier
+# teardown.
+
+- name: Reset the workers
+  hosts: workers
+  gather_facts: false
+  tasks:
+    - name: kubeadm reset
+      ansible.builtin.command: kubeadm reset --force
+      become: true
+      register: reset_worker
+      changed_when: "'not' not in reset_worker.stdout | lower or reset_worker.rc == 0"
+      failed_when: false
+
+- name: Reset the control plane
+  hosts: control_plane
+  gather_facts: false
+  tasks:
+    - name: kubeadm reset
+      # This deletes /var/lib/etcd. Everything in the cluster goes with it.
+      ansible.builtin.command: kubeadm reset --force
+      become: true
+      register: reset_cp
+      changed_when: true
+      failed_when: false
+
+- name: Clean up what kubeadm reset leaves behind
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Remove CNI configuration and state
+      # kubeadm reset deliberately does not touch these - it does not know which CNI you used.
+      # Left in place, the next cluster's kubelet reads a stale CNI config and pods get
+      # addresses from a network that no longer exists.
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      become: true
+      loop:
+        - /etc/cni/net.d
+        - /var/run/cilium
+        - /var/lib/cni
+
+    - name: Remove the kubeconfig left for the login user
+      ansible.builtin.file:
+        path: "/home/{{ ansible_user }}/.kube"
+        state: absent
+      become: true
+
+- name: Report
+  hosts: control_plane
+  gather_facts: false
+  tasks:
+    - name: What is left
+      ansible.builtin.debug:
+        msg: |
+          Cluster gone, machines up. The nodes are back to the state the golden image left them
+          in, so `make onprem-up` should rebuild from here.
+
+          The workstation's kubeconfig still holds a {{ kube_context }} context pointing at a
+          cluster that no longer exists. `make onprem-up` replaces it - including the CA, which
+          is why a stale context fails TLS verification rather than simply timing out.

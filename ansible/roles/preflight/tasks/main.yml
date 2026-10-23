@@ -1,0 +1,152 @@
+---
+# preflight: assert that the golden image did its job. CHECKS ONLY - this role never changes
+# anything (ADR-0008). Packer owns machine configuration; a setting with two owners has none.
+#
+# Every assertion carries the sentence explaining what breaks when it is false, because
+# "assertion failed" tells you nothing and these are exactly the failures that cost us hours
+# in Modules 01 and 02.
+#
+# When one of these fails, the fix is `make image` and a node rebuild - NOT a quick `sudo`
+# on the node. Fixing it on the node means it is wrong again after the next rebuild.
+
+- name: Read the facts the assertions need
+  # changed_when: false on every one of these. A check that reports "changed" makes the
+  # second run of the playbook look like it did work, and "changed=0 on the second run" is
+  # the whole point of the Module 03 gate.
+  block:
+    - name: Kernel modules
+      ansible.builtin.command: cat /proc/modules
+      register: pf_modules
+      changed_when: false
+
+    - name: Sysctls that bridged and routed traffic depend on
+      ansible.builtin.command: >-
+        sysctl -n net.bridge.bridge-nf-call-iptables net.ipv4.ip_forward
+      register: pf_sysctl
+      changed_when: false
+
+    - name: containerd cgroup driver
+      ansible.builtin.shell:
+        cmd: set -o pipefail && containerd config dump | grep -E '^\s*SystemdCgroup' | head -1
+        executable: /bin/bash
+      become: true
+      register: pf_cgroup
+      changed_when: false
+
+    - name: kubeadm version
+      ansible.builtin.command: kubeadm version -o short
+      register: pf_kubeadm
+      changed_when: false
+
+    - name: Held packages
+      ansible.builtin.command: apt-mark showhold
+      register: pf_holds
+      changed_when: false
+
+    - name: Host firewall
+      ansible.builtin.command: ufw status
+      become: true
+      register: pf_ufw
+      changed_when: false
+      failed_when: false
+
+    - name: Clock synchronisation
+      ansible.builtin.command: timedatectl show -p NTPSynchronized --value
+      register: pf_clock
+      changed_when: false
+
+    - name: Name resolution for every node
+      ansible.builtin.command: "getent hosts {{ item }}"
+      loop: "{{ all_node_names }}"
+      register: pf_hosts
+      changed_when: false
+      failed_when: false
+
+- name: Swap must be off
+  ansible.builtin.assert:
+    that: ansible_swaptotal_mb | int == 0
+    fail_msg: >-
+      Swap is on ({{ ansible_swaptotal_mb }} MB). The kubelet's eviction and scheduling
+      arithmetic assumes memory is memory; with swap on, a node under-reports pressure and
+      pods are killed for reasons that appear in no metric you are looking at. Fix the image,
+      not the node.
+    success_msg: "swap off"
+
+- name: br_netfilter and overlay must be loaded
+  ansible.builtin.assert:
+    that:
+      - "'br_netfilter' in pf_modules.stdout"
+      - "'overlay' in pf_modules.stdout"
+    fail_msg: >-
+      A required kernel module is missing. Without br_netfilter, traffic between two pods on
+      the SAME node bypasses the rules kube-proxy wrote, so some connections work and others
+      silently do not - the worst possible symptom. Check 10-base.sh in the Packer scripts.
+    success_msg: "br_netfilter, overlay loaded"
+
+- name: Bridged traffic and IP forwarding must be enabled
+  ansible.builtin.assert:
+    that: pf_sysctl.stdout_lines | map('int') | list == [1, 1]
+    fail_msg: >-
+      Expected both sysctls to be 1, got {{ pf_sysctl.stdout_lines }}. Same failure mode as a
+      missing br_netfilter, and it can happen even with the module loaded.
+    success_msg: "bridge-nf-call-iptables=1, ip_forward=1"
+
+- name: containerd must use the systemd cgroup driver
+  ansible.builtin.assert:
+    that: "'true' in pf_cgroup.stdout | lower"
+    fail_msg: >-
+      containerd is not using SystemdCgroup. The kubelet is configured for systemd, so the two
+      would hold different views of the cgroup hierarchy - pods start and are then OOM-killed
+      at sizes far below their limits. Check 20-container-runtime.sh.
+    success_msg: "containerd SystemdCgroup = true"
+
+- name: The Kubernetes packages must be held at the expected version
+  ansible.builtin.assert:
+    that:
+      - pf_kubeadm.stdout == kubernetes_version
+      - "'kubeadm' in pf_holds.stdout"
+      - "'kubelet' in pf_holds.stdout"
+      - "'kubectl' in pf_holds.stdout"
+    fail_msg: >-
+      Expected kubeadm {{ kubernetes_version }} with all three packages held, found
+      {{ pf_kubeadm.stdout }} and holds [{{ pf_holds.stdout_lines | join(', ') }}]. Unheld
+      packages mean an apt upgrade can skew the control plane against the kubelet, which is
+      supported in one direction only and obscure when it breaks.
+    success_msg: "kubeadm {{ pf_kubeadm.stdout }}, three packages held"
+
+- name: No host firewall may be active
+  ansible.builtin.assert:
+    that: "'inactive' in pf_ufw.stdout or pf_ufw.rc != 0"
+    fail_msg: >-
+      ufw is active. Kubernetes expects to own the host's packet filtering - kube-proxy and
+      Cilium each write their own rules - and a second default-deny policy fights them without
+      failing cleanly: the API answers, pods start, and then traffic disappears depending on
+      which node a pod landed on. 40-harden.sh disables it.
+    success_msg: "no host firewall"
+
+- name: The clock must be synchronised
+  ansible.builtin.assert:
+    that: pf_clock.stdout | trim | lower == 'yes'
+    fail_msg: >-
+      The clock is not synchronised. etcd and every certificate depend on it, and a nested VM
+      on a laptop drifts whenever the host sleeps. The failures look like TLS problems.
+      Try: sudo chronyc makestep
+    success_msg: "clock synchronised"
+
+- name: Every node must resolve every other node by name
+  ansible.builtin.assert:
+    that: pf_hosts.results | selectattr('rc', 'ne', 0) | list | length == 0
+    fail_msg: >-
+      Some node names do not resolve:
+      {{ pf_hosts.results | selectattr('rc', 'ne', 0) | map(attribute='item') | list }}.
+      controlPlaneEndpoint is a NAME, so a node that cannot resolve it cannot join. cloud-init
+      writes /etc/hosts from Terraform - check the user-data template.
+    success_msg: "all node names resolve"
+
+- name: Report the memory the kubelet will actually have
+  # Not an assertion - a number worth seeing before wondering why something was evicted.
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }} ({{ node_role }}): {{ ansible_memtotal_mb }} MB total,
+      {{ ansible_memtotal_mb | int - 512 }} MB allocatable after the 512 MB reserved for the
+      OS and the kubelet.

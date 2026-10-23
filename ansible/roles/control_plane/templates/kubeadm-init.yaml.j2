@@ -1,10 +1,14 @@
 # kubeadm configuration for the on-prem control plane.
 #
-#   make onprem-kubeadm-config     copy this to k8s-cp01 and validate it there
+#   RENDERED BY ANSIBLE - never copy this file to a node by hand.
+#     make onprem-up       renders it and applies the whole cluster
+#     make onprem-config   renders it only (ansible --tags config)
 #
-# This file is the RECORD of how the cluster was built. Module 03's Ansible role templates
-# it from clusters/onprem/nodes.json, which is why the values here are duplicated from that
-# file rather than invented: node name, address, and both CIDRs must match it exactly.
+# This file is the RECORD of how the cluster was built. As of Module 03 it is a Jinja template
+# rendered by the control_plane role: every value that could disagree with reality now comes
+# from clusters/onprem/nodes.json through the dynamic inventory, so it CANNOT disagree. That is
+# strictly better than the Module 02 arrangement, where two files held the same CIDR and a
+# script compared them and hoped.
 #
 # Written against kubeadm.k8s.io/v1beta4, the config API for Kubernetes 1.31+. v1beta3 is
 # gone in 1.34, so a tutorial using it predates this cluster. One v1beta4 change that bites:
@@ -20,10 +24,10 @@ kind: InitConfiguration
 localAPIEndpoint:
   # Must be the node's real address, not 0.0.0.0 - it is baked into the
   # certificates and into every kubeconfig kubeadm generates.
-  advertiseAddress: 192.168.100.10
+  advertiseAddress: {{ control_plane_address }}
   bindPort: 6443
 nodeRegistration:
-  name: k8s-cp01
+  name: {{ inventory_hostname }}
   # Explicit, so that a missing runtime fails with "socket not found" rather
   # than "no runtime detected".
   criSocket: unix:///run/containerd/containerd.sock
@@ -42,14 +46,14 @@ nodeRegistration:
 # ---------------------------------------------------------------------------
 apiVersion: kubeadm.k8s.io/v1beta4
 kind: ClusterConfiguration
-clusterName: onprem
+clusterName: {{ cluster_name }}
 
 # Pinned to what is actually installed (`kubeadm version -o short`). Unset, kubeadm
 # chooses for itself; if it chose something newer than the held kubelet packages you
 # would run control-plane images from one release against a kubelet from another -
 # supported in one direction only, and obscure when it breaks. Pinning also removes a
 # network call from init.
-kubernetesVersion: v1.34.12
+kubernetesVersion: {{ kubernetes_version }}
 
 # The most consequential line here, and the one most tutorials omit. This is the name
 # clients and joining nodes use to reach the API server. Omit it and everything
@@ -58,14 +62,14 @@ kubernetesVersion: v1.34.12
 # NAME now, that future change is a DNS change.
 #
 # It resolves because cloud-init wrote /etc/hosts on every node in Module 01.
-controlPlaneEndpoint: "k8s-cp01.platform.local:6443"
+controlPlaneEndpoint: "{{ control_plane_endpoint }}"
 
 networking:
   # Fixed in ADR-0007, recorded in clusters/onprem/nodes.json. Neither may overlap
   # 192.168.100.0/24, or a pod reaching for a node would route to a pod instead - a
   # failure that looks like DNS and is not.
-  podSubnet: 10.244.0.0/16
-  serviceSubnet: 10.96.0.0/12
+  podSubnet: {{ pod_cidr }}
+  serviceSubnet: {{ service_cidr }}
   dnsDomain: cluster.local
 
 apiServer:
@@ -73,9 +77,9 @@ apiServer:
   # name other than the advertise address fails TLS verification - and you will reach it
   # by several names.
   certSANs:
-    - k8s-cp01
-    - k8s-cp01.platform.local
-    - 192.168.100.10
+    - {{ inventory_hostname }}
+    - {{ inventory_hostname }}.{{ cluster_domain }}
+    - {{ control_plane_address }}
     - 127.0.0.1
 
 etcd:

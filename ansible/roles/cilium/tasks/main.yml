@@ -1,0 +1,85 @@
+---
+# cilium: the CNI, from the values file in Git. ADR-0007 for the choice; ADR-0002 puts the CNI in
+# Layer 1 because Argo CD cannot run without a pod network, so a CNI owned by Argo CD would have
+# to exist before the thing that installs it.
+#
+# helm runs on the WORKSTATION, not on a node: the nodes have no helm and no reason to acquire
+# one, and the values file lives in this repository. So every task here is delegated to
+# localhost and runs once.
+
+- name: Is Cilium already installed, and at which version?
+  # `helm upgrade --install` is idempotent in effect but always reports "changed", which would
+  # make the second run of the playbook look like it did work. The Module 03 gate is
+  # "changed=0 on the second run", so the question has to be asked before acting.
+  ansible.builtin.command: >-
+    helm list --namespace kube-system --filter '^cilium$' --output json
+  delegate_to: localhost
+  run_once: true
+  become: false
+  environment:
+    KUBECONFIG: "{{ kubeconfig_fetch_path }}"
+  register: cilium_release
+  changed_when: false
+
+- name: Decide whether anything needs doing
+  ansible.builtin.set_fact:
+    cilium_installed: "{{ (cilium_release.stdout | from_json | length) > 0 }}"
+    cilium_current: >-
+      {{ (cilium_release.stdout | from_json | first).chart | default('none') | regex_replace('^cilium-', '') }}
+  run_once: true
+
+- name: Install or upgrade Cilium
+  when: not cilium_installed or cilium_current != cilium_version
+  ansible.builtin.command:
+    argv:
+      - helm
+      - upgrade
+      - --install
+      - cilium
+      - cilium/cilium
+      - --version
+      - "{{ cilium_version }}"
+      - --namespace
+      - kube-system
+      - --values
+      - "{{ cilium_values_file }}"
+      - --wait
+      - --timeout
+      - 5m
+  delegate_to: localhost
+  run_once: true
+  become: false
+  environment:
+    KUBECONFIG: "{{ kubeconfig_fetch_path }}"
+  register: cilium_install
+  changed_when: true
+
+- name: Report that it was already current
+  when: cilium_installed and cilium_current == cilium_version
+  ansible.builtin.debug:
+    msg: "Cilium {{ cilium_current }} already installed, nothing to do"
+  run_once: true
+
+- name: Wait for the agent on every node
+  # DaemonSet rollout, not pod count: a DaemonSet is "one per node", so this also waits for the
+  # agent on a worker that joined moments ago.
+  ansible.builtin.command: >-
+    kubectl --namespace kube-system rollout status daemonset/cilium --timeout=180s
+  delegate_to: localhost
+  run_once: true
+  become: false
+  environment:
+    KUBECONFIG: "{{ kubeconfig_fetch_path }}"
+  changed_when: false
+
+- name: Every node must now be Ready
+  # Before the CNI, the kubelet refuses to call itself Ready because it cannot give a pod an
+  # address. This is the task that closes that gap, so it is the right place to assert it.
+  ansible.builtin.command: >-
+    kubectl wait --for=condition=Ready nodes --all --timeout=120s
+  delegate_to: localhost
+  run_once: true
+  become: false
+  environment:
+    KUBECONFIG: "{{ kubeconfig_fetch_path }}"
+  changed_when: false
