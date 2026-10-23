@@ -15,7 +15,21 @@ if [ "${YES:-}" != 1 ]; then
   read -rp "run the smoke test against '$ctx'? [y/N] " a; [ "$a" = y ] || exit 1
 fi
 
-cleanup() { kubectl delete ns "$NS" --wait=false >/dev/null 2>&1 || true; }
+# On success the namespace goes away. On FAILURE it is kept, because a test that
+# destroys its own evidence forces you to reproduce the failure before you can look at
+# it - and an intermittent failure may not reproduce.
+cleanup() {
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    kubectl delete ns "$NS" --wait=false >/dev/null 2>&1 || true
+  else
+    echo
+    echo "FAILED. Namespace $NS has been KEPT so you can look at it:"
+    echo "  kubectl -n $NS get pod,svc,endpointslice -o wide"
+    echo "  kubectl -n $NS exec p-cp01 -- curl -v -m5 http://web.$NS.svc.cluster.local"
+    echo "  kubectl delete ns $NS          # when you are done"
+  fi
+}
 trap cleanup EXIT
 kubectl create ns "$NS" >/dev/null
 
@@ -71,8 +85,37 @@ echo "5/5 Service routing"
 kubectl -n "$NS" create deploy web --image=nginx:alpine --replicas=2 >/dev/null
 kubectl -n "$NS" expose deploy web --port=80 >/dev/null
 kubectl -n "$NS" rollout status deploy/web --timeout=120s >/dev/null
-kubectl -n "$NS" exec "${pods[0]}" -- curl -sf -m5 http://web."$NS".svc.cluster.local >/dev/null
-echo "    service reachable"
+
+# A pod being Ready is not the same as its Service being routable. The chain is:
+# pod Ready -> EndpointSlice updated -> every node's kube-proxy writes iptables rules.
+# `rollout status` returns after the first link. nginx has no readiness probe, so
+# "Available" only means the container started. A single-shot curl immediately after is
+# a race, and the first version of this test lost it.
+kubectl -n "$NS" wait --for=jsonpath='{.endpoints[0].conditions.ready}'=true \
+  endpointslice -l kubernetes.io/service-name=web --timeout=60s >/dev/null
+clusterip=$(kubectl -n "$NS" get svc web -o jsonpath='{.spec.clusterIP}')
+
+# Three probes, narrowest first, so a failure says WHICH layer broke rather than
+# "the service is unreachable":
+#   backend  - a pod IP directly        -> is nginx actually serving?
+#   clusterip- the virtual IP           -> did kube-proxy program the rules?
+#   dns name - the full name            -> does cluster DNS resolve the service?
+backend=$(kubectl -n "$NS" get pod -l app=web -o jsonpath='{.items[0].status.podIP}')
+probe() {
+  local what=$1 url=$2
+  for _ in $(seq 1 15); do
+    if kubectl -n "$NS" exec "${pods[0]}" -- curl -sf -m3 "$url" >/dev/null 2>&1; then
+      printf '    %-10s %-34s ok\n' "$what" "$url"; return 0
+    fi
+    sleep 2
+  done
+  printf '    %-10s %-34s FAILED\n' "$what" "$url"
+  return 1
+}
+
+probe backend  "http://$backend"
+probe clusterip "http://$clusterip"
+probe dns      "http://web.$NS.svc.cluster.local"
 
 echo
 echo "smoke test passed on $ctx"
