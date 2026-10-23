@@ -31,14 +31,36 @@ for n in $(kubectl get nodes -o jsonpath='{.items[*].metadata.name}'); do
 done
 kubectl -n "$NS" wait --for=condition=Ready pod --all --timeout=120s >/dev/null
 
-echo "3/5 pod-to-pod across nodes"
+echo "3/5 pod-to-pod across nodes (every ordered pair)"
+# EVERY pair, not one. The first version of this test pinged pods[0] -> pods[1], which on a
+# three-node cluster happened to be control-plane -> worker, and never touched the
+# worker-to-worker path where real traffic actually lives. A tunnel can be broken in one
+# direction, or between one pair of nodes, and a single ping will not find it.
 pods=($(kubectl -n "$NS" get pod -o jsonpath='{.items[*].metadata.name}'))
-if [ "${#pods[@]}" -gt 1 ]; then
-  target=$(kubectl -n "$NS" get pod "${pods[1]}" -o jsonpath='{.status.podIP}')
-  kubectl -n "$NS" exec "${pods[0]}" -- ping -c3 -W2 "$target" >/dev/null
-  echo "    ${pods[0]} -> ${pods[1]} ok"
-else
+if [ "${#pods[@]}" -lt 2 ]; then
   echo "    single node, skipped"
+else
+  declare -A ip
+  for p in "${pods[@]}"; do
+    ip[$p]=$(kubectl -n "$NS" get pod "$p" -o jsonpath='{.status.podIP}')
+  done
+  pairs=0
+  for src in "${pods[@]}"; do
+    for dst in "${pods[@]}"; do
+      [ "$src" = "$dst" ] && continue
+      if kubectl -n "$NS" exec "$src" -- ping -c2 -W2 "${ip[$dst]}" >/dev/null 2>&1; then
+        printf '    %-10s -> %-10s %s  ok\n' "$src" "$dst" "${ip[$dst]}"
+      else
+        printf '    %-10s -> %-10s %s  FAILED\n' "$src" "$dst" "${ip[$dst]}"
+        echo "    One direction of one tunnel is broken. Look at:"
+        echo "      cilium status --verbose      (drops, tunnel state)"
+        echo "      hubble observe --pod $src    (where the packet went)"
+        exit 1
+      fi
+      pairs=$((pairs+1))
+    done
+  done
+  echo "    $pairs of $pairs paths work"
 fi
 
 echo "4/5 cluster DNS"

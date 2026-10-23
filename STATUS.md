@@ -4,9 +4,9 @@
 > before you close the laptop. It takes thirty seconds and it is the reason this project will
 > not stall like the last one.
 
-**Last updated:** 2026-10-22
-**Current module:** 02 — Kubernetes by hand, with kubeadm
-**Overall progress:** Modules 00 and 01 complete — 2 / 13
+**Last updated:** 2026-10-23
+**Current module:** 02 — Kubernetes by hand, with kubeadm (gate partly closed)
+**Overall progress:** Modules 00 and 01 complete, 02 nearly — 2.5 / 13
 
 ---
 
@@ -15,7 +15,7 @@
 | | |
 |:--|:--|
 | **On-prem nodes** | **built and verified** — k8s-cp01 .10, k8s-w01 .11, k8s-w02 .12, destroy/apply round trip passes |
-| **On-prem cluster** | control plane initialised, v1.34.12 — `NotReady` until Cilium, workers not joined |
+| **On-prem cluster** | **running** — 3 nodes Ready, v1.34.12, Cilium 1.20.3, `make smoke` passes |
 | **Certificates expire** | **2027-10-22** — `sudo kubeadm certs renew all` before then, or nothing works |
 | **GCP cluster** | not built — account verified empty, ₹0 running |
 | **AWS cluster** | not built |
@@ -35,17 +35,19 @@ make onprem-vms-status
 Module 01 is closed: the gate (`onprem-vms-destroy` then `onprem-vms`) passed with three
 reachable nodes and three distinct machine-ids.
 
-Module 02 is written and ready to walk through. The CNI is decided (ADR-0007: Cilium, with
-kube-proxy kept until Module 04 removes it deliberately), and both CIDRs are recorded in
-`clusters/onprem/nodes.json` so nothing can disagree about them later.
+`make smoke` passes on three nodes. Two parts of the Module 02 gate remain:
 
-1. **Work through `docs/runbooks/cluster-bootstrap.md`, steps 0 → 7.** It is written as a lab,
-   not a script: each step says what to look at and why. Two sessions, not one.
-2. Do not skip step 4 — the broken, `NotReady`, pre-CNI cluster is the most instructive state
-   this project will ever be in, and you only get to see it once.
-3. The gate: `make smoke` passes, a worker reboot rejoins unaided, and
-   `cilium connectivity test` passes.
-4. Before any cloud module: AWS and GCP budget alarms (ADR-0003) — still outstanding.
+1. **A worker reboot must rejoin unaided** — `ssh sagar@192.168.100.11 'sudo reboot'`, watch
+   `kubectl get nodes -w`, then `make smoke` again. Note that `make smoke` now tests **every**
+   ordered pod pair, so it exercises the worker-to-worker tunnel the first version missed.
+2. **`cilium connectivity test`** — ~10 minutes, 30-odd pods. Thorough; run it once.
+
+Then Module 03: Ansible reproduces this cluster from destroyed nodes with no manual steps. The
+gate for that module is that its cluster is indistinguishable from this one, which is why
+everything applied by hand here already lives in Git — `clusters/onprem/kubeadm/init.yaml` and
+`ansible/roles/cilium/files/cilium-values.yaml` are the two files it has to template.
+
+Before any cloud module: AWS and GCP budget alarms (ADR-0003) — still outstanding.
 
 Runbooks: `docs/runbooks/01-onprem-vms.md` (nodes) · `docs/runbooks/cluster-bootstrap.md` (cluster)
 
@@ -77,12 +79,27 @@ Runbooks: `docs/runbooks/01-onprem-vms.md` (nodes) · `docs/runbooks/cluster-boo
 - [x] **The gate: `make onprem-vms-destroy` then `make onprem-vms`, clean**
 - [x] Serial console on every domain — interactive **and** recorded to a file
 
+## Module 02 checklist
+
+- [x] kubeadm config as a FILE in Git, not flags — `clusters/onprem/kubeadm/init.yaml`
+- [x] `kubernetesVersion` pinned to the held packages (v1.34.12)
+- [x] `resolvConf` set, so CoreDNS never hit the systemd-resolved stub loop
+- [x] Control plane initialised; the pre-CNI `NotReady` state observed deliberately
+- [x] ADR-0007: Cilium, with kube-proxy kept until Module 04 removes it
+- [x] Cilium 1.20.3 installed from a values file in Git
+- [x] Both workers joined, labelled, `cluster-pool` IPAM giving each node its own /24
+- [x] `make smoke` passes — now across every ordered pod pair, not just one
+- [ ] A worker reboot rejoins unaided
+- [ ] `cilium connectivity test` passes
+- [ ] Notes added to the runbook where reality differed from what was written
+
 ## Session log
 
 Keep this short. One line per session: what you did, what broke, what is next.
 
 | Date | Module | What happened | Next |
 |:--|:--|:--|:--|
+| 2026-10-23 | 02 | Cluster up: three nodes Ready on v1.34.12, Cilium 1.20.3, `make smoke` passing. Two things went wrong and both were worth it — a heredoc paste of the kubeadm config truncated silently while `kubeadm config validate` said `ok` (configuration now lives in Git and is copied by a script that checksums it and counts the documents), and `helm` could not resolve `k8s-cp01.platform.local` because cloud-init writes `/etc/hosts` on the nodes and never on the workstation (`make hosts`, plus `generateHosts=false` so WSL stops undoing it). Also found that `make smoke` only ever tested one pod pair, missing the worker-to-worker tunnel entirely. | Reboot test, connectivity test, then Module 03 |
 | 2026-10-22 | 01 | Serial console added to every domain — interactive on loopback and recorded to a file. It paid for itself immediately: the first boot log proved the qcow2 fix (`vda: vda1 vda14 vda15 vda16` — a partition table, where before QEMU saw none) and revealed that a Terraform "update in-place" on a domain silently **reboots** it. That is harmless now and would take etcd down from Module 02, so it is written up in the runbook. Image now disables ufw and boots to multi-user. | Module 02 step 0 |
 | 2026-10-22 | 01 | **Module 01 done.** Nodes were created but unreachable: domains running, CPU time flat at 5.8s, no lease, no SSH. The QEMU command line showed `"driver":"raw"` — `devices.disks[].driver` had been omitted, libvirt defaults to raw, and QEMU read the qcow2 header as a partition table. Adding `driver = { name = "qemu", type = "qcow2" }` fixed it; destroy/apply round trip now passes in 28s. | Module 02: kubeadm by hand |
 | 2026-10-17 | 00 | Project restarted. Decisions and scaffold written before any cluster exists. | Capture laptop specs, create repo |
