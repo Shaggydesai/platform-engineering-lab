@@ -91,7 +91,16 @@
   delegate_to: localhost
   become: false
   register: cp_rename
-  changed_when: "'renamed' in cp_rename.stdout"
+  # changed_when: false, and not as a cover-up. The file this renames is the one the previous
+  # task just fetched, so it ALWAYS arrives carrying kubeadm's original context name and the
+  # rename always succeeds - reporting "changed" every run forever, which would make the
+  # Module 03 gate ("changed=0 on a second run") permanently unreachable and train us to
+  # ignore it.
+  #
+  # Nothing on the cluster or the workstation is altered here: this normalises a temporary
+  # artifact on its way to the merge task below, and THAT task compares before and after and
+  # reports changed only when the real kubeconfig moved.
+  changed_when: false
   failed_when:
     - cp_rename.rc != 0
     - "'no context exists' not in cp_rename.stderr"

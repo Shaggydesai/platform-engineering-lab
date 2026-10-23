@@ -69,8 +69,11 @@
       changed_when: false
 
     - name: The cluster, as built
-      ansible.builtin.command: >-
-        kubectl get nodes -o custom-columns=NODE:.metadata.name,STATUS:.status.conditions[-1].type,ROLES:.metadata.labels.kubernetes\.io/role,VERSION:.status.nodeInfo.kubeletVersion
+      # Plain `get nodes`, not custom-columns. ROLES is a column kubectl COMPUTES from every
+      # node-role.kubernetes.io/* label it finds; there is no single label holding it, so
+      # asking for one by name prints <none> for a correctly labelled node - which is exactly
+      # what the first version of this task did.
+      ansible.builtin.command: kubectl get nodes -o wide
       delegate_to: localhost
       become: false
       environment:

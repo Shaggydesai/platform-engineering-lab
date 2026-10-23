@@ -64,9 +64,9 @@
 
 - name: Swap must be off
   ansible.builtin.assert:
-    that: ansible_swaptotal_mb | int == 0
+    that: ansible_facts['swaptotal_mb'] | int == 0
     fail_msg: >-
-      Swap is on ({{ ansible_swaptotal_mb }} MB). The kubelet's eviction and scheduling
+      Swap is on ({{ ansible_facts['swaptotal_mb'] }} MB). The kubelet's eviction and scheduling
       arithmetic assumes memory is memory; with swap on, a node under-reports pressure and
       pods are killed for reasons that appear in no metric you are looking at. Fix the image,
       not the node.
@@ -147,6 +147,6 @@
   # Not an assertion - a number worth seeing before wondering why something was evicted.
   ansible.builtin.debug:
     msg: >-
-      {{ inventory_hostname }} ({{ node_role }}): {{ ansible_memtotal_mb }} MB total,
-      {{ ansible_memtotal_mb | int - 512 }} MB allocatable after the 512 MB reserved for the
+      {{ inventory_hostname }} ({{ node_role }}): {{ ansible_facts['memtotal_mb'] }} MB total,
+      {{ ansible_facts['memtotal_mb'] | int - 512 }} MB allocatable after the 512 MB reserved for the
       OS and the kubelet.
