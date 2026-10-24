@@ -16,8 +16,12 @@ version: 0.1.0
 
 dependencies:
   - name: metrics-server
-    # Pinned. Confirm with `helm search repo metrics-server/metrics-server --versions`
-    # before moving it, and move it in its own commit with the reason - the same discipline
-    # as the Cilium and Argo CD pins.
-    version: 3.13.0
+    # Pinned. CHART 3.14.0 carries metrics-server 0.9.0 - two different numbers, as with the
+    # Argo CD pin, and `helm search repo metrics-server/metrics-server --versions` prints them
+    # side by side. Move this in its own commit with the reason.
+    #
+    # My first guess here was 3.13.0, which does not exist at all (3.13.1 does). Worth
+    # remembering: a version that looks plausible is not a version that resolves, and the
+    # failure arrives later, from Argo CD's repo-server, as a chart it cannot find.
+    version: 3.14.0
     repository: https://kubernetes-sigs.github.io/metrics-server/
