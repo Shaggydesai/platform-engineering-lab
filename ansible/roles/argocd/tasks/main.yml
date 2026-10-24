@@ -113,16 +113,18 @@
     KUBECONFIG: "{{ kubeconfig_fetch_path }}"
   changed_when: false
 
-- name: Apply the seam - the AppProjects and the root Application
-  # THE ONLY in-cluster objects Ansible applies besides the Helm release, and ADR-0009 says
-  # nothing may be added here without amending it. Order matters: an Application referencing a
-  # missing AppProject is rejected, so projects.yaml goes first.
+- name: Does the seam differ from what is in Git?
+  # `kubectl diff` exits 0 when nothing would change and 1 when something would. That exit code
+  # is a better answer to "is this task going to do anything?" than parsing the words kubectl
+  # prints afterwards, which is what the first version of this role did.
   #
-  # `kubectl apply` is used rather than a Kubernetes Ansible module on purpose - the module
-  # needs the python kubernetes library on the workstation, and this role must have as few
-  # dependencies as possible because it is the recovery path.
+  # --server-side matters here: these objects are CO-MANAGED. Argo CD's controller writes
+  # transient metadata of its own (a refresh annotation, the operation field) and a client-side
+  # diff counts anything absent from our file as a difference to remove. That produced a
+  # "changed" on an unchanged file, nondeterministically, depending on whether a refresh
+  # happened to be in flight.
   ansible.builtin.command: >-
-    kubectl apply -f {{ repo_root }}/gitops/bootstrap/{{ item }}
+    kubectl diff --server-side -f {{ repo_root }}/gitops/bootstrap/{{ item }}
   delegate_to: localhost
   run_once: true
   become: false
@@ -131,10 +133,40 @@
   loop:
     - projects.yaml
     - root-onprem.yaml
+  register: argocd_seam_diff
+  changed_when: false
+  # 0 = identical, 1 = differs. Anything else is a real error, and without this a broken
+  # kubeconfig would read as "no differences" and the apply would be skipped silently.
+  failed_when: argocd_seam_diff.rc not in [0, 1]
+
+- name: Apply the seam - the AppProjects and the root Application
+  # THE ONLY in-cluster objects Ansible applies besides the Helm release, and ADR-0009 says
+  # nothing may be added here without amending it. Order matters: an Application referencing a
+  # missing AppProject is rejected, so projects.yaml goes first - which is why this loops over
+  # the diff results in order rather than over a directory.
+  #
+  # --server-side records which fields WE own and leaves the controller's alone, instead of
+  # treating "not in my file" as "delete it". --force-conflicts takes ownership of the fields
+  # the previous client-side applies claimed; without it, the first server-side apply of an
+  # object that was applied client-side fails on every field.
+  #
+  # kubectl rather than a Kubernetes Ansible module on purpose: the module needs the python
+  # kubernetes library on the workstation, and this role is the recovery path - it should depend
+  # on as little as possible.
+  ansible.builtin.command: >-
+    kubectl apply --server-side --force-conflicts
+    -f {{ repo_root }}/gitops/bootstrap/{{ item.item }}
+  delegate_to: localhost
+  run_once: true
+  become: false
+  environment:
+    KUBECONFIG: "{{ kubeconfig_fetch_path }}"
+  loop: "{{ argocd_seam_diff.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: item.rc == 1
   register: argocd_seam
-  # kubectl prints "created", "configured" or "unchanged" per object. Only the first two are
-  # changes - which is what makes a second run of this role honest.
-  changed_when: "'unchanged' not in argocd_seam.stdout"
+  changed_when: true
 
 - name: Wait for the root Application to report Synced and Healthy
   # The real test of this role. Argo CD running is not the same as Argo CD reconciling: a wrong

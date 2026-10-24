@@ -5,8 +5,8 @@
 > not stall like the last one.
 
 **Last updated:** 2026-10-23
-**Current module:** 04 — Argo CD and the first reconciliation (written, not yet run)
-**Overall progress:** Modules 00–03 complete — 4 / 13
+**Current module:** 05 — The platform baseline
+**Overall progress:** Modules 00–04 complete — 5 / 13
 
 ---
 
@@ -19,7 +19,7 @@
 | **Certificates expire** | **2027-10-22** — `sudo kubeadm certs renew all` before then, or nothing works |
 | **GCP cluster** | not built — account verified empty, ₹0 running |
 | **AWS cluster** | not built |
-| **Argo CD** | not installed |
+| **Argo CD** | **running** — chart 10.11.0 / Argo CD v3.5.5, root app Synced, self-heal verified |
 | **ShopVerse running** | no |
 | **Monthly spend** | ₹0 |
 
@@ -32,25 +32,32 @@ make onprem-vms-status
 
 ## The next action
 
-Module 04 is written and validated but **not yet run**. The decisions are recorded in ADR-0009;
-the code is the Ansible `argocd` role plus three files in `gitops/bootstrap/`.
+Module 04 is closed. **Nothing in this cluster is installed by hand any more**: adding a
+component means adding a file to `gitops/clusters/onprem/platform/` and pushing it.
+
+The full cold start, now four commands:
 
 ```bash
-git pull
-helm search repo argo/argo-cd --versions | head -3   # confirm 10.8.3 is still current
-make onprem-argocd                                   # just this role
-make gitops-status
+make onprem-vms      # machines           (Module 01)
+make onprem-up       # cluster + Argo CD  (Modules 03, 04)
+make smoke           # five checks        (Module 02)
+make gitops-status   # what Git says the cluster is
 ```
 
-Then the two-part gate:
+**Module 05 — the platform baseline.** The add-ons every workload needs, all as wrapper charts
+(ADR-0002 Rule 3), with the per-environment overlay mechanism in place from the first component
+rather than retrofitted.
 
-1. **A commit changes the cluster** — bump `generation` in
-   `gitops/manifests/gitops-canary/configmap.yaml`, push, and read the ConfigMap back.
-2. **`kubectl delete` is reverted** — delete that ConfigMap and watch self-heal restore it.
-   This is the half that matters: sync proves Argo CD *can* apply Git, self-heal proves Git is
-   **in charge**.
+- Deliverables: cert-manager with an internal PKI; ingress via Gateway API; a storage class;
+  metrics-server; `gitops/environments/{onprem,gcp,aws}/` overlays.
+- Done when the platform app-of-apps is fully Synced and Healthy, and the overlay mechanism is
+  proven by one value that genuinely differs per environment.
+- Three sessions, and the longest module so far.
 
-Then `make gitops-drift`, which is ADR-0002 Rule 1 turned into a query rather than a promise.
+Worth deciding first, in the same spirit as ADR-0008 and ADR-0009: what a wrapper chart looks
+like here, exactly, so that all five components follow one shape instead of five. Cilium already
+has a values file in `ansible/roles/cilium/files/` and is **not** a wrapper chart — it is Layer 1
+and installed by Ansible — so Module 05 is where the pattern actually starts.
 
 Before any cloud module: AWS and GCP budget alarms (ADR-0003) — still outstanding.
 
@@ -120,9 +127,10 @@ Runbooks: `01-onprem-vms.md` · `cluster-bootstrap.md` · `03-ansible.md` · `04
 - [x] Root `Application`, non-recursive, no finalizer
 - [x] A canary `Application` whose only job is to answer "is GitOps working right now?"
 - [x] `make gitops-drift` — finds anything running that nothing in Git claims
-- [ ] **Run it**
-- [ ] Gate part 1: a commit changes the cluster with no `kubectl`
-- [ ] Gate part 2: `kubectl delete` on a managed resource is reverted by self-heal
+- [x] Run it — chart 10.11.0 carries Argo CD v3.5.5, which matches the argocd CLI's minor
+- [x] Gate part 1: a commit changed the cluster with no `kubectl` (revision b4fe706)
+- [x] Gate part 2: both a field patch and a full delete were reverted by self-heal
+- [x] `make gitops-drift` clean — nothing running that no Application claims
 
 ## Session log
 
@@ -130,6 +138,7 @@ Keep this short. One line per session: what you did, what broke, what is next.
 
 | Date | Module | What happened | Next |
 |:--|:--|:--|:--|
+| 2026-10-24 | 04 | **Module 04 closed.** Argo CD installed by Ansible, root Application Synced, and both halves of the gate pass: a commit changed the cluster with no kubectl, and self-heal reverted both a field patch and a full delete. `make gitops-drift` finds nothing unclaimed. The laptop restarted mid-module and everything came back untouched — `make onprem-vms` then `make onprem-up`, with kubeadm, Cilium and Argo CD all reporting "already done". Fixed along the way: the playbook now waits for the nodes instead of assuming they are up, and `make lint` exists because I verified a change with `--syntax-check \| tail -2` and a pipe discards the exit code. | Module 05 — the platform baseline |
 | 2026-10-23 | 03 | **Module 03 closed.** Cluster rebuilt from destroyed nodes in about four minutes with no manual steps, and the second run reports changed=0. Three bugs found, each only findable by a different test: running twice on a live cluster caught a task that renamed the file `fetch` uses as its idempotency marker (so `fetch` re-downloaded forever); the destroy-and-rebuild caught `template` not creating `/etc/kubernetes/kubeadm`, which existed only because Module 02 made it by hand; and `--syntax-check` caught paths in `ansible.cfg` resolving against the config file rather than the shell. Idempotency proves the gates work; only a rebuild proves the roles are complete. | Module 04 — Argo CD |
 | 2026-10-23 | 02 | **Module 02 closed.** Gate green: `make smoke`, a worker reboot rejoining unaided, and `cilium connectivity test`. Three lessons kept: `kubeadm config validate` says `ok` to a truncated file, so configuration moved into Git behind a script that checksums the copy and counts the documents; `make smoke` was testing one pod pair and reporting it as "pod-to-pod across nodes", so it now tests all six and keeps the namespace on failure; and the reboot test never saw `NotReady` because the VM came back inside the 40s grace period, which is documented along with the real six-minute eviction timeline. | Module 03 — Ansible |
 | 2026-10-23 | 02 | Cluster up: three nodes Ready on v1.34.12, Cilium 1.20.3, `make smoke` passing. Two things went wrong and both were worth it — a heredoc paste of the kubeadm config truncated silently while `kubeadm config validate` said `ok` (configuration now lives in Git and is copied by a script that checksums it and counts the documents), and `helm` could not resolve `k8s-cp01.platform.local` because cloud-init writes `/etc/hosts` on the nodes and never on the workstation (`make hosts`, plus `generateHosts=false` so WSL stops undoing it). Also found that `make smoke` only ever tested one pod pair, missing the worker-to-worker tunnel entirely. | Reboot test, connectivity test, then Module 03 |
