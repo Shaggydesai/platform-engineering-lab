@@ -8,6 +8,22 @@
 # This is the only thing in the repository that arrives as a raw URL rather than a Helm chart,
 # so it is pinned by CONTENT as well as by version. A tag is a mutable pointer; a digest is not.
 
+- name: Make sure the download directory exists
+  # THE THIRD TIME. `template` did not create /etc/kubernetes/kubeadm, `fetch` did not create
+  # ~/.kube, and now `get_url` does not create .cache. None of Ansible's file modules create
+  # parent directories, and each of the three failed only on a machine where the directory had
+  # not already been made by hand for some other reason.
+  #
+  # The pattern worth remembering: any task with a `dest:` needs the directory asserted first,
+  # and "it worked on my machine" means the directory was already there.
+  ansible.builtin.file:
+    path: "{{ gateway_api_bundle | dirname }}"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+  run_once: true
+  become: false
+
 - name: Fetch the Gateway API CRD bundle
   # To the workstation, not to a node. Nothing is applied from here yet - the download and the
   # verification are separate from the apply on purpose, so that a failed checksum means
@@ -28,6 +44,10 @@
   # anything that matters. The apply below is where change is reported.
 
 - name: Compute the bundle's digest
+  # A separate `stat` rather than get_url's own checksum field, because get_url reports
+  # checksum_src in SHA-1 by default. A failed run therefore prints a 40-character hex string
+  # that looks exactly like something to record and is the wrong algorithm entirely; this task
+  # is the only place a SHA-256 of this file is produced. 64 characters, not 40.
   ansible.builtin.stat:
     path: "{{ gateway_api_bundle }}"
     checksum_algorithm: sha256

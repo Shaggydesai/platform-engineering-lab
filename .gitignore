@@ -45,3 +45,7 @@ charts/*.tgz
 .DS_Store
 Thumbs.db
 *.swp
+
+# Downloaded artifacts, verified by digest and re-fetchable. The DIGEST is the thing that lives
+# in Git (clusters/onprem/nodes.json); the bytes do not need to.
+.cache/
