@@ -133,15 +133,12 @@ gitops-status: ## What Argo CD thinks the cluster should look like, and whether 
 # .status.sync.revisions, plural, one per source - and leaves the singular empty. The first
 # version of this target read only the singular, so metrics-server, the first multi-source
 # component in the repo, showed its revision as <none>. jq coalesces the two.
+# The jq program is ONE line on purpose. Make consumes the backslash in a line continuation
+# and passes the rest through, so a multi-line quoted script arrives at jq with literal
+# backslashes in it and fails to compile - which is what the first version of this did.
 	@kubectl -n argocd get applications -o json 2>/dev/null \
-	  | jq -r '["APP","PROJECT","SYNC","HEALTH","REVISION"], (.items[] | [ \
-	        .metadata.name, \
-	        .spec.project, \
-	        (.status.sync.status // "-"), \
-	        (.status.health.status // "-"), \
-	        ((.status.sync.revision // .status.sync.revisions[0] // "-")[0:12]) \
-	      ]) | @tsv' \
-	  | column -t \
+	  | jq -r '["APP","PROJECT","SYNC","HEALTH","REVISION"], (.items[] | [.metadata.name, .spec.project, (.status.sync.status // "-"), (.status.health.status // "-"), ((.status.sync.revision // (.status.sync.revisions // ["-"])[0])[0:12])]) | @tsv' \
+	  | { column -t 2>/dev/null || cat; } \
 	  || { echo "Argo CD is not installed - run: make onprem-argocd"; exit 1; }
 
 .PHONY: gitops-drift

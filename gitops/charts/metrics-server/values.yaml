@@ -31,8 +31,16 @@ metrics-server:
   # So anything that replaces a default belongs in defaultArgs, and `args` is reserved for
   # flags the upstream chart has no opinion about. Here that leaves args empty, and the only
   # thing in it anywhere is the on-prem TLS flag.
+  #
+  # Overriding a list default means reproducing it EXACTLY, and the rendered output is the wrong
+  # place to read it from: the template emits --secure-port itself, from the container port, so
+  # copying the rendered args into defaultArgs duplicated that flag. The authoritative source is
+  #
+  #   helm show values metrics-server/metrics-server --version 3.14.0
+  #
+  # This is the strongest argument in ADR-0010 against overriding list-valued defaults at all,
+  # and the reason a chart you control should expose maps instead.
   defaultArgs:
-    - --secure-port=10250
     - --cert-dir=/tmp
     - --kubelet-preferred-address-types=InternalIP,ExternalIP,Hostname
     - --kubelet-use-node-status-port
