@@ -129,8 +129,19 @@ argocd-ui: ## Port-forward the Argo CD UI to http://localhost:8080 (Ctrl-C to st
 
 .PHONY: gitops-status
 gitops-status: ## What Argo CD thinks the cluster should look like, and whether it agrees
-	@kubectl -n argocd get applications -o custom-columns=\
-'APP:.metadata.name,PROJECT:.spec.project,SYNC:.status.sync.status,HEALTH:.status.health.status,REVISION:.status.sync.revision' 2>/dev/null \
+# A single-source Application records .status.sync.revision; a MULTI-source one records
+# .status.sync.revisions, plural, one per source - and leaves the singular empty. The first
+# version of this target read only the singular, so metrics-server, the first multi-source
+# component in the repo, showed its revision as <none>. jq coalesces the two.
+	@kubectl -n argocd get applications -o json 2>/dev/null \
+	  | jq -r '["APP","PROJECT","SYNC","HEALTH","REVISION"], (.items[] | [ \
+	        .metadata.name, \
+	        .spec.project, \
+	        (.status.sync.status // "-"), \
+	        (.status.health.status // "-"), \
+	        ((.status.sync.revision // .status.sync.revisions[0] // "-")[0:12]) \
+	      ]) | @tsv' \
+	  | column -t \
 	  || { echo "Argo CD is not installed - run: make onprem-argocd"; exit 1; }
 
 .PHONY: gitops-drift

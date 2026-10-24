@@ -4,7 +4,7 @@
 # Keys are under `metrics-server:` because they configure the DEPENDENCY, not this chart.
 # A wrapper chart's own values.yaml addresses its subchart by name - getting this wrong is the
 # most common way a wrapper chart silently applies none of its settings, because Helm accepts
-# unknown top-level keys without complaint.
+# unknown top-level keys without complaint. `make gitops-render` is how you catch it.
 metrics-server:
   # Two replicas would need a PodDisruptionBudget and anti-affinity to mean anything, and on
   # three nodes it buys nothing. Scaled up in Module 10 if the metrics API turns out to matter.
@@ -17,12 +17,28 @@ metrics-server:
     limits:
       memory: 256Mi
 
-  # Keep it off the tainted control plane. There is worker capacity, and the control plane has
-  # 3.4 GB allocatable with etcd in it.
+  # Keep it off the tainted control plane. There is worker capacity, and the control plane is
+  # already at 68% of its 4 GB with etcd in it.
   tolerations: []
 
-  # Scrape every 30s rather than the 15s default. The resource metrics API is read by
-  # `kubectl top` and the HPA, and neither needs 15-second resolution on a laptop - while every
-  # scrape costs a kubelet round trip on nodes that are already nested two layers deep.
-  args:
+  # TWO arg lists, and knowing which is which matters.
+  #
+  # The chart renders `defaultArgs` and then `args`, concatenated. So setting metric-resolution
+  # in `args` does not override the default - it appends a SECOND --metric-resolution flag, and
+  # the Deployment ends up carrying both. The last one wins at runtime, so it works, and it
+  # looks like a bug to whoever reads it next.
+  #
+  # So anything that replaces a default belongs in defaultArgs, and `args` is reserved for
+  # flags the upstream chart has no opinion about. Here that leaves args empty, and the only
+  # thing in it anywhere is the on-prem TLS flag.
+  defaultArgs:
+    - --secure-port=10250
+    - --cert-dir=/tmp
+    - --kubelet-preferred-address-types=InternalIP,ExternalIP,Hostname
+    - --kubelet-use-node-status-port
+    # 30s rather than the chart's 15s. `kubectl top` and the HPA do not need 15-second
+    # resolution on a laptop, and every scrape is a kubelet round trip on nodes nested two
+    # layers deep.
     - --metric-resolution=30s
+
+  args: []
