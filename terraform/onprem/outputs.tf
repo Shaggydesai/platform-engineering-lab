@@ -2,13 +2,13 @@ output "nodes" {
   description = "What was built, and how to reach it."
   value = {
     for name, n in local.nodes : name => {
-      role    = n.role
-      address = n.address
-      cpus    = n.cpus
-      memory  = "${n.memory_mb / 1024} GB"
-      disk    = "${n.disk_gb} GB"
-      ssh     = "ssh ${local.cfg.ssh.username}@${n.address}"
-      console = "make onprem-console NODE=${name}"
+      role     = n.role
+      address  = n.address
+      cpus     = n.cpus
+      memory   = "${n.memory_mb / 1024} GB"
+      disk     = "${n.disk_gb} GB"
+      ssh      = "ssh ${local.cfg.ssh.username}@${n.address}"
+      console  = "make onprem-console NODE=${name}"
       boot_log = local.console_log[name]
     }
   }
