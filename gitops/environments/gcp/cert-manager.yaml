@@ -1,0 +1,12 @@
+# cert-manager on GKE.
+#
+# platformPKI stays OFF. The cluster will have a public DNS name, so Module 08 uses an ACME
+# ClusterIssuer with DNS-01 against Cloud DNS and gets publicly trusted certificates - which no
+# browser has to be told to trust, and no laptop has to have a root installed in it.
+#
+# The contrast with on-prem is the clearest statement of what gitops/environments is for: the
+# same component, the same chart, a completely different trust model.
+cert-manager: {}
+
+platformPKI:
+  enabled: false

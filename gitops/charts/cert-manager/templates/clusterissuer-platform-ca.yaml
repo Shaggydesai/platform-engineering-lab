@@ -1,0 +1,24 @@
+{{- if .Values.platformPKI.enabled }}
+# Step 3 of 3. The issuer everything else in the platform actually uses.
+#
+# This is the name that appears in every other component's issuerRef - the Gateway's serving
+# certificate in Module 05, ShopVerse's in Module 06. Those components do not know or care that
+# the root is self-signed; they ask this issuer for a certificate and get one.
+#
+# That indirection is the point of the three steps. Replacing the self-signed root with a real
+# CA later - an intermediate signed by a corporate root, say - changes THIS file and nothing
+# else in the repository.
+#
+# sync-wave 3: the Secret from step 2 must exist, or this issuer comes up with a Ready condition
+# of False and a message about a missing secret.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: {{ .Values.platformPKI.issuerName }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+spec:
+  ca:
+    # Read from cert-manager's --cluster-resource-namespace, which is the release namespace.
+    secretName: {{ .Values.platformPKI.caSecretName }}
+{{- end }}

@@ -1,0 +1,72 @@
+# Settings true of cert-manager EVERYWHERE.
+#
+# Note the two levels. Keys under `cert-manager:` configure the DEPENDENCY. Keys at the top
+# level are OURS, read by the templates in this chart. Mixing them up is the commonest wrapper
+# chart mistake and Helm will not warn you - `make gitops-render` will.
+
+cert-manager:
+  # cert-manager cannot work without its CRDs, and installing them separately from the
+  # controller is how people end up with a controller watching resource types that do not exist.
+  crds:
+    enabled: true
+    # keep: true means `helm uninstall` leaves the CRDs behind. That sounds like litter and is
+    # actually a safety property: deleting a CRD deletes every object of that type, so an
+    # accidental uninstall would silently destroy every Certificate in the cluster.
+    keep: true
+
+  # One of each. HA for cert-manager means surviving a node loss while issuing a certificate,
+  # which matters when certificates are issued continuously; here they are issued rarely and
+  # a retry costs nothing.
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 10m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+
+  webhook:
+    replicaCount: 1
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+      limits:
+        memory: 128Mi
+
+  cainjector:
+    # The cainjector's job is to copy CA bundles into webhook configurations and APIServices.
+    # It is what will eventually let the aggregation layer verify metrics-server properly
+    # instead of skipping verification (docs/parking-lot.md).
+    replicaCount: 1
+    resources:
+      requests:
+        cpu: 10m
+        memory: 64Mi
+      limits:
+        memory: 256Mi
+
+# ---------------------------------------------------------------- ours
+#
+# The platform's internal certificate authority. OFF by default and enabled per environment,
+# because a self-signed root is the right answer on-prem and the wrong one in a cloud where a
+# publicly trusted certificate is obtainable (ADR-0011).
+platformPKI:
+  enabled: false
+
+  # The root CA certificate's own properties.
+  commonName: Platform Lab Root CA
+  # Ten years. A root CA that expires during the project is a root CA that will expire
+  # unattended, and rotating a root is a different exercise from rotating a leaf.
+  duration: 87600h
+  renewBefore: 720h
+
+  # Where the root's private key and certificate are stored. The ClusterIssuer reads this Secret
+  # from cert-manager's own namespace - that is what --cluster-resource-namespace means, and it
+  # is why the Certificate below is not in the namespace of whatever uses it.
+  caSecretName: platform-ca-tls
+
+  # The names other components will reference in their issuerRef. Changing either of these is a
+  # change to every Certificate in the cluster.
+  bootstrapIssuerName: selfsigned-bootstrap
+  issuerName: platform-ca

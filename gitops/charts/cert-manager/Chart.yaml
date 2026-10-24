@@ -1,0 +1,25 @@
+# Wrapper chart for cert-manager, plus the platform's own PKI.
+#
+# Unlike metrics-server, this wrapper DOES carry templates - three of them. ADR-0010 allows that
+# when a component needs objects the upstream chart does not provide, and a ClusterIssuer is
+# exactly that: cert-manager ships the machinery for issuing certificates and deliberately has
+# no opinion about who your certificate authority is. That is ours to state.
+#
+# Trust model and why it is a self-signed root: docs/adr/0011-internal-pki.md
+#
+# After changing the dependency version:  make gitops-lock
+apiVersion: v2
+name: cert-manager
+description: >-
+  cert-manager and the platform's internal certificate authority. Issues the serving
+  certificates every other component's TLS depends on.
+type: application
+version: 0.1.0
+
+dependencies:
+  - name: cert-manager
+    # cert-manager's chart version and app version are the SAME string, unusually - both v1.19.2
+    # - which makes this the one pin in the repository where the two numbers cannot drift apart.
+    # Check it with `make gitops-check-pins` rather than trusting this comment.
+    version: v1.19.2
+    repository: https://charts.jetstack.io

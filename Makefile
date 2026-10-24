@@ -156,6 +156,14 @@ gitops-lock: ## Regenerate Chart.lock for every wrapper chart (ADR-0010) - commi
 	echo "Chart.lock pins the upstream DIGEST, not just the version, so a re-tagged chart"; \
 	echo "cannot change what is deployed. Commit the change on its own, with the reason."
 
+.PHONY: gitops-check-pins
+gitops-check-pins: ## Is any wrapper chart's pinned version behind what the repo offers?
+# Written because three pins in a row were guessed wrong from memory and corrected only when a
+# human ran `helm search`. A pin should be a decision, and a decision needs the current value in
+# front of it - so the repository answers "is this behind?" rather than someone remembering to
+# ask.
+	@bash scripts/gitops-check-pins.sh
+
 .PHONY: gitops-render
 gitops-render: ## Render a wrapper chart as Argo CD would (CHART=metrics-server ENV=onprem)
 	@test -n "$(CHART)" || { echo "usage: make gitops-render CHART=<name> [ENV=onprem]"; exit 1; }
@@ -194,25 +202,5 @@ smoke: ## Run the cluster smoke test against the current kube context
 	@bash scripts/smoke-test.sh
 
 .PHONY: lint
-lint: ## Lint everything that can be linted - run this before pushing
-	@set -eo pipefail; \
-	echo "==> ansible playbooks parse"; \
-	for p in ansible/playbooks/*.yml; do \
-	  $(ANSIBLE_ENV) ansible-playbook "$$p" --syntax-check >/dev/null && echo "    ok   $$p"; \
-	done; \
-	echo "==> every YAML file parses"; \
-	python3 -c 'import sys,glob,yaml; \
-bad=0; \
-fs=[f for p in ("ansible/**/*.yml","ansible/**/*.yaml","gitops/**/*.yaml","clusters/**/*.json") for f in glob.glob(p, recursive=True)]; \
-[ (list(yaml.safe_load_all(open(f))), print("    ok  ", f)) if f.endswith((".yml",".yaml")) else None for f in fs ]' ; \
-	echo "==> shell scripts parse"; \
-	for s in scripts/*.sh; do bash -n "$$s" && echo "    ok   $$s"; done; \
-	echo "==> the rest, where the tool is installed"; \
-	command -v yamllint    >/dev/null && yamllint -s . || echo "    yamllint not installed, skipped"; \
-	command -v terraform   >/dev/null && terraform -chdir=terraform fmt -check -recursive || true; \
-	command -v ansible-lint >/dev/null && ansible-lint ansible/ || echo "    ansible-lint not installed, skipped"; \
-	for c in $$(find gitops -name Chart.yaml -printf '%h\n' 2>/dev/null); do helm lint $$c; done
-# NO pipes in the checks above, deliberately. `ansible-playbook --syntax-check | tail -2`
-# reports tail's exit status, not ansible's - so a broken playbook passes a check that looks
-# like it ran. That is how a YAML error reached main: the error was printed and the exit code
-# was thrown away by the pipe.
+lint: ## Everything checkable without a cluster - run this before pushing
+	@bash scripts/lint.sh

@@ -1,0 +1,9 @@
+# cert-manager on EKS.
+#
+# platformPKI stays OFF, same reasoning as GKE - ACME with DNS-01 against Route 53 in Module 09.
+# ADR-0001 lists the axes along which the three substrates differ; this is one of them, and it
+# costs one boolean.
+cert-manager: {}
+
+platformPKI:
+  enabled: false

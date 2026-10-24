@@ -1,0 +1,36 @@
+{{- if .Values.platformPKI.enabled }}
+# Step 2 of 3. The platform's root CA certificate, signed by the self-signed issuer above.
+#
+# isCA: true is the whole point - it sets the CA basic constraint, without which this is just
+# another leaf certificate and anything it "signs" is rejected. The private key lands in the
+# Secret named below, in cert-manager's namespace, and never leaves the cluster.
+#
+# sync-wave 2: the issuer from step 1 must exist and be Ready first.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: platform-ca
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  isCA: true
+  commonName: {{ .Values.platformPKI.commonName | quote }}
+  secretName: {{ .Values.platformPKI.caSecretName }}
+  duration: {{ .Values.platformPKI.duration }}
+  renewBefore: {{ .Values.platformPKI.renewBefore }}
+
+  privateKey:
+    # ECDSA P-256 rather than RSA: smaller, faster to verify, and universally supported by
+    # anything from this decade. RSA would be the choice only for a client we cannot change.
+    algorithm: ECDSA
+    size: 256
+    # Rotate the key whenever the certificate is renewed. The alternative - reusing the key
+    # forever - means a key compromise is not fixed by renewal.
+    rotationPolicy: Always
+
+  issuerRef:
+    name: {{ .Values.platformPKI.bootstrapIssuerName }}
+    kind: ClusterIssuer
+    group: cert-manager.io
+{{- end }}

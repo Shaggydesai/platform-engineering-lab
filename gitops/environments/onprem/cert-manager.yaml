@@ -1,0 +1,10 @@
+# cert-manager, on-prem.
+#
+# The internal PKI is ON here and off everywhere else. There is no public DNS name for this
+# cluster and no way for a public CA to validate one, so a self-signed root that we distribute
+# ourselves is not a compromise - it is the only option that is actually honest about what is
+# being trusted (ADR-0011).
+cert-manager: {}
+
+platformPKI:
+  enabled: true

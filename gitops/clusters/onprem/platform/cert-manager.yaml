@@ -1,0 +1,68 @@
+# cert-manager and the platform PKI, on the on-prem cluster.
+#
+# The first component in this repository with a sync wave, and the first wrapper chart carrying
+# templates of its own. Both are justified below rather than copied from the metrics-server
+# Application.
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cert-manager
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    # Wave -10. ADR-0010 Decision 4 says a wave needs a dependency that FAILS without it, and
+    # this one has two:
+    #
+    #   cert-manager's CRDs must be established before any other component's Certificate or
+    #   Issuer can even be applied - an unknown resource type is a sync error, not a retry.
+    #
+    #   The Gateway in this same module asks this issuer for a serving certificate. Without the
+    #   ordering, a sync that happened to apply the Gateway first would fail, recover on the
+    #   next pass, and teach nobody anything.
+    #
+    # This is also why -10 rather than -1: it leaves room for something that must precede even
+    # cert-manager, without renumbering everything.
+    argocd.argoproj.io/sync-wave: "-10"
+spec:
+  project: platform
+
+  sources:
+    - repoURL: https://github.com/Shaggydesai/platform-engineering-lab.git
+      targetRevision: main
+      path: gitops/charts/cert-manager
+      helm:
+        valueFiles:
+          - values.yaml
+          - $values/gitops/environments/onprem/cert-manager.yaml
+
+    - repoURL: https://github.com/Shaggydesai/platform-engineering-lab.git
+      targetRevision: main
+      ref: values
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: cert-manager
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      # ServerSideApply is not optional here. cert-manager's CRDs are enormous, and a
+      # client-side apply stores the whole manifest in the
+      # kubectl.kubernetes.io/last-applied-configuration annotation - which has a hard limit of
+      # 262144 bytes. The CRDs exceed it, and the error ("metadata.annotations: Too long") names
+      # the annotation rather than the cause, so it reads like a Kubernetes bug.
+      - ServerSideApply=true
+    retry:
+      # More patience than the default. The three PKI waves each wait for the previous to be
+      # Ready, and cert-manager's webhook takes a little while to start serving on nodes this
+      # size - during which a ClusterIssuer apply is rejected by the admission webhook.
+      limit: 10
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 5m

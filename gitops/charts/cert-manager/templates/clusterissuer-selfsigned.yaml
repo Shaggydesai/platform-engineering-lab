@@ -1,0 +1,19 @@
+{{- if .Values.platformPKI.enabled }}
+# Step 1 of 3. A ClusterIssuer that signs with no authority at all.
+#
+# This looks pointless and is the keystone. cert-manager can only create a certificate by asking
+# an Issuer, so a root CA - which by definition nothing else signs - needs an Issuer that signs
+# with nothing. That is what selfSigned means, and it is used exactly once: to sign the root in
+# step 2. Nothing else in the cluster should ever reference it.
+#
+# sync-wave 1: after the cert-manager controller and webhook from the dependency chart (wave 0),
+# because applying a ClusterIssuer before the webhook is serving fails validation.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: {{ .Values.platformPKI.bootstrapIssuerName }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  selfSigned: {}
+{{- end }}
