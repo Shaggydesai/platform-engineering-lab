@@ -88,7 +88,18 @@ host**, because the `virbr1` bridge is gone too.
 ```bash
 make onprem-vms            # idempotent: starts what exists, creates only what is missing
 make onprem-vms-status
+make onprem-up             # the cluster. Waits for the nodes itself - see below.
 ```
+
+**`make onprem-vms` starts the VMs but does not wait for them.** It returns in about two
+seconds, because the step that waits for SSH (`terraform_data.verify`) only re-runs when a node's
+address changes — and after a restart nothing has changed, the domains were simply off. The nodes
+take around 25 seconds to boot, so anything run immediately afterwards fails with **no route to
+host** on all three, which reads like a broken network rather than "ask again in a moment".
+
+`make onprem-up` handles this itself: its first task is `wait_for_connection`, which retries for
+up to five minutes. So the sequence above is safe to type in one go. If you want to watch
+instead: `make onprem-boot-log NODE=k8s-cp01`.
 
 Nothing is lost. The node disks are files in the libvirt pool, so anything on them — including
 `/var/lib/etcd` — survives. The control plane comes back by itself, because the kubelet is a

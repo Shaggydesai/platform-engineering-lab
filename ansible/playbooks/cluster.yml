@@ -14,7 +14,27 @@
 
 - name: Assert the image did its job
   hosts: all
-  gather_facts: true
+  # gather_facts is off at the play level and done explicitly below, because fact gathering is
+  # itself a connection: with it on, a node that is still booting fails at "Gathering Facts"
+  # before anything gets a chance to wait for it.
+  gather_facts: false
+  pre_tasks:
+    - name: Wait for every node to answer SSH
+      # `make onprem-vms` after a host restart starts the domains and returns in about two
+      # seconds, because terraform_data.verify only re-runs when the addresses change - so
+      # nothing waits for a boot that takes around 25 seconds. Running this playbook straight
+      # afterwards failed with "No route to host" on all three nodes, which reads like a broken
+      # network rather than "ask again in a moment".
+      #
+      # wait_for_connection retries the connection itself rather than failing on the first
+      # refusal, which is what makes this playbook safe to run at any moment: immediately after
+      # starting the VMs, after a laptop restart, or mid-boot.
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+        sleep: 5
+
+    - name: Gather facts now that the nodes are up
+      ansible.builtin.setup
   roles:
     - preflight
   tags: [preflight]
