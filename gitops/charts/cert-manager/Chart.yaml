@@ -18,8 +18,13 @@ version: 0.1.0
 
 dependencies:
   - name: cert-manager
-    # cert-manager's chart version and app version are the SAME string, unusually - both v1.19.2
-    # - which makes this the one pin in the repository where the two numbers cannot drift apart.
-    # Check it with `make gitops-check-pins` rather than trusting this comment.
-    version: v1.19.2
+    # cert-manager's chart version and app version are the SAME string, unusually, which makes
+    # this the one pin in the repository where the two numbers cannot drift apart.
+    #
+    # Started at v1.21.3 rather than the v1.19.2 first written here, because `make
+    # gitops-check-pins` said so and nothing was deployed yet. cert-manager asks you not to skip
+    # minor versions when UPGRADING, so installing two minors behind would have bought a
+    # two-step upgrade later for no benefit now. Being behind is often right; being behind on
+    # the first install never is.
+    version: v1.21.3
     repository: https://charts.jetstack.io
