@@ -165,35 +165,10 @@ gitops-check-pins: ## Is any wrapper chart's pinned version behind what the repo
 	@bash scripts/gitops-check-pins.sh
 
 .PHONY: gitops-render
-gitops-render: ## Render a wrapper chart as Argo CD would (CHART=metrics-server ENV=onprem)
-	@test -n "$(CHART)" || { echo "usage: make gitops-render CHART=<name> [ENV=onprem]"; exit 1; }
-	@helm template $(CHART) gitops/charts/$(CHART) \
-	  --namespace kube-system \
-	  -f gitops/charts/$(CHART)/values.yaml \
-	  -f gitops/environments/$(or $(ENV),onprem)/$(CHART).yaml
-
-# ---------------------------------------------------------------- cloud
-
-.PHONY: up
-up: ## Create the cloud environment  (ENV=gcp|aws)
-	@test "$(ENV)" != "onprem" || { echo "use onprem-up for on-prem"; exit 1; }
-	@echo "not implemented yet - Module 08 (gcp) / Module 09 (aws)"; exit 1
-
-.PHONY: down
-down: ## Destroy the cloud environment  (ENV=gcp|aws) - ALWAYS run before ending a session
-	@test "$(ENV)" != "onprem" || { echo "use onprem-down for on-prem"; exit 1; }
-	@echo "not implemented yet - Module 08 (gcp) / Module 09 (aws)"; exit 1
-
-.PHONY: reclaim
-reclaim: ## Compact WSL's virtual disk after destroying VMs (ADR-0006)
-	@echo "Run from PowerShell, with WSL shut down:"
-	@echo "  wsl --shutdown"
-	@echo "  Optimize-VHD -Path \$$env:LOCALAPPDATA\\Packages\\CanonicalGroupLimited*\\LocalState\\ext4.vhdx -Mode Full"
-	@echo "(Hyper-V module required; otherwise use diskpart 'compact vdisk')"
-
-.PHONY: cost-check
-cost-check: ## Fail loudly if anything billable is still running in either cloud
-	@bash scripts/cost-check.sh
+gitops-render: ## Render a wrapper chart as Argo CD will (CHART=cert-manager [ENV=onprem])
+	@test -n "$(CHART)" || { echo "usage: make gitops-render CHART=<name> [ENV=onprem]"; \
+	  echo "charts: $$(ls -1 gitops/charts | tr '\n' ' ')"; exit 1; }
+	@bash scripts/gitops-render.sh $(CHART) $(or $(ENV),onprem)
 
 # ---------------------------------------------------------------- platform
 

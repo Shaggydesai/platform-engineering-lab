@@ -77,13 +77,14 @@ step 'Helm charts render'
 if command -v helm >/dev/null 2>&1; then
   for chart in gitops/charts/*/; do
     name=$(basename "$chart")
-    args=(helm template "$name" "$chart" -f "$chart/values.yaml")
-    [[ -f "gitops/environments/onprem/$name.yaml" ]] && args+=(-f "gitops/environments/onprem/$name.yaml")
-    if "${args[@]}" >/dev/null 2>&1; then
-      ok "$name (with the onprem values)"
+    # Reuse gitops-render.sh rather than reimplementing the helm invocation. Two copies of
+    # "how a chart is rendered" is how lint and render come to disagree, and then one of them
+    # is wrong without anyone noticing - which is exactly what happened with the namespace.
+    if bash scripts/gitops-render.sh "$name" onprem >/dev/null 2>&1; then
+      ok "$name"
     else
       bad "$name"
-      "${args[@]}" 2>&1 | tail -5 | sed 's/^/      /'
+      bash scripts/gitops-render.sh "$name" onprem 2>&1 | tail -5 | sed 's/^/      /'
     fi
   done
 else
