@@ -23,7 +23,10 @@
     "cilium_version": "1.20.3",
     "argocd_comment": "Two different numbers. argocd_chart_version pins the HELM CHART; the chart decides which Argo CD it installs, and 10.11.0 carries Argo CD v3.5.5. Check both when moving the pin - `helm search repo argo/argo-cd --versions` prints CHART VERSION and APP VERSION side by side - and keep the app version's minor matching the argocd CLI in scripts/install-tools.sh, because a CLI far ahead of its server fails in ways that read like permissions problems.",
     "argocd_chart_version": "10.11.0",
-    "argocd_app_version": "v3.5.5"
+    "argocd_app_version": "v3.5.5",
+    "gateway_api_comment": "Gateway API CRDs are a Layer 1 prerequisite of Cilium's Gateway support (ADR-0012), and the one thing in this repository that arrives as a raw URL rather than a Helm chart. So it is pinned by CONTENT as well as by version: the ansible role verifies this sha256 before applying and refuses if it differs, because a version tag is a mutable pointer and a digest is not. To fill it in, run the role once with sha256 empty - it prints the actual digest and the line to paste.",
+    "gateway_api_version": "v1.6.3",
+    "gateway_api_sha256": ""
   },
   "ssh": {
     "username": "sagar",

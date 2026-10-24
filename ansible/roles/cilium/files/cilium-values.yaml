@@ -28,15 +28,33 @@ ipam:
 routingMode: tunnel
 tunnelProtocol: vxlan
 
-# OFF for now, on purpose. kube-proxy stays so that Module 04 can remove it as a
-# deliberate before/after exercise rather than as a mystery, and so that the first
-# bootstrap has three suspects when a Service does not answer instead of four.
-kubeProxyReplacement: false
+# ON since 2026-10-24, and not by choice of timing: Cilium's Gateway API support REQUIRES it
+# (ADR-0012). ADR-0007 had deferred this deliberately so that kube-proxy would be seen working
+# first - which it was, from Module 02 through the Module 04 gate - and then Module 05's ingress
+# requirement arrived before the leisurely exercise did.
+#
+# Service load balancing now lives in eBPF maps rather than iptables chains. `cilium-dbg service
+# list` replaces `iptables-save | grep KUBE-SVC`, and there is no iptables fallback any more:
+# this is the only implementation. ADR-0012 records the rollback.
+kubeProxyReplacement: true
+
+# Gateway API, from the CNI rather than from a separate ingress controller - one of the two
+# reasons ADR-0007 chose Cilium, finally collected.
+#
+# This does NOTHING unless the Gateway API CRDs already exist, which is why the gateway_api
+# Ansible role runs before this one. Enabling it against a cluster with no CRDs produces an
+# operator that starts cleanly and silently has no Gateway support.
+gatewayAPI:
+  enabled: true
 
 # Tell cilium-agent how to reach the API server DIRECTLY, by name and port, instead of
-# through the kubernetes.default ClusterIP. That ClusterIP is programmed by kube-proxy -
-# so without this, Cilium depends on kube-proxy to start, and when Module 04 removes
-# kube-proxy nothing can start at all.
+# through the kubernetes.default ClusterIP.
+#
+# THIS IS NOW LOAD-BEARING. That ClusterIP was programmed by kube-proxy, which no longer
+# exists - so without these two lines, cilium-agent could not reach the API server, could
+# not program Services, and nothing would be able to fix it from inside the cluster. It was
+# set in Module 04 with a comment predicting exactly this, which is the only reason removing
+# kube-proxy was a ten-minute change rather than a rebuild.
 #
 # The name resolves because cloud-init wrote /etc/hosts on every node in Module 01.
 k8sServiceHost: k8s-cp01.platform.local

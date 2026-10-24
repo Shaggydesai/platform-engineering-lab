@@ -33,15 +33,37 @@
   register: argocd_release
   changed_when: false
 
+- name: What values is the release actually running with?
+  # Same bug as the cilium role had: a version-only check means editing argocd-values.yaml
+  # changes nothing, silently. Argo CD is the worst component for that - a values change that
+  # does not apply leaves Git and the cluster disagreeing about the thing whose job is to stop
+  # Git and the cluster disagreeing.
+  ansible.builtin.command: >-
+    helm get values argocd --namespace argocd -o json
+  delegate_to: localhost
+  run_once: true
+  become: false
+  environment:
+    KUBECONFIG: "{{ kubeconfig_fetch_path }}"
+  register: argocd_live_values
+  changed_when: false
+  failed_when: false
+
 - name: Decide whether anything needs doing
   ansible.builtin.set_fact:
     argocd_installed: "{{ (argocd_release.stdout | from_json | length) > 0 }}"
     argocd_current: >-
       {{ (argocd_release.stdout | from_json | first).chart | default('none') | regex_replace('^argo-cd-', '') }}
+    argocd_values_match: >-
+      {{ (argocd_live_values.stdout | default('{}', true) | from_json)
+         == (lookup('file', argocd_values_file) | from_yaml) }}
   run_once: true
 
 - name: Install or upgrade Argo CD
-  when: not argocd_installed or argocd_current != argocd_chart_version
+  when: >-
+    not argocd_installed
+    or argocd_current != argocd_chart_version
+    or not argocd_values_match
   ansible.builtin.command:
     argv:
       - helm
@@ -68,9 +90,9 @@
   changed_when: true
 
 - name: Report that it was already current
-  when: argocd_installed and argocd_current == argocd_chart_version
+  when: argocd_installed and argocd_current == argocd_chart_version and argocd_values_match
   ansible.builtin.debug:
-    msg: "Argo CD chart {{ argocd_current }} already installed, nothing to do"
+    msg: "Argo CD chart {{ argocd_current }} already installed with matching values, nothing to do"
   run_once: true
 
 - name: Confirm the chart installed the Argo CD version we expect

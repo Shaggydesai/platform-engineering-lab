@@ -1,0 +1,117 @@
+---
+# kube_proxy_removal: take kube-proxy out, now that Cilium's eBPF datapath owns Services.
+#
+# ADR-0012. Runs AFTER the cilium role, never before - removing kube-proxy while Cilium is still
+# in kubeProxyReplacement: false mode would leave nothing programming Service rules, including
+# the ClusterIP the API server is reached by.
+#
+# Idempotent by nature: on a cluster built fresh from the current kubeadm config there is no
+# kube-proxy to remove, because ClusterConfiguration.proxy.disabled is set. This role exists for
+# the cluster that already has one.
+
+- name: Count kube-proxy's Service rules BEFORE removal
+  # Not a check - a record. ADR-0007 promised a before/after comparison and this is the "before"
+  # half, taken automatically so it exists whether or not anyone remembered to look.
+  ansible.builtin.shell:
+    cmd: set -o pipefail && iptables-save 2>/dev/null | grep -c 'KUBE-SVC' || true
+    executable: /bin/bash
+  become: true
+  register: kp_rules_before
+  changed_when: false
+
+- name: Is kube-proxy still installed?
+  ansible.builtin.command: >-
+    kubectl --namespace kube-system get daemonset kube-proxy --ignore-not-found -o name
+  delegate_to: localhost
+  run_once: true
+  become: false
+  environment:
+    KUBECONFIG: "{{ kubeconfig_fetch_path }}"
+  register: kp_present
+  changed_when: false
+
+- name: Confirm Cilium is replacing kube-proxy before removing it
+  # The order that matters. If this assertion fails, removing kube-proxy would break every
+  # Service in the cluster with no fallback - so it is checked against the RUNNING config rather
+  # than against the values file, which might not have been applied.
+  when: kp_present.stdout | length > 0
+  block:
+    - name: Read Cilium's kube-proxy replacement mode
+      ansible.builtin.command: >-
+        kubectl --namespace kube-system get configmap cilium-config
+        -o jsonpath={.data.kube-proxy-replacement}
+      delegate_to: localhost
+      run_once: true
+      become: false
+      environment:
+        KUBECONFIG: "{{ kubeconfig_fetch_path }}"
+      register: kp_cilium_mode
+      changed_when: false
+
+    - name: Cilium must actually be in replacement mode
+      ansible.builtin.assert:
+        that: kp_cilium_mode.stdout | lower in ['true', 'strict']
+        fail_msg: >-
+          Cilium reports kube-proxy-replacement = "{{ kp_cilium_mode.stdout }}", so it is NOT
+          programming Services. Removing kube-proxy now would break every ClusterIP in the
+          cluster, including the one the API server is reached by - and nothing inside the
+          cluster could fix it. Run the cilium role first.
+        success_msg: "Cilium is in kube-proxy replacement mode ({{ kp_cilium_mode.stdout }})"
+      run_once: true
+
+- name: Remove the kube-proxy DaemonSet and its ConfigMap
+  # kubeadm created both at init. Deleting the DaemonSet stops the pods; the ConfigMap is
+  # removed too so that a later `kubeadm upgrade` has nothing to reconcile against and will not
+  # quietly put kube-proxy back.
+  ansible.builtin.command: >-
+    kubectl --namespace kube-system delete {{ item }} --ignore-not-found
+  delegate_to: localhost
+  run_once: true
+  become: false
+  environment:
+    KUBECONFIG: "{{ kubeconfig_fetch_path }}"
+  loop:
+    - daemonset/kube-proxy
+    - configmap/kube-proxy
+  register: kp_delete
+  changed_when: "'deleted' in kp_delete.stdout"
+
+- name: Flush kube-proxy's leftover iptables rules
+  # Deleting the DaemonSet stops the pods but leaves every rule they wrote. Those rules are
+  # inert - Cilium's eBPF path is consulted first - but they are confusing to read later and
+  # they make `iptables-save` useless for understanding the live datapath.
+  #
+  # Only KUBE* lines are removed. Cilium's own chains are CILIUM_*, so this cannot touch them.
+  # iptables rules are not persisted across a reboot anyway, which is the reason this is safe:
+  # the worst case is the same state a node reaches on its own after a restart.
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      before=$(iptables-save | grep -c 'KUBE' || true)
+      if [ "$before" -gt 0 ]; then
+        iptables-save | grep -v 'KUBE' | iptables-restore
+        after=$(iptables-save | grep -c 'KUBE' || true)
+        echo "flushed: $before -> $after"
+      else
+        echo "nothing to flush"
+      fi
+    executable: /bin/bash
+  become: true
+  register: kp_flush
+  changed_when: "'flushed' in kp_flush.stdout"
+
+- name: Count Service rules AFTER removal, and where they live now
+  ansible.builtin.shell:
+    cmd: set -o pipefail && iptables-save 2>/dev/null | grep -c 'KUBE-SVC' || true
+    executable: /bin/bash
+  become: true
+  register: kp_rules_after
+  changed_when: false
+
+- name: The before and after
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }}: KUBE-SVC iptables rules
+      {{ kp_rules_before.stdout | trim }} -> {{ kp_rules_after.stdout | trim }}.
+      Service lookups now happen in eBPF maps:
+      kubectl -n kube-system exec ds/cilium -- cilium-dbg service list

@@ -1,0 +1,118 @@
+---
+# gateway_api: install the Gateway API CRDs.
+#
+# Layer 1, owned by Ansible, because they are a PREREQUISITE of the CNI: Cilium's
+# gatewayAPI.enabled does nothing at all until these resource types exist (ADR-0012 Decision 2).
+# So they must land before the Cilium role runs, which is why this play comes first.
+#
+# This is the only thing in the repository that arrives as a raw URL rather than a Helm chart,
+# so it is pinned by CONTENT as well as by version. A tag is a mutable pointer; a digest is not.
+
+- name: Fetch the Gateway API CRD bundle
+  # To the workstation, not to a node. Nothing is applied from here yet - the download and the
+  # verification are separate from the apply on purpose, so that a failed checksum means
+  # "nothing happened" rather than "half of it happened".
+  ansible.builtin.get_url:
+    url: >-
+      https://github.com/kubernetes-sigs/gateway-api/releases/download/{{ gateway_api_version
+      }}/standard-install.yaml
+    dest: "{{ gateway_api_bundle }}"
+    mode: "0644"
+    force: true
+  delegate_to: localhost
+  run_once: true
+  become: false
+  register: gw_download
+  changed_when: false
+  # changed_when: false because downloading a file to a temporary path is not a change to
+  # anything that matters. The apply below is where change is reported.
+
+- name: Compute the bundle's digest
+  ansible.builtin.stat:
+    path: "{{ gateway_api_bundle }}"
+    checksum_algorithm: sha256
+  delegate_to: localhost
+  run_once: true
+  become: false
+  register: gw_stat
+
+- name: Refuse to continue without a recorded digest
+  # Deliberately a hard failure rather than a warning, and deliberately NOT "verify only if a
+  # digest is set" - that default would leave the file unverified forever while looking
+  # verified. The message is the fix, so discovering this costs one copy-paste.
+  ansible.builtin.assert:
+    that: gateway_api_sha256 | length > 0
+    fail_msg: |
+      Gateway API {{ gateway_api_version }} has no recorded digest. This is the first run.
+
+      The bundle just downloaded has this SHA-256:
+
+          {{ gw_stat.stat.checksum }}
+
+      Record it in clusters/onprem/nodes.json:
+
+          "gateway_api_sha256": "{{ gw_stat.stat.checksum }}"
+
+      Then re-run. Paste it rather than retyping it, and commit it in the same change as the
+      version - the two together are the pin, and a version without a digest is a pointer that
+      upstream can move.
+    success_msg: "digest recorded: {{ gateway_api_sha256[:16] }}..."
+  run_once: true
+
+- name: The bundle must match the recorded digest
+  ansible.builtin.assert:
+    that: gw_stat.stat.checksum == gateway_api_sha256
+    fail_msg: |
+      Gateway API {{ gateway_api_version }} does not match its recorded digest.
+
+          expected  {{ gateway_api_sha256 }}
+          got       {{ gw_stat.stat.checksum }}
+
+      Nothing has been applied. One of three things happened, and they are worth distinguishing:
+
+        - upstream re-tagged the release, which is exactly what a digest exists to catch;
+        - the version in nodes.json was changed without updating the digest;
+        - the download was corrupted or intercepted.
+
+      Do not "fix" this by pasting the new digest in. Check the release notes for the version
+      you pinned first.
+    success_msg: "digest verified"
+  run_once: true
+
+- name: Apply the Gateway API CRDs
+  # --server-side for the same reason cert-manager's Application uses it: CRDs this size blow
+  # past the 262144-byte limit on the last-applied-configuration annotation, and the resulting
+  # error names the annotation rather than the cause.
+  ansible.builtin.command: >-
+    kubectl apply --server-side --force-conflicts -f {{ gateway_api_bundle }}
+  delegate_to: localhost
+  run_once: true
+  become: false
+  environment:
+    KUBECONFIG: "{{ kubeconfig_fetch_path }}"
+  register: gw_apply
+  changed_when: "'unchanged' not in gw_apply.stdout"
+
+- name: Wait for the CRDs to be established
+  # "Applied" is not "usable". A CRD has to be Established before the API server will accept an
+  # object of that type, and Cilium's operator checks for the types at startup - so starting
+  # Cilium in the window between the two leaves Gateway support silently off.
+  ansible.builtin.command: >-
+    kubectl wait --for=condition=Established --timeout=120s
+    crd/gatewayclasses.gateway.networking.k8s.io
+    crd/gateways.gateway.networking.k8s.io
+    crd/httproutes.gateway.networking.k8s.io
+    crd/referencegrants.gateway.networking.k8s.io
+  delegate_to: localhost
+  run_once: true
+  become: false
+  environment:
+    KUBECONFIG: "{{ kubeconfig_fetch_path }}"
+  changed_when: false
+
+- name: Report
+  ansible.builtin.debug:
+    msg: >-
+      Gateway API {{ gateway_api_version }} CRDs established
+      (sha256 {{ gateway_api_sha256[:16] }}...)
+  run_once: true

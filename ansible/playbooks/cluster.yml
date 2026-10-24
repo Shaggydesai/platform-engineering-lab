@@ -50,6 +50,16 @@
     - control_plane
   tags: [control-plane, config]
 
+- name: Install the Gateway API CRDs
+  # Before Cilium, not after. Cilium's gatewayAPI.enabled does nothing at all unless these
+  # resource types already exist, and an operator that starts without them comes up cleanly with
+  # Gateway support silently off (ADR-0012 Decision 2).
+  hosts: control_plane
+  gather_facts: false
+  roles:
+    - gateway_api
+  tags: [gateway-api, cni]
+
 - name: Install the CNI
   # Before the workers join, so that a joining node finds a pod network already waiting and
   # goes Ready once rather than twice. Nothing breaks if the order is reversed - it is just
@@ -59,6 +69,17 @@
   roles:
     - cilium
   tags: [cni]
+
+- name: Remove kube-proxy
+  # After Cilium, never before: removing kube-proxy while Cilium is still in
+  # kubeProxyReplacement: false would leave nothing programming Services, including the ClusterIP
+  # the API server is reached by. The role asserts Cilium's RUNNING config before deleting
+  # anything, rather than trusting that the values file was applied (ADR-0012).
+  hosts: all
+  gather_facts: false
+  roles:
+    - kube_proxy_removal
+  tags: [kube-proxy, cni]
 
 - name: Join the workers
   hosts: workers

@@ -86,6 +86,16 @@ etcd:
   local:
     dataDir: /var/lib/etcd
 
+# Do not install kube-proxy at all. ADR-0012: Cilium's eBPF datapath owns Service load
+# balancing, and Gateway API requires kubeProxyReplacement.
+#
+# This only takes effect on a FRESH init - an existing cluster's kube-proxy is removed by the
+# kube_proxy_removal role. Without this line, a rebuild would reintroduce kube-proxy and two
+# components would program Service rules at once, which does not fail cleanly: some connections
+# work, some do not, depending on which path a packet takes first.
+proxy:
+  disabled: true
+
 ---
 # ---------------------------------------------------------------------------
 # KubeletConfiguration: applies to EVERY node that joins, because kubeadm stores it
@@ -120,11 +130,15 @@ evictionHard:
 # Serial image pulls are the default and they make a three-node rollout crawl.
 serializeImagePulls: false
 
----
 # ---------------------------------------------------------------------------
-# KubeProxyConfiguration. Present so Module 04 - which removes kube-proxy in favour of
-# Cilium's eBPF datapath - has a documented before state to compare against.
+# There is NO KubeProxyConfiguration here any more.
+#
+# ADR-0007 kept one so that Module 04 would have a documented "before" state to compare a
+# kube-proxy replacement against. ADR-0012 did the replacement, so configuring a component that
+# proxy.disabled above prevents from existing would be a lie in a file somebody will later
+# believe - and the comparison itself is now recorded by the kube_proxy_removal role, which
+# counts the iptables rules before and after.
+#
+# The historical config, if you want to read what was removed:
+#   git show 3fb7dbc:ansible/roles/control_plane/templates/kubeadm-init.yaml.j2
 # ---------------------------------------------------------------------------
-apiVersion: kubeproxy.config.k8s.io/v1alpha1
-kind: KubeProxyConfiguration
-mode: iptables

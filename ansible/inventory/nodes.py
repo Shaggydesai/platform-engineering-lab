@@ -68,6 +68,8 @@ def build():
                 "cilium_version": k8s["cilium_version"],
                 "argocd_chart_version": k8s["argocd_chart_version"],
                 "argocd_app_version": k8s["argocd_app_version"],
+                "gateway_api_version": k8s["gateway_api_version"],
+                "gateway_api_sha256": k8s["gateway_api_sha256"],
                 # Every node's name, so a role can assert resolution rather than assume it.
                 "all_node_names": [n["name"] for n in cfg["nodes"]],
                 # Workstation-side paths. Emitted here rather than in group_vars so that there
@@ -81,6 +83,9 @@ def build():
                     REPO, "ansible", "roles", "argocd", "files", "argocd-values.yaml"
                 ),
                 "kubeconfig_fetch_path": os.path.expanduser("~/.kube/onprem.conf"),
+                # Downloaded, verified, then applied. Under the repo rather than /tmp so that
+                # a WSL shutdown clearing /tmp cannot silently change what is verified.
+                "gateway_api_bundle": os.path.join(REPO, ".cache", "gateway-api-standard-install.yaml"),
                 "kube_context": f"{cfg['cluster']}-admin",
             },
         },

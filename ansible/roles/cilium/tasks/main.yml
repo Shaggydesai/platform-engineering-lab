@@ -21,15 +21,41 @@
   register: cilium_release
   changed_when: false
 
+- name: What values is the release actually running with?
+  # The version check alone is not enough, and this role shipped with that bug: changing
+  # cilium-values.yaml without changing the version produced "already installed, nothing to
+  # do" - so kubeProxyReplacement and gatewayAPI would have been set in Git and never applied.
+  #
+  # -o json rather than the default, which prefixes a "USER-SUPPLIED VALUES:" header that is
+  # not parseable. Empty output means not installed, hence the default.
+  ansible.builtin.command: >-
+    helm get values cilium --namespace kube-system -o json
+  delegate_to: localhost
+  run_once: true
+  become: false
+  environment:
+    KUBECONFIG: "{{ kubeconfig_fetch_path }}"
+  register: cilium_live_values
+  changed_when: false
+  failed_when: false
+
 - name: Decide whether anything needs doing
   ansible.builtin.set_fact:
     cilium_installed: "{{ (cilium_release.stdout | from_json | length) > 0 }}"
     cilium_current: >-
       {{ (cilium_release.stdout | from_json | first).chart | default('none') | regex_replace('^cilium-', '') }}
+    # Compare the release's stored values against the file, as parsed structures rather than as
+    # text - so a comment or a reordered key does not read as a change.
+    cilium_values_match: >-
+      {{ (cilium_live_values.stdout | default('{}', true) | from_json)
+         == (lookup('file', cilium_values_file) | from_yaml) }}
   run_once: true
 
 - name: Install or upgrade Cilium
-  when: not cilium_installed or cilium_current != cilium_version
+  when: >-
+    not cilium_installed
+    or cilium_current != cilium_version
+    or not cilium_values_match
   ansible.builtin.command:
     argv:
       - helm
@@ -55,9 +81,9 @@
   changed_when: true
 
 - name: Report that it was already current
-  when: cilium_installed and cilium_current == cilium_version
+  when: cilium_installed and cilium_current == cilium_version and cilium_values_match
   ansible.builtin.debug:
-    msg: "Cilium {{ cilium_current }} already installed, nothing to do"
+    msg: "Cilium {{ cilium_current }} already installed with matching values, nothing to do"
   run_once: true
 
 - name: Wait for the agent on every node
