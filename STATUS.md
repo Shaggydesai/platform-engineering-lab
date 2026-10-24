@@ -5,7 +5,7 @@
 > not stall like the last one.
 
 **Last updated:** 2026-10-23
-**Current module:** 05 — The platform baseline
+**Current module:** 05 — The platform baseline (2 of 4 components in)
 **Overall progress:** Modules 00–04 complete — 5 / 13
 
 ---
@@ -20,6 +20,8 @@
 | **GCP cluster** | not built — account verified empty, ₹0 running |
 | **AWS cluster** | not built |
 | **Argo CD** | **running** — chart 10.11.0 / Argo CD v3.5.5, root app Synced, self-heal verified |
+| **Platform components** | metrics-server 3.14.0, cert-manager v1.21.3 + internal PKI — both Synced/Healthy |
+| **Internal CA** | `platform-ca` ClusterIssuer, Ready. Root valid to **2036-10-21**, key in `cert-manager/platform-ca-tls` |
 | **ShopVerse running** | no |
 | **Monthly spend** | ₹0 |
 
@@ -32,32 +34,39 @@ make onprem-vms-status
 
 ## The next action
 
-Module 04 is closed. **Nothing in this cluster is installed by hand any more**: adding a
-component means adding a file to `gitops/clusters/onprem/platform/` and pushing it.
+**Module 05, two of four components done.** Both built to the ADR-0010 pattern, both Synced and
+Healthy, nothing installed by hand.
 
-The full cold start, now four commands:
+| Component | Chart | What it proved |
+|:--|:--|:--|
+| metrics-server | 3.14.0 | the four-file pattern, and the per-environment overlay — `--kubelet-insecure-tls` is on-prem only |
+| cert-manager | v1.21.3 | sync waves, a wrapper chart carrying its own templates, and the PKI from ADR-0011 |
+
+Remaining in this module:
+
+1. **A Gateway (ingress via Gateway API).** Cilium already provides it — one of the two reasons
+   ADR-0007 chose Cilium — so this is enabling `gatewayAPI` in the Cilium values plus a
+   `Gateway` and a serving certificate from `platform-ca`. First component whose TLS chains to
+   our own CA, and the first thing reachable from the Windows host.
+2. **A storage class.** Nothing has needed persistence yet; ShopVerse will in Module 06.
+3. **The module gate:** the whole app-of-apps Synced and Healthy, and the overlay mechanism
+   proven by a value that genuinely differs per environment — which the cert-manager
+   `platformPKI.enabled` boolean already does.
+
+Then two follow-ups this module opened and should close (`docs/parking-lot.md`): the kubelet
+serving certificates and the metrics-server APIService both skip TLS verification, and
+cert-manager existing makes both fixable. They get fixed **together** — one alone leaves an
+unverified hop either side of a verified one.
+
+Useful commands added this session:
 
 ```bash
-make onprem-vms      # machines           (Module 01)
-make onprem-up       # cluster + Argo CD  (Modules 03, 04)
-make smoke           # five checks        (Module 02)
-make gitops-status   # what Git says the cluster is
+make gitops-status        # every Application: sync, health, revision
+make gitops-check-pins    # is any chart pin behind what the repo offers?
+make gitops-render CHART=cert-manager   # exactly what Argo CD will apply
+make gitops-drift         # anything running that no Application claims
+make lint                 # everything checkable without a cluster
 ```
-
-**Module 05 — the platform baseline.** The add-ons every workload needs, all as wrapper charts
-(ADR-0002 Rule 3), with the per-environment overlay mechanism in place from the first component
-rather than retrofitted.
-
-- Deliverables: cert-manager with an internal PKI; ingress via Gateway API; a storage class;
-  metrics-server; `gitops/environments/{onprem,gcp,aws}/` overlays.
-- Done when the platform app-of-apps is fully Synced and Healthy, and the overlay mechanism is
-  proven by one value that genuinely differs per environment.
-- Three sessions, and the longest module so far.
-
-Worth deciding first, in the same spirit as ADR-0008 and ADR-0009: what a wrapper chart looks
-like here, exactly, so that all five components follow one shape instead of five. Cilium already
-has a values file in `ansible/roles/cilium/files/` and is **not** a wrapper chart — it is Layer 1
-and installed by Ansible — so Module 05 is where the pattern actually starts.
 
 Before any cloud module: AWS and GCP budget alarms (ADR-0003) — still outstanding.
 
@@ -138,6 +147,7 @@ Keep this short. One line per session: what you did, what broke, what is next.
 
 | Date | Module | What happened | Next |
 |:--|:--|:--|:--|
+| 2026-10-24 | 05 | ADR-0010 fixed the wrapper chart shape at four files; ADR-0011 decided the trust model — self-signed root on-prem, ACME in both clouds, one boolean apart. metrics-server and cert-manager both deployed by Argo CD, PKI Ready, root CA valid to 2036. Three chart pins were guessed wrong from memory (one version did not exist), so `make gitops-check-pins` now makes the repo answer that question — and caught cert-manager two minors behind on its first run. Two tooling bugs of mine found by using the tools: `make lint` reported failures on correct Go templates, and `make gitops-render` showed the wrong namespace, which is worse than showing nothing because it gets believed. | Gateway API, then a storage class |
 | 2026-10-24 | 04 | **Module 04 closed.** Argo CD installed by Ansible, root Application Synced, and both halves of the gate pass: a commit changed the cluster with no kubectl, and self-heal reverted both a field patch and a full delete. `make gitops-drift` finds nothing unclaimed. The laptop restarted mid-module and everything came back untouched — `make onprem-vms` then `make onprem-up`, with kubeadm, Cilium and Argo CD all reporting "already done". Fixed along the way: the playbook now waits for the nodes instead of assuming they are up, and `make lint` exists because I verified a change with `--syntax-check \| tail -2` and a pipe discards the exit code. | Module 05 — the platform baseline |
 | 2026-10-23 | 03 | **Module 03 closed.** Cluster rebuilt from destroyed nodes in about four minutes with no manual steps, and the second run reports changed=0. Three bugs found, each only findable by a different test: running twice on a live cluster caught a task that renamed the file `fetch` uses as its idempotency marker (so `fetch` re-downloaded forever); the destroy-and-rebuild caught `template` not creating `/etc/kubernetes/kubeadm`, which existed only because Module 02 made it by hand; and `--syntax-check` caught paths in `ansible.cfg` resolving against the config file rather than the shell. Idempotency proves the gates work; only a rebuild proves the roles are complete. | Module 04 — Argo CD |
 | 2026-10-23 | 02 | **Module 02 closed.** Gate green: `make smoke`, a worker reboot rejoining unaided, and `cilium connectivity test`. Three lessons kept: `kubeadm config validate` says `ok` to a truncated file, so configuration moved into Git behind a script that checksums the copy and counts the documents; `make smoke` was testing one pod pair and reporting it as "pod-to-pod across nodes", so it now tests all six and keeps the namespace on failure; and the reboot test never saw `NotReady` because the VM came back inside the 40s grace period, which is documented along with the real six-minute eviction timeline. | Module 03 — Ansible |
