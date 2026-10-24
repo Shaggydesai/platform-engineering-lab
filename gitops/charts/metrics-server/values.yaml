@@ -1,0 +1,28 @@
+# Settings true of metrics-server EVERYWHERE. Per-environment differences live in
+# gitops/environments/<env>/metrics-server.yaml (ADR-0010 Decision 2).
+#
+# Keys are under `metrics-server:` because they configure the DEPENDENCY, not this chart.
+# A wrapper chart's own values.yaml addresses its subchart by name - getting this wrong is the
+# most common way a wrapper chart silently applies none of its settings, because Helm accepts
+# unknown top-level keys without complaint.
+metrics-server:
+  # Two replicas would need a PodDisruptionBudget and anti-affinity to mean anything, and on
+  # three nodes it buys nothing. Scaled up in Module 10 if the metrics API turns out to matter.
+  replicas: 1
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+
+  # Keep it off the tainted control plane. There is worker capacity, and the control plane has
+  # 3.4 GB allocatable with etcd in it.
+  tolerations: []
+
+  # Scrape every 30s rather than the 15s default. The resource metrics API is read by
+  # `kubectl top` and the HPA, and neither needs 15-second resolution on a laptop - while every
+  # scrape costs a kubelet round trip on nodes that are already nested two layers deep.
+  args:
+    - --metric-resolution=30s

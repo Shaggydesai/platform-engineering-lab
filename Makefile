@@ -137,6 +137,25 @@ gitops-status: ## What Argo CD thinks the cluster should look like, and whether 
 gitops-drift: ## Anything running that Argo CD does NOT own (ADR-0009's detectable rule)
 	@bash scripts/gitops-drift.sh
 
+.PHONY: gitops-lock
+gitops-lock: ## Regenerate Chart.lock for every wrapper chart (ADR-0010) - commit the result
+	@set -eo pipefail; \
+	for c in gitops/charts/*/; do \
+	  echo "==> $$c"; \
+	  helm dependency update "$$c"; \
+	done; \
+	echo; \
+	echo "Chart.lock pins the upstream DIGEST, not just the version, so a re-tagged chart"; \
+	echo "cannot change what is deployed. Commit the change on its own, with the reason."
+
+.PHONY: gitops-render
+gitops-render: ## Render a wrapper chart as Argo CD would (CHART=metrics-server ENV=onprem)
+	@test -n "$(CHART)" || { echo "usage: make gitops-render CHART=<name> [ENV=onprem]"; exit 1; }
+	@helm template $(CHART) gitops/charts/$(CHART) \
+	  --namespace kube-system \
+	  -f gitops/charts/$(CHART)/values.yaml \
+	  -f gitops/environments/$(or $(ENV),onprem)/$(CHART).yaml
+
 # ---------------------------------------------------------------- cloud
 
 .PHONY: up

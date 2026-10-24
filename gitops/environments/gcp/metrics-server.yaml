@@ -1,0 +1,6 @@
+# metrics-server on GKE.
+#
+# Empty on purpose, and the emptiness is the statement: GKE provides a managed metrics
+# server, so Module 08 will decide whether this Application exists on that cluster at all
+# rather than what it is configured with. An empty file beats a missing one - it makes "no
+# difference here" explicit (ADR-0010 Decision 2).

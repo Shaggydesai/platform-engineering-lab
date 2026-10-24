@@ -1,0 +1,5 @@
+# metrics-server on EKS.
+#
+# Empty on purpose. EKS does NOT ship a metrics server, so this component is genuinely needed
+# there - and with provider-managed kubelet certificates, none of the on-prem overrides apply.
+# That contrast is the clearest example in the repository of why per-environment values exist.

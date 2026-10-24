@@ -1,0 +1,23 @@
+# Wrapper chart for metrics-server. ADR-0010 defines this shape.
+#
+# No templates of its own: metrics-server needs nothing the upstream chart does not provide.
+# A wrapper chart that accumulates templates is a fork with extra steps.
+#
+# After changing the dependency version:  make gitops-lock
+apiVersion: v2
+name: metrics-server
+description: >-
+  metrics-server for the platform. Provides the resource metrics API, which is what
+  `kubectl top` reads and what a HorizontalPodAutoscaler needs in order to exist.
+type: application
+
+# The WRAPPER's version, ours. Bumped when our values change in a way worth noticing.
+version: 0.1.0
+
+dependencies:
+  - name: metrics-server
+    # Pinned. Confirm with `helm search repo metrics-server/metrics-server --versions`
+    # before moving it, and move it in its own commit with the reason - the same discipline
+    # as the Cilium and Argo CD pins.
+    version: 3.13.0
+    repository: https://kubernetes-sigs.github.io/metrics-server/

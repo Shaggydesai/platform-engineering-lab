@@ -1,0 +1,27 @@
+# metrics-server, on-prem only. ADR-0010 Decision 2.
+#
+# This is the file that justifies the whole per-environment mechanism: the setting below is
+# genuinely wrong everywhere else.
+metrics-server:
+  args:
+    # Merged with the args in the chart's values.yaml? NO - Helm REPLACES lists, it does not
+    # merge them. So this list must repeat --metric-resolution. That is a real sharp edge of
+    # values-file layering and the reason to prefer map keys over list keys in a chart you
+    # control; here the upstream chart exposes args as a list and we live with it.
+    - --metric-resolution=30s
+
+    # Why this is needed on-prem and nowhere else:
+    #
+    # metrics-server scrapes each kubelet's /metrics/resource endpoint over TLS. kubeadm gives
+    # each kubelet a SELF-SIGNED serving certificate by default, so that scrape fails
+    # verification and metrics-server reports every node as unavailable - with an error about
+    # x509 that reads like a cluster-wide certificate problem rather than one component's.
+    #
+    # The clean fix is serverTLSBootstrap in the kubelet config, which makes kubelets request
+    # serving certs from the cluster CA. kubeadm does not auto-approve those CSRs, so it needs a
+    # controller to sign them - a whole component to add, for one scrape path, on a lab cluster.
+    # That trade is recorded in docs/parking-lot.md.
+    #
+    # On GKE and EKS the kubelet certificates are managed by the provider and this flag is both
+    # unnecessary and a downgrade, which is exactly why it lives here and not in the chart.
+    - --kubelet-insecure-tls

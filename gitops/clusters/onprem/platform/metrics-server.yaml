@@ -1,0 +1,59 @@
+# metrics-server, on the on-prem cluster.
+#
+# The first component built to the ADR-0010 pattern, so it is worth reading as the template for
+# the next four. Four files make it up:
+#
+#   gitops/charts/metrics-server/Chart.yaml        the pinned upstream dependency
+#   gitops/charts/metrics-server/Chart.lock        the pinned DIGEST - make gitops-lock
+#   gitops/charts/metrics-server/values.yaml       settings true everywhere
+#   gitops/environments/onprem/metrics-server.yaml settings true only here
+#
+# and this file assembles them.
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: metrics-server
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  # No sync-wave. ADR-0010 Decision 4: a wave is justified by a dependency that FAILS without
+  # it, not by a preference about ordering. Nothing needs metrics-server in order to start, and
+  # a wave would serialise the sync for no benefit.
+spec:
+  project: platform
+
+  # TWO sources, and the second one deploys nothing.
+  sources:
+    - repoURL: https://github.com/Shaggydesai/platform-engineering-lab.git
+      targetRevision: main
+      path: gitops/charts/metrics-server
+      helm:
+        valueFiles:
+          # Relative to `path` above.
+          - values.yaml
+          # Resolved through the `ref` below, so it can live outside the chart directory. This
+          # is the whole reason gitops/environments/ can be a top-level directory rather than a
+          # pile of values-<env>.yaml files inside every chart.
+          - $values/gitops/environments/onprem/metrics-server.yaml
+
+    - repoURL: https://github.com/Shaggydesai/platform-engineering-lab.git
+      targetRevision: main
+      # `ref` with no `path`: this is not a source of manifests, only a name that $values
+      # resolves against. Giving it a `path` as well would make Argo CD try to deploy the
+      # repository root, which is the usual mistake with multi-source Applications.
+      ref: values
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      # metrics-server registers an APIService (v1beta1.metrics.k8s.io). ServerSideApply keeps
+      # Argo CD from fighting the aggregation layer over the caBundle field, which the API
+      # server itself writes - the same co-management problem the Ansible seam hit.
+      - ServerSideApply=true
