@@ -99,10 +99,32 @@
     success_msg: "digest verified"
   run_once: true
 
+- name: Would applying the CRDs change anything?
+  # `kubectl apply --server-side` prints "serverside-applied" for every object whether or not
+  # it changed - there is no "unchanged" in its output at all. So the previous
+  # `changed_when: "'unchanged' not in stdout"` was true on every run, forever, and
+  # `changed=0` was unreachable.
+  #
+  # Exit codes instead: 0 identical, 1 differs. The same gate the argocd role uses for the
+  # same reason, and the only honest answer to "is this task about to do anything?"
+  ansible.builtin.command: >-
+    kubectl diff --server-side -f {{ gateway_api_bundle }}
+  delegate_to: localhost
+  run_once: true
+  become: false
+  environment:
+    KUBECONFIG: "{{ kubeconfig_fetch_path }}"
+  register: gw_diff
+  changed_when: false
+  # Anything above 1 is a real error. Without this, a broken kubeconfig reads as
+  # "no differences" and the apply is skipped silently.
+  failed_when: gw_diff.rc not in [0, 1]
+
 - name: Apply the Gateway API CRDs
   # --server-side for the same reason cert-manager's Application uses it: CRDs this size blow
   # past the 262144-byte limit on the last-applied-configuration annotation, and the resulting
   # error names the annotation rather than the cause.
+  when: gw_diff.rc == 1
   ansible.builtin.command: >-
     kubectl apply --server-side --force-conflicts -f {{ gateway_api_bundle }}
   delegate_to: localhost
@@ -111,7 +133,7 @@
   environment:
     KUBECONFIG: "{{ kubeconfig_fetch_path }}"
   register: gw_apply
-  changed_when: "'unchanged' not in gw_apply.stdout"
+  changed_when: true
 
 - name: Wait for the CRDs to be established
   # "Applied" is not "usable". A CRD has to be Established before the API server will accept an

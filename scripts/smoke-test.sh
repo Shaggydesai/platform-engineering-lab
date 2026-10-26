@@ -33,11 +33,11 @@ cleanup() {
 trap cleanup EXIT
 kubectl create ns "$NS" >/dev/null
 
-echo "1/5 nodes Ready"
+echo "1/6 nodes Ready"
 kubectl wait --for=condition=Ready nodes --all --timeout=60s >/dev/null
 kubectl get nodes -o wide
 
-echo "2/5 scheduling on every node"
+echo "2/6 scheduling on every node"
 for n in $(kubectl get nodes -o jsonpath='{.items[*].metadata.name}'); do
   kubectl -n "$NS" run "p-${n##*-}" --image=nicolaka/netshoot --restart=Never \
     --overrides="{\"spec\":{\"nodeName\":\"$n\",\"tolerations\":[{\"operator\":\"Exists\"}]}}" \
@@ -45,7 +45,7 @@ for n in $(kubectl get nodes -o jsonpath='{.items[*].metadata.name}'); do
 done
 kubectl -n "$NS" wait --for=condition=Ready pod --all --timeout=120s >/dev/null
 
-echo "3/5 pod-to-pod across nodes (every ordered pair)"
+echo "3/6 pod-to-pod across nodes (every ordered pair)"
 # EVERY pair, not one. The first version of this test pinged pods[0] -> pods[1], which on a
 # three-node cluster happened to be control-plane -> worker, and never touched the
 # worker-to-worker path where real traffic actually lives. A tunnel can be broken in one
@@ -77,11 +77,11 @@ else
   echo "    $pairs of $pairs paths work"
 fi
 
-echo "4/5 cluster DNS"
+echo "4/6 cluster DNS"
 kubectl -n "$NS" exec "${pods[0]}" -- nslookup kubernetes.default.svc.cluster.local >/dev/null
 echo "    resolves"
 
-echo "5/5 Service routing"
+echo "5/6 Service routing"
 kubectl -n "$NS" create deploy web --image=nginx:alpine --replicas=2 >/dev/null
 kubectl -n "$NS" expose deploy web --port=80 >/dev/null
 kubectl -n "$NS" rollout status deploy/web --timeout=120s >/dev/null
@@ -98,7 +98,9 @@ clusterip=$(kubectl -n "$NS" get svc web -o jsonpath='{.spec.clusterIP}')
 # Three probes, narrowest first, so a failure says WHICH layer broke rather than
 # "the service is unreachable":
 #   backend  - a pod IP directly        -> is nginx actually serving?
-#   clusterip- the virtual IP           -> did kube-proxy program the rules?
+#   clusterip- the virtual IP           -> is SOMETHING programming Services?
+#                                         (Cilium's eBPF maps now; kube-proxy's
+#                                          iptables chains before Module 05)
 #   dns name - the full name            -> does cluster DNS resolve the service?
 backend=$(kubectl -n "$NS" get pod -l app=web -o jsonpath='{.items[0].status.podIP}')
 probe() {
@@ -116,6 +118,50 @@ probe() {
 probe backend  "http://$backend"
 probe clusterip "http://$clusterip"
 probe dns      "http://web.$NS.svc.cluster.local"
+
+echo "6/6 NodePort from every node"
+# Added after a cluster passed all five checks above with NO NodePort implementation
+# whatsoever. kube-proxy had been deleted while every Cilium agent was still running
+# kubeProxyReplacement: false, so nothing served NodePort, externalIPs, HostPort, or
+# ClusterIP from a node's own netns - and the checks above missed all of it, because every
+# one of them probes from INSIDE a pod, where Cilium's socket-LB handles ClusterIP whether
+# or not it is in replacement mode.
+#
+# This probe is different in two ways that are the whole point:
+#   - it originates from the WORKSTATION, outside the cluster, not from a pod;
+#   - it hits ALL THREE nodes, including the two with no backend pod on them.
+# A node with no local backend has to forward to one that has it. That forwarding is the
+# part kube-proxy used to own, so this is the narrowest check that fails when nothing has
+# taken the job over.
+kubectl -n "$NS" expose deployment web --name=web-np --type=NodePort --port=80 >/dev/null
+nodeport=$(kubectl -n "$NS" get svc web-np -o jsonpath='{.spec.ports[0].nodePort}')
+backend_node=$(kubectl -n "$NS" get pod -l app=web -o jsonpath='{.items[0].spec.nodeName}')
+echo "    backend pod is on $backend_node; port $nodeport"
+
+np_ok=0 np_total=0
+# Name and address in ONE query, as pairs. Looking the name up separately by
+# .status.addresses[0].address assumes an order the API does not promise - addresses can
+# come back Hostname-first, and then every node prints as blank.
+while read -r name addr; do
+  [[ -z "${addr:-}" ]] && continue
+  np_total=$((np_total + 1))
+  code=000
+  for _ in $(seq 1 10); do
+    code=$(curl -sS -o /dev/null -m 3 -w '%{http_code}' "http://$addr:$nodeport" 2>/dev/null || echo 000)
+    [[ $code == 200 ]] && break
+    sleep 2
+  done
+  if [[ $code == 200 ]]; then
+    np_ok=$((np_ok + 1))
+    extra=""
+    [[ "$name" != "$backend_node" ]] && extra="  (forwarded - no local backend)"
+    printf '    %-10s %-22s %s%s\n' "$name" "$addr:$nodeport" "$code" "$extra"
+  else
+    printf '    %-10s %-22s %s  FAILED\n' "$name" "$addr:$nodeport" "$code"
+  fi
+done < <(kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.addresses[?(@.type=="InternalIP")].address}{"\n"}{end}')
+echo "    $np_ok of $np_total nodes serve the NodePort"
+[[ $np_ok -eq $np_total ]]
 
 echo
 echo "smoke test passed on $ctx"

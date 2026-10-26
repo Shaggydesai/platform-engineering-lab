@@ -13,7 +13,7 @@
   # Not a check - a record. ADR-0007 promised a before/after comparison and this is the "before"
   # half, taken automatically so it exists whether or not anyone remembered to look.
   ansible.builtin.shell:
-    cmd: set -o pipefail && iptables-save 2>/dev/null | grep -c 'KUBE-SVC' || true
+    cmd: set -o pipefail && iptables-save 2>/dev/null | grep -c 'KUBE-SVC' || true  # noqa
     executable: /bin/bash
   become: true
   register: kp_rules_before
@@ -112,28 +112,46 @@
   # inert - Cilium's eBPF path is consulted first - but they are confusing to read later and
   # they make `iptables-save` useless for understanding the live datapath.
   #
-  # Only KUBE* lines are removed. Cilium's own chains are CILIUM_*, so this cannot touch them.
+  # ONLY kube-proxy's own chains, by name. The first version of this matched `KUBE` and that
+  # was wrong in two ways at once: KUBE-FIREWALL, KUBE-KUBELET-CANARY, KUBE-IPTABLES-HINT and
+  # KUBE-MARK-DROP belong to the KUBELET, not to kube-proxy. So every run deleted the kubelet's
+  # rules - KUBE-FIREWALL among them, which is what drops martian-source packets - the kubelet
+  # silently recreated them on its next sync, and the task reported "changed" forever because
+  # there was always something matching `KUBE` to flush.
+  #
+  # An allowlist of chains kube-proxy demonstrably owns, not a denylist of the kubelet's:
+  # a denylist is wrong the moment some component adds a KUBE chain nobody here predicted.
+  #
   # iptables rules are not persisted across a reboot anyway, which is the reason this is safe:
   # the worst case is the same state a node reaches on its own after a restart.
   ansible.builtin.shell:
     cmd: |
       set -o pipefail
-      before=$(iptables-save | grep -c 'KUBE' || true)
+      proxy='KUBE-(SERVICES|EXTERNAL-SERVICES|NODEPORTS|SVC-|SEP-|FORWARD|POSTROUTING|MARK-MASQ|PROXY-FIREWALL|PROXY-CANARY)'
+      before=$(iptables-save | grep -Ec "$proxy" || true)
       if [ "$before" -gt 0 ]; then
-        iptables-save | grep -v 'KUBE' | iptables-restore
-        after=$(iptables-save | grep -c 'KUBE' || true)
-        echo "flushed: $before -> $after"
+        # Removing a chain's ":NAME" declaration and every rule that names it in one pass -
+        # a jump can only reference a chain by name, so nothing can be left pointing at a
+        # chain that is gone.
+        iptables-save | grep -Ev "$proxy" | iptables-restore
+        after=$(iptables-save | grep -Ec "$proxy" || true)
+        echo "flushed kube-proxy chains: $before -> $after"
       else
-        echo "nothing to flush"
+        echo "no kube-proxy chains present"
       fi
+      echo "kubelet's own chains, untouched: $(iptables-save | grep -Ec 'KUBE-(FIREWALL|KUBELET-CANARY|IPTABLES-HINT|MARK-DROP)' || true) lines"
     executable: /bin/bash
   become: true
   register: kp_flush
   changed_when: "'flushed' in kp_flush.stdout"
 
+- name: What the flush did, and did not, touch
+  ansible.builtin.debug:
+    msg: "{{ inventory_hostname }}: {{ kp_flush.stdout_lines | join(' | ') }}"
+
 - name: Count Service rules AFTER removal, and where they live now
   ansible.builtin.shell:
-    cmd: set -o pipefail && iptables-save 2>/dev/null | grep -c 'KUBE-SVC' || true
+    cmd: set -o pipefail && iptables-save 2>/dev/null | grep -c 'KUBE-SVC' || true  # noqa
     executable: /bin/bash
   become: true
   register: kp_rules_after
