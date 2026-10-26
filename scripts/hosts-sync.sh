@@ -84,8 +84,19 @@ if [[ ! -f "$KNOWN" ]]; then
   ok 'no known_hosts file yet, nothing to reconcile'
 else
   for host in $(jq -r --arg d "$domain" '.nodes[] | .address, .name, (.name + "." + $d)' "$CONFIG"); do
-    stored=$(ssh-keygen -F "$host" -f "$KNOWN" 2>/dev/null | grep -v '^#' | awk '{print $3}')
-    [[ -z "$stored" ]] && continue
+    # `|| true` is load-bearing twice over. ssh-keygen -F exits 1 when the host is not in
+    # the file, and grep exits 1 when it filters everything out - and under `set -o pipefail`
+    # a failing pipeline inside $(...) makes the ASSIGNMENT fail, which `set -e` turns into
+    # "the whole script exits, silently, with status 1".
+    #
+    # That is exactly what happened: this loop replaced the key for 192.168.100.10, moved on
+    # to the name k8s-cp01 which has no entry, and the script died there - leaving .11 and .12
+    # with stale keys and skipping the verification step entirely. The output looked like a
+    # partial success rather than a crash, which is the worst kind.
+    stored=$(ssh-keygen -F "$host" -f "$KNOWN" 2>/dev/null | grep -v '^#' | awk '{print $3}' || true)
+    if [[ -z "$stored" ]]; then
+      continue
+    fi
 
     live=$(ssh-keyscan -T 3 "$host" 2>/dev/null | grep -v '^#' || true)
     if [[ -z "$live" ]]; then
@@ -93,9 +104,15 @@ else
       continue
     fi
 
+    # `if` rather than `[[ ... ]] && grep && match=yes` for the same reason: a while loop
+    # exits with the status of the last command in its body, so a final non-matching line
+    # would make the loop itself "fail" and take the script down. An `if` with a false
+    # condition and no else branch returns 0.
     match=no
     while read -r _h _t blob _rest; do
-      [[ -n "${blob:-}" ]] && grep -qxF "$blob" <<<"$stored" && match=yes
+      if [[ -n "${blob:-}" ]] && grep -qxF "$blob" <<<"$stored"; then
+        match=yes
+      fi
     done <<<"$live"
 
     if [[ $match == yes ]]; then

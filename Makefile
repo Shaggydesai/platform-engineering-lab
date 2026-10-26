@@ -8,6 +8,25 @@ SHELL := /bin/bash
 .DEFAULT_GOAL := help
 ENV ?= onprem
 
+# A prerequisite on every target that runs a playbook, because of a real near-miss:
+# `make onprem-up -- --tags gateway-api` ran the ENTIRE playbook - upgrading the CNI and
+# removing kube-proxy - and only then failed with "No rule to make target '--tags'".
+# make takes the extra words as goals and builds them IN ORDER, so the harm is done by the
+# time it complains. There is no way to pass ansible flags through a make goal; use
+# TAGS= and ARGS= below.
+#
+# This is a prerequisite rather than the first line of each recipe because prerequisites are
+# built before the recipe runs, which is the whole point.
+.PHONY: _no-stray-flags
+_no-stray-flags:
+	@for g in $(MAKECMDGOALS); do case "$$g" in -*) \
+	  printf '\033[31m%s\033[0m\n' "make cannot forward flags: '$$g' was read as a target."; \
+	  printf '  Pass ansible flags with TAGS= or ARGS= instead, for example:\n'; \
+	  printf '    make onprem-up TAGS=gateway-api\n'; \
+	  printf '    make onprem-up ARGS="--check --diff"\n'; \
+	  printf '  Stopping before anything runs.\n'; \
+	  exit 1;; esac; done
+
 .PHONY: help
 help: ## Show this help
 	@echo "platform-engineering-lab"
@@ -81,6 +100,9 @@ onprem-vms-destroy: ## Destroy the on-prem nodes (the golden image is kept)
 # location, so every target below runs from the repository root.
 ANSIBLE_ENV  := ANSIBLE_CONFIG=ansible/ansible.cfg
 PLAYBOOK     := $(ANSIBLE_ENV) ansible-playbook
+# TAGS=gateway-api limits a run to one play; ARGS="--check --diff" passes anything else.
+# Both empty by default, so `make onprem-up` is unchanged.
+PLAY_OPTS    := $(if $(TAGS),--tags $(TAGS),) $(ARGS)
 
 .PHONY: onprem-ping
 onprem-ping: ## Module 03 - can Ansible reach all three nodes?
@@ -91,24 +113,24 @@ onprem-inventory: ## Module 03 - show the inventory derived from nodes.json
 	@$(ANSIBLE_ENV) ansible-inventory --graph --vars
 
 .PHONY: onprem-preflight
-onprem-preflight: ## Module 03 - assert the golden image did its job (changes nothing)
-	@$(PLAYBOOK) ansible/playbooks/cluster.yml --tags preflight
+onprem-preflight: _no-stray-flags ## Module 03 - assert the golden image did its job (changes nothing)
+	@$(PLAYBOOK) ansible/playbooks/cluster.yml --tags preflight $(ARGS)
 
 .PHONY: onprem-check
-onprem-check: ## Module 03 - dry run the whole cluster playbook (--check --diff)
-	@$(PLAYBOOK) ansible/playbooks/cluster.yml --check --diff
+onprem-check: _no-stray-flags ## Module 03 - dry run the whole cluster playbook (--check --diff)
+	@$(PLAYBOOK) ansible/playbooks/cluster.yml --check --diff $(PLAY_OPTS)
 
 .PHONY: onprem-up
-onprem-up: ## Module 03 - build the whole on-prem cluster from nothing
-	@$(PLAYBOOK) ansible/playbooks/cluster.yml
+onprem-up: _no-stray-flags ## Module 03 - build the whole on-prem cluster from nothing
+	@$(PLAYBOOK) ansible/playbooks/cluster.yml $(PLAY_OPTS)
 
 .PHONY: onprem-config
-onprem-config: ## Module 03 - re-render the kubeadm config only
-	@$(PLAYBOOK) ansible/playbooks/cluster.yml --tags config
+onprem-config: _no-stray-flags ## Module 03 - re-render the kubeadm config only
+	@$(PLAYBOOK) ansible/playbooks/cluster.yml --tags config $(ARGS)
 
 .PHONY: onprem-argocd
-onprem-argocd: ## Module 04 - install/repair Argo CD and re-apply the GitOps seam
-	@$(PLAYBOOK) ansible/playbooks/cluster.yml --tags argocd
+onprem-argocd: _no-stray-flags ## Module 04 - install/repair Argo CD and re-apply the GitOps seam
+	@$(PLAYBOOK) ansible/playbooks/cluster.yml --tags argocd $(ARGS)
 
 .PHONY: onprem-down
 onprem-down: ## Destroy the on-prem cluster (keeps the VMs)
