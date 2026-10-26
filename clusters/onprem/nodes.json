@@ -26,7 +26,7 @@
     "argocd_app_version": "v3.5.5",
     "gateway_api_comment": "Gateway API CRDs are a Layer 1 prerequisite of Cilium's Gateway support (ADR-0012), and the one thing in this repository that arrives as a raw URL rather than a Helm chart. So it is pinned by CONTENT as well as by version: the ansible role verifies this sha256 before applying and refuses if it differs, because a version tag is a mutable pointer and a digest is not. To fill it in, run the role once with sha256 empty - it prints the actual digest and the line to paste.",
     "gateway_api_version": "v1.6.3",
-    "gateway_api_sha256": ""
+    "gateway_api_sha256": "356c2b8e286a964dc20995435659ad1095386329974793af10bbfe3eff977fe5"
   },
   "ssh": {
     "username": "sagar",
