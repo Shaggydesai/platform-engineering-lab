@@ -36,10 +36,29 @@
   # than against the values file, which might not have been applied.
   when: kp_present.stdout | length > 0
   block:
-    - name: Read Cilium's kube-proxy replacement mode
-      ansible.builtin.command: >-
-        kubectl --namespace kube-system get configmap cilium-config
-        -o jsonpath={.data.kube-proxy-replacement}
+    - name: Read the replacement mode from every RUNNING agent
+      # This read used to come from the cilium-config ConfigMap, and that was the bug that
+      # mattered: the ConfigMap is where helm WRITES the request, and the chart never restarts
+      # the agents to pick it up. So this task reported "true" while all three agents were
+      # running with it false, the assert below passed, and kube-proxy was deleted out from
+      # under a datapath that had not taken over for it.
+      #
+      # The comment three lines above this block already said "the RUNNING config rather than
+      # the values file". It was correct about what to check and wrong about where to look.
+      #
+      # Every pod, not `exec ds/cilium` which picks one: the state worth catching is the
+      # half-rolled DaemonSet, and one pod cannot show it.
+      ansible.builtin.shell: |
+        set -o pipefail
+        for p in $(kubectl --namespace kube-system get pods -l k8s-app=cilium \
+                     -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do
+          mode=$( (kubectl --namespace kube-system exec "$p" -- cilium-dbg status 2>/dev/null \
+                   || kubectl --namespace kube-system exec "$p" -- cilium status 2>/dev/null) \
+                 | awk '/^KubeProxyReplacement:/ {print tolower($2); exit}' )
+          printf '%s=%s\n' "$p" "${mode:-unknown}"
+        done
+      args:
+        executable: /bin/bash
       delegate_to: localhost
       run_once: true
       become: false
@@ -48,15 +67,27 @@
       register: kp_cilium_mode
       changed_when: false
 
-    - name: Cilium must actually be in replacement mode
+    - name: Every agent must actually be in replacement mode
       ansible.builtin.assert:
-        that: kp_cilium_mode.stdout | lower in ['true', 'strict']
-        fail_msg: >-
-          Cilium reports kube-proxy-replacement = "{{ kp_cilium_mode.stdout }}", so it is NOT
-          programming Services. Removing kube-proxy now would break every ClusterIP in the
-          cluster, including the one the API server is reached by - and nothing inside the
-          cluster could fix it. Run the cilium role first.
-        success_msg: "Cilium is in kube-proxy replacement mode ({{ kp_cilium_mode.stdout }})"
+        that: >-
+          kp_cilium_mode.stdout_lines
+          | map('regex_replace', '^.*=', '')
+          | reject('in', ['true', 'strict'])
+          | list | length == 0
+        fail_msg: |
+          Not every Cilium agent is programming Services:
+
+          {{ kp_cilium_mode.stdout }}
+
+          Removing kube-proxy now would leave NodePort, externalIPs, HostPort and
+          host-namespace ClusterIP unserved on at least one node - while pod-sourced ClusterIP
+          went on working through socket-LB, so nothing would look broken until something
+          specific was tried.
+
+          The cilium role reconciles this: it restarts the agents when the running config
+          disagrees with the values file. Run `make onprem-up TAGS=cni` and let it.
+        success_msg: >-
+          all {{ kp_cilium_mode.stdout_lines | length }} agents in replacement mode
       run_once: true
 
 - name: Remove the kube-proxy DaemonSet and its ConfigMap

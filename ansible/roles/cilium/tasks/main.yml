@@ -98,11 +98,171 @@
     KUBECONFIG: "{{ kubeconfig_fetch_path }}"
   changed_when: false
 
+- name: What configuration do the values ASK for?
+  ansible.builtin.set_fact:
+    cilium_desired_kpr: >-
+      {{ ((lookup('file', cilium_values_file) | from_yaml).kubeProxyReplacement
+          | default(false)) | string | lower }}
+  run_once: true
+
+- name: What configuration are the agents actually RUNNING?
+  # The task that should have existed from the start, and the distinction that matters most in
+  # this whole role.
+  #
+  # `helm upgrade` rewrote the cilium-config ConfigMap, waited, and reported success - and not
+  # one agent restarted. The chart puts NO config checksum on the DaemonSet's pod template,
+  # on purpose: a config change that nobody asked to be rolled should not restart the CNI on
+  # every node at once. So the ConfigMap said kubeProxyReplacement: true while all three
+  # agents went on running the configuration they loaded days earlier, with it false.
+  #
+  # kube_proxy_removal then read the ConfigMap, believed it, and deleted kube-proxy from a
+  # cluster where nothing had taken over NodePort, externalIPs, HostPort, or host-namespace
+  # ClusterIP. `make smoke` passed, because it only tests ClusterIP from inside a pod - which
+  # Cilium serves through socket-LB even with replacement off.
+  #
+  # A ConfigMap is a REQUEST. `cilium-dbg status` is the answer. Every agent is asked, not one,
+  # because a half-rolled DaemonSet is exactly the state worth catching.
+  ansible.builtin.shell: |
+    set -o pipefail
+    for p in $(kubectl --namespace kube-system get pods -l k8s-app=cilium \
+                 -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do
+      mode=$( (kubectl --namespace kube-system exec "$p" -- cilium-dbg status 2>/dev/null \
+               || kubectl --namespace kube-system exec "$p" -- cilium status 2>/dev/null) \
+             | awk '/^KubeProxyReplacement:/ {print tolower($2); exit}' )
+      printf '%s=%s\n' "$p" "${mode:-unknown}"
+    done
+  args:
+    executable: /bin/bash
+  delegate_to: localhost
+  run_once: true
+  become: false
+  environment:
+    KUBECONFIG: "{{ kubeconfig_fetch_path }}"
+  register: cilium_running
+  changed_when: false
+
+- name: Restart the agents and the operator when the running config disagrees with Git
+  # Deliberately driven by the OBSERVED disagreement rather than by `cilium_install is changed`.
+  # Gating on the helm task would not have recovered this cluster: the release already holds the
+  # right values, so no upgrade is pending, so no restart would ever be triggered and the
+  # agents would stay wrong forever. Reconciling against observed state fixes it on the next
+  # run and does nothing on the run after that.
+  #
+  # Safe to restart with kube-proxy already gone only because of k8sServiceHost/k8sServicePort:
+  # a starting agent reaches the API server by name through the node's /etc/hosts, not through
+  # the 10.96.0.1 ClusterIP that nothing would be programming during the restart.
+  when: >-
+    cilium_running.stdout_lines
+    | map('regex_replace', '^.*=', '')
+    | reject('equalto', cilium_desired_kpr)
+    | list | length > 0
+  ansible.builtin.command: >-
+    kubectl --namespace kube-system rollout restart {{ item }}
+  loop:
+    - daemonset/cilium
+    - deployment/cilium-operator
+  delegate_to: localhost
+  run_once: true
+  become: false
+  environment:
+    KUBECONFIG: "{{ kubeconfig_fetch_path }}"
+  register: cilium_restart
+  changed_when: true
+
+- name: Wait for the restarted agents and operator
+  when: cilium_restart is changed
+  ansible.builtin.command: >-
+    kubectl --namespace kube-system rollout status {{ item }} --timeout=300s
+  loop:
+    - daemonset/cilium
+    - deployment/cilium-operator
+  delegate_to: localhost
+  run_once: true
+  become: false
+  environment:
+    KUBECONFIG: "{{ kubeconfig_fetch_path }}"
+  changed_when: false
+
+- name: Re-read the running configuration after the restart
+  when: cilium_restart is changed
+  ansible.builtin.shell: |
+    set -o pipefail
+    for p in $(kubectl --namespace kube-system get pods -l k8s-app=cilium \
+                 -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do
+      mode=$( (kubectl --namespace kube-system exec "$p" -- cilium-dbg status 2>/dev/null \
+               || kubectl --namespace kube-system exec "$p" -- cilium status 2>/dev/null) \
+             | awk '/^KubeProxyReplacement:/ {print tolower($2); exit}' )
+      printf '%s=%s\n' "$p" "${mode:-unknown}"
+    done
+  args:
+    executable: /bin/bash
+  delegate_to: localhost
+  run_once: true
+  become: false
+  environment:
+    KUBECONFIG: "{{ kubeconfig_fetch_path }}"
+  register: cilium_running_after
+  changed_when: false
+
+- name: Which reading is the current one?
+  # After a restart the second reading is the truth; without one the first still is. A named
+  # fact rather than a conditional expression repeated in three places - and `cond ? a : b`
+  # is not Jinja, which is how the first version of this failed.
+  ansible.builtin.set_fact:
+    cilium_running_now: >-
+      {{ (cilium_running_after if (cilium_restart is changed) else cilium_running) }}
+  run_once: true
+
+- name: Every agent must be running the configuration Git asks for
+  # The gate. Without it this role can report success while the datapath is something else
+  # entirely, which is precisely what it did.
+  ansible.builtin.assert:
+    that: >-
+      cilium_running_now.stdout_lines
+      | map('regex_replace', '^.*=', '')
+      | reject('equalto', cilium_desired_kpr)
+      | list | length == 0
+    fail_msg: |
+      At least one agent is not running kubeProxyReplacement={{ cilium_desired_kpr }}:
+
+      {{ cilium_running_now.stdout }}
+
+      "unknown" means cilium-dbg status could not be read from that pod at all - check the
+      pod is Running before reading anything into the mode.
+
+      Do NOT remove kube-proxy in this state. If kube-proxy is already gone, NodePort,
+      externalIPs, HostPort and host-namespace ClusterIP are all unserved right now, while
+      pod-sourced ClusterIP keeps working through socket-LB - so the cluster looks healthy
+      and is not.
+    success_msg: >-
+      all {{ cilium_running.stdout_lines | length }} agents running
+      kubeProxyReplacement={{ cilium_desired_kpr }}
+  run_once: true
+
 - name: Every node must now be Ready
   # Before the CNI, the kubelet refuses to call itself Ready because it cannot give a pod an
   # address. This is the task that closes that gap, so it is the right place to assert it.
   ansible.builtin.command: >-
     kubectl wait --for=condition=Ready nodes --all --timeout=120s
+  delegate_to: localhost
+  run_once: true
+  become: false
+  environment:
+    KUBECONFIG: "{{ kubeconfig_fetch_path }}"
+  changed_when: false
+
+- name: Gateway API support must actually be live
+  # gatewayAPI.enabled lands in the same ConfigMap and had the same fate: the operator kept
+  # running without Gateway support, so the GatewayClass the chart created sat at
+  # ACCEPTED=Unknown with nothing to reconcile it.
+  #
+  # Waiting on the condition rather than on the object's existence is the point. The chart
+  # creates the GatewayClass whether or not the controller is listening; only the controller
+  # can set Accepted, so this is the one check that distinguishes "installed" from "working".
+  when: >-
+    (lookup('file', cilium_values_file) | from_yaml).gatewayAPI.enabled | default(false)
+  ansible.builtin.command: >-
+    kubectl wait --for=condition=Accepted --timeout=180s gatewayclass/cilium
   delegate_to: localhost
   run_once: true
   become: false
