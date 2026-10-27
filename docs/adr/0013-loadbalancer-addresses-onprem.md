@@ -219,3 +219,46 @@ The policy deliberately selects both workers so that there is somewhere to fail 
 the lease *moves* when the holder dies has not been demonstrated, only made possible. Until it
 is, the default 15s lease duration and 5s renew deadline are numbers from a document rather than
 measured behaviour.
+
+### Failover, measured 2026-10-27
+
+`virsh destroy k8s-w02` — a hard power-off of the node holding both leases, not a pod deletion —
+while curling `https://gw.platform.local` once a second from the workstation:
+
+```
+17:38:35 404          <- last good
+17:38:36 timeout
+17:38:39 timeout
+17:38:42 timeout
+17:38:45 timeout
+17:38:48 timeout
+17:38:51 404          <- recovered
+```
+
+**~15 seconds of outage**, which is the `leaseDuration` default. The probe interval was 2s with
+a 2s curl timeout, so the true window is 14–16s; it cannot be pinned tighter from this data and
+does not need to be.
+
+**What that rules out.** If the new holder did not announce the address unprompted, the
+workstation would have kept framing to the dead node's MAC until its ARP entry aged out, probed
+it by unicast three times, and only then re-broadcast — tens of seconds more. The outage landing
+on the lease duration instead means ARP caching was not the limiting factor, which is only
+consistent with a gratuitous ARP from the new holder on takeover.
+
+**Inferred, not captured.** No packet was taken. Proving it would mean `ip neigh show
+192.168.100.200` either side of the failover, or a tcpdump on the bridge. The timing is strong
+evidence and it is not the same thing as the evidence.
+
+**The decision in section 7 is now a measured tradeoff.** Leaving the lease timings at their
+defaults costs **about 15 seconds of ingress downtime per node failure**. Cilium's own suggested
+aggressive setting (3s duration / 1s renew / 200ms retry) should cut that to roughly 3 seconds,
+at the price of renewing every lease five times more often, forever, against an API server that
+is one 4 GB node. For this lab, 15s is the right side of that trade. For anything with a service
+level, it is not, and the number to quote when arguing about it is now on this page.
+
+**Also worth knowing:** this measured the announcement failover and nothing else. The Gateway has
+no HTTPRoute, so envoy returns 404 from whichever node is announcing, with no backend involved.
+A real service would additionally wait on pod rescheduling — the node goes `NotReady` after
+`node-monitor-grace-period` (40s) and its pods are only evicted 300s after the `NoExecute` taint,
+so roughly 5m40s before replacements start elsewhere. The 15s above is the floor, not the
+recovery time of an application.

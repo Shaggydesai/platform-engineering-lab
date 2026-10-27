@@ -20,6 +20,7 @@
 | **Gateway API** | CRDs v1.6.3, pinned by digest `356c2b8e…`. `gatewayclass/cilium` **Accepted=True** |
 | **LoadBalancer addresses** | **working** — pool `192.168.100.200–.239`, announced by a worker over ARP (ADR-0013) |
 | **Gateway** | **working** — `gw.platform.local` at `.200`, HTTPS terminated with a `platform-ca` certificate. Returns 404: no HTTPRoute yet |
+| **Ingress failover** | **measured: ~15s** on a hard node power-off, bounded by the L2 lease duration (ADR-0013) |
 | **Certificates expire** | **2027-10-22** — `sudo kubeadm certs renew all` before then, or nothing works |
 | **GCP cluster** | not built — account verified empty, ₹0 running |
 | **AWS cluster** | not built |
