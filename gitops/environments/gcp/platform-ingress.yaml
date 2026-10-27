@@ -1,0 +1,22 @@
+# Ingress, gcp — everything off.
+#
+# Not "not yet configured": off on purpose, and the overlay exists saying so rather than being
+# absent, so that a missing file never has to be read as either.
+#
+# On GKE a type=LoadBalancer Service is fulfilled by a Google network load balancer, which the cloud
+# provisions and announces itself. An address pool here would claim addresses the provider also
+# believes it owns, and L2 announcements would ARP for them on a network that does not carry
+# L2 between nodes in the first place.
+#
+# This is the point of the three-substrate comparison in ADR-0001, and the most useful thing in
+# this file is the contrast: on-prem, getting one address to answer took a pool, an announcement
+# policy, a beta feature and an ADR. Here it is a field on a Service - and the bill arrives
+# monthly, which is why ADR-0003 forbids leaving one running.
+loadBalancer:
+  enabled: false
+l2:
+  enabled: false
+gateway:
+  enabled: false
+certificate:
+  enabled: false

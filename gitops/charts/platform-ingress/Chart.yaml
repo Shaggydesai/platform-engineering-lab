@@ -1,0 +1,13 @@
+apiVersion: v2
+name: platform-ingress
+description: >-
+  Ingress for the platform: a Cilium LoadBalancer address pool, the L2 announcement policy that
+  makes those addresses answer ARP, and a Gateway serving TLS from the internal CA.
+type: application
+version: 0.1.0
+
+# No dependencies, and therefore no Chart.lock. Every other wrapper chart in this repository
+# wraps an upstream chart (ADR-0010); this one wraps nothing, because there is no upstream chart
+# for "four custom resources that belong together". It is still a chart rather than four loose
+# manifests so that the per-environment overlay mechanism works the same way here as everywhere
+# else - the on-prem addresses are in gitops/environments/onprem/, not in the templates.

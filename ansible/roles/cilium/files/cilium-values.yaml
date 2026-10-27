@@ -60,6 +60,41 @@ gatewayAPI:
 k8sServiceHost: k8s-cp01.platform.local
 k8sServicePort: 6443
 
+# L2 announcements: answer ARP for LoadBalancer addresses on the node network, so a
+# type=LoadBalancer Service gets an address that actually responds on 192.168.100.0/24 instead
+# of sitting <pending> forever (ADR-0013). This is the Layer 1 half of the feature - the
+# CAPABILITY. The addresses themselves are a CiliumLoadBalancerIPPool, which is an ordinary
+# custom resource and therefore Layer 3, owned by Argo CD.
+#
+# Beta in Cilium, and it hard-requires kubeProxyReplacement, which is why it could not have
+# been done before the change above.
+#
+# Lease timings are left at their defaults (15s duration / 5s renew / 2s retry). Shortening
+# them buys faster failover when the announcing node dies, and costs API server requests
+# forever: the announcer re-elects itself on every renew. Faster failover is not worth paying
+# for continuously on a three-node lab.
+l2announcements:
+  enabled: true
+
+# Raised from the default 5 qps / 10 burst because L2 announcements take a Lease per service
+# and renew each one on a timer, so the agents' API traffic now scales with the number of
+# LoadBalancer Services. Cilium's own formula is qps = services x (1 / leaseRenewDeadline);
+# with the 5s default renew deadline, 30 qps covers 150 announced services, which is far more
+# than this cluster will ever have.
+#
+# The failure this prevents is not an error message. Client-side rate limiting makes the agent
+# SLOW - renewals arrive late, leases expire, and the announcement flaps between nodes. It
+# looks like a network fault, not a rate limit.
+k8sClientRateLimit:
+  qps: 30
+  burst: 60
+
+# `devices` is deliberately NOT set. Cilium then considers every interface, which is what we
+# want: the announcing interface is selected per-policy by a regex in the
+# CiliumL2AnnouncementPolicy instead. Setting `devices` here would mean the announcing device
+# must also appear in it, so the interface name would be pinned in two places - and Module 01's
+# netplan config already refuses to hardcode `enp1s0` for exactly this reason.
+
 # One replica: there is one control-plane node, and the chart's default of two would leave
 # a pod permanently Pending behind an anti-affinity rule you then have to go and read.
 operator:

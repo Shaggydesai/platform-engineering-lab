@@ -12,6 +12,14 @@
       "1.1.1.1"
     ]
   },
+  "loadbalancer": {
+    "comment": "Addresses Cilium hands to type=LoadBalancer Services, announced on the node network by ARP (ADR-0013). These are NOT libvirt's to give: the platform network has no DHCP range at all, so the only addresses in use on this /24 are .1 (the libvirt bridge) and the three nodes. A start/stop block rather than a CIDR, deliberately - a CIDR raises the question of whether its network and broadcast addresses are allocatable (allowFirstLastIPs) and a range does not.",
+    "pool_start": "192.168.100.200",
+    "pool_stop": "192.168.100.239",
+    "gateway_comment": "The Gateway's address is PINNED out of the pool rather than taken from it, because /etc/hosts points a name at it and a name that moves is worse than no name. Pinned with Gateway spec.addresses[type=IPAddress], which is LB-IPAM aware; the older io.cilium/lb-ipam-ips annotation does the same thing and is documented as heading for deprecation.",
+    "gateway_address": "192.168.100.200",
+    "gateway_hostname": "gw.platform.local"
+  },
   "kubernetes": {
     "comment": "Fixed in ADR-0007, before kubeadm ran. Changing either CIDR later means rebuilding the cluster, so they live here where the kubeadm config, the Cilium values and the Ansible roles all read the same number. Neither may overlap the node network above.",
     "pod_cidr": "10.244.0.0/16",

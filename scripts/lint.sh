@@ -98,7 +98,57 @@ else
   skip 'terraform not installed, skipped'
 fi
 
+step 'Load balancer addresses agree between nodes.json and the on-prem overlay'
+# The same three values live in clusters/onprem/nodes.json (where hosts-sync and the docs read
+# them) and in gitops/environments/onprem/platform-ingress.yaml (where Argo CD reads them).
+# One source of truth would be better, but Argo CD renders a Helm chart from Git and cannot
+# reach into nodes.json - so the honest options are duplication with a check, or a generator
+# that makes the overlay a build artifact. Duplication with a check is less machinery and the
+# failure is loud.
+#
+# What this prevents: editing the pool in one file, Argo CD announcing a range the workstation
+# does not expect, and `gw.platform.local` resolving to an address nothing answers on.
+if command -v jq >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+  if python3 - <<'PYCHECK'
+import json, sys, yaml
+n = json.load(open('clusters/onprem/nodes.json'))['loadbalancer']
+o = yaml.safe_load(open('gitops/environments/onprem/platform-ingress.yaml'))
+pairs = [
+    ('pool start',       n['pool_start'],       o['loadBalancer']['poolStart']),
+    ('pool stop',        n['pool_stop'],        o['loadBalancer']['poolStop']),
+    ('gateway address',  n['gateway_address'],  o['gateway']['address']),
+    ('gateway hostname', n['gateway_hostname'], o['gateway']['hostname']),
+]
+bad = [(w, a, b) for w, a, b in pairs if a != b]
+for w, a, b in bad:
+    print('    %s: nodes.json says %s, the overlay says %s' % (w, a, b))
+
+# The pinned Gateway address must also be INSIDE the pool, or LB-IPAM cannot satisfy it and the
+# Gateway stays un-Programmed with no obvious reason.
+import ipaddress as ip
+lo, hi = ip.IPv4Address(n['pool_start']), ip.IPv4Address(n['pool_stop'])
+gw = ip.IPv4Address(n['gateway_address'])
+if not (lo <= gw <= hi):
+    print('    gateway address %s is outside the pool %s-%s' % (gw, lo, hi))
+    bad.append(1)
+
+# And it must not collide with a node.
+for node in json.load(open('clusters/onprem/nodes.json'))['nodes']:
+    if ip.IPv4Address(node['address']) >= lo and ip.IPv4Address(node['address']) <= hi:
+        print('    node %s (%s) is inside the load balancer pool' % (node['name'], node['address']))
+        bad.append(1)
+
+sys.exit(1 if bad else 0)
+PYCHECK
+  then ok 'addresses agree, gateway inside the pool, no node collision'
+  else bad 'fix the mismatch above - nodes.json is the source of truth'
+  fi
+else
+  skip 'jq or python3 missing, skipped'
+fi
+
 step 'Optional linters, where installed'
+
 command -v yamllint     >/dev/null 2>&1 && { yamllint -s . && ok yamllint || bad yamllint; } || skip 'yamllint not installed'
 command -v ansible-lint >/dev/null 2>&1 && { ansible-lint ansible/ && ok ansible-lint || bad ansible-lint; } || skip 'ansible-lint not installed'
 

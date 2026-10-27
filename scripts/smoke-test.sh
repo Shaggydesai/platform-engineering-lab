@@ -33,11 +33,11 @@ cleanup() {
 trap cleanup EXIT
 kubectl create ns "$NS" >/dev/null
 
-echo "1/6 nodes Ready"
+echo "1/7 nodes Ready"
 kubectl wait --for=condition=Ready nodes --all --timeout=60s >/dev/null
 kubectl get nodes -o wide
 
-echo "2/6 scheduling on every node"
+echo "2/7 scheduling on every node"
 for n in $(kubectl get nodes -o jsonpath='{.items[*].metadata.name}'); do
   kubectl -n "$NS" run "p-${n##*-}" --image=nicolaka/netshoot --restart=Never \
     --overrides="{\"spec\":{\"nodeName\":\"$n\",\"tolerations\":[{\"operator\":\"Exists\"}]}}" \
@@ -45,7 +45,7 @@ for n in $(kubectl get nodes -o jsonpath='{.items[*].metadata.name}'); do
 done
 kubectl -n "$NS" wait --for=condition=Ready pod --all --timeout=120s >/dev/null
 
-echo "3/6 pod-to-pod across nodes (every ordered pair)"
+echo "3/7 pod-to-pod across nodes (every ordered pair)"
 # EVERY pair, not one. The first version of this test pinged pods[0] -> pods[1], which on a
 # three-node cluster happened to be control-plane -> worker, and never touched the
 # worker-to-worker path where real traffic actually lives. A tunnel can be broken in one
@@ -77,11 +77,11 @@ else
   echo "    $pairs of $pairs paths work"
 fi
 
-echo "4/6 cluster DNS"
+echo "4/7 cluster DNS"
 kubectl -n "$NS" exec "${pods[0]}" -- nslookup kubernetes.default.svc.cluster.local >/dev/null
 echo "    resolves"
 
-echo "5/6 Service routing"
+echo "5/7 Service routing"
 kubectl -n "$NS" create deploy web --image=nginx:alpine --replicas=2 >/dev/null
 kubectl -n "$NS" expose deploy web --port=80 >/dev/null
 kubectl -n "$NS" rollout status deploy/web --timeout=120s >/dev/null
@@ -119,7 +119,7 @@ probe backend  "http://$backend"
 probe clusterip "http://$clusterip"
 probe dns      "http://web.$NS.svc.cluster.local"
 
-echo "6/6 NodePort from every node"
+echo "6/7 NodePort from every node"
 # Added after a cluster passed all five checks above with NO NodePort implementation
 # whatsoever. kube-proxy had been deleted while every Cilium agent was still running
 # kubeProxyReplacement: false, so nothing served NodePort, externalIPs, HostPort, or
@@ -162,6 +162,66 @@ while read -r name addr; do
 done < <(kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.addresses[?(@.type=="InternalIP")].address}{"\n"}{end}')
 echo "    $np_ok of $np_total nodes serve the NodePort"
 [[ $np_ok -eq $np_total ]]
+
+echo "7/7 LoadBalancer address, announced on the node network"
+# Deliberately separate from the Gateway, and this ordering is the point.
+#
+# A Cilium Gateway's address goes through THREE things: LB-IPAM allocates it, the L2
+# announcement policy answers ARP for it, and the Gateway's L7 proxy serves it. There is an open
+# upstream issue where exactly that combination is reachable from inside the cluster and times
+# out from outside, with the Gateway's load-balancer entry showing no backends and marked
+# l7-load-balancer (cilium/cilium#43819, reported on 1.18.x, no root cause).
+#
+# So this step tests the first two WITHOUT the third: a plain type=LoadBalancer Service in front
+# of the same nginx the steps above used, which gets a real backend and the ordinary datapath.
+# If this passes and the Gateway does not, the fault is isolated to the L7 path and not to L2
+# announcements - and that distinction takes about an hour to establish without a probe like
+# this one.
+#
+# Reuses the existing `web` deployment rather than adding a workload or a second image.
+if ! kubectl get crd ciliumloadbalancerippools.cilium.io >/dev/null 2>&1 \
+   || [[ -z "$(kubectl get ciliumloadbalancerippools.cilium.io -o name 2>/dev/null)" ]]; then
+  printf '    %s\n' "no CiliumLoadBalancerIPPool in this cluster - skipped"
+  printf '    %s\n' "(expected before Module 05's platform-ingress Application is synced)"
+else
+  kubectl -n "$NS" expose deployment web --name=web-lb --type=LoadBalancer --port=80 >/dev/null
+  lbip=""
+  for _ in $(seq 1 30); do
+    lbip=$(kubectl -n "$NS" get svc web-lb -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
+    [[ -n "$lbip" ]] && break
+    sleep 2
+  done
+  if [[ -z "$lbip" ]]; then
+    # <pending> here means ALLOCATION failed, which is a pool problem, not a network one. The
+    # condition says which: no_pool when nothing selects this Service, out_of_ips when the
+    # range is exhausted.
+    printf '    %-28s %s\n' "allocation" "FAILED - no address assigned"
+    kubectl -n "$NS" get svc web-lb -o jsonpath='{range .status.conditions[*]}      {.type}={.status} {.reason}{"\n"}{end}' 2>/dev/null || true
+    false
+  else
+    printf '    %-28s %s\n' "allocated from pool" "$lbip"
+    # Announcement is the separate half, and the one that is invisible in `kubectl get svc`: an
+    # address can be allocated and advertised nowhere. Curling it from the workstation is the
+    # only thing that distinguishes the two.
+    code=000
+    for _ in $(seq 1 15); do
+      code=$(curl -sS -o /dev/null -m 3 -w '%{http_code}' "http://$lbip" 2>/dev/null || echo 000)
+      [[ $code == 200 ]] && break
+      sleep 2
+    done
+    holder=$(kubectl get leases -n kube-system -o json 2>/dev/null \
+      | jq -r --arg ip "$lbip" '.items[] | select(.metadata.name | test("cilium-l2announce")) | .spec.holderIdentity' 2>/dev/null \
+      | head -1 || true)
+    if [[ $code == 200 ]]; then
+      printf '    %-28s %s%s\n' "answers from workstation" "$code" "${holder:+  (announced by $holder)}"
+    else
+      printf '    %-28s %s  FAILED - allocated but nothing answers ARP\n' "answers from workstation" "$code"
+      printf '    %s\n' "check: kubectl get ciliuml2announcementpolicies.cilium.io -o yaml"
+      printf '    %s\n' "       kubectl get leases -n kube-system | grep l2announce"
+      false
+    fi
+  fi
+fi
 
 echo
 echo "smoke test passed on $ctx"

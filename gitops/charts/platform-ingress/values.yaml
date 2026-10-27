@@ -1,0 +1,35 @@
+# Defaults are deliberately OFF and EMPTY.
+#
+# There is no sensible default address range: a pool is a claim on someone's network, and a
+# wrong one is announced by ARP to every machine on that network. So the chart renders nothing
+# at all until an environment overlay says what to claim, and `helm template` with no values
+# produces an empty manifest rather than a plausible-looking guess.
+
+loadBalancer:
+  enabled: false
+  # A start/stop range, not a CIDR. See clusters/onprem/nodes.json for why.
+  poolStart: ""
+  poolStop: ""
+
+l2:
+  # ARP announcement of those addresses on the node network. Not wanted in a cloud, where the
+  # provider's load balancer does this and L2 between nodes may not even exist.
+  enabled: false
+  # Go regular expressions matched against interface names, NOT shell globs and not Cilium's
+  # `eth+` device syntax.
+  interfaces:
+    - "^en"
+
+gateway:
+  enabled: false
+  className: cilium
+  # Pinned, and must fall inside the pool above.
+  address: ""
+  hostname: ""
+
+certificate:
+  enabled: false
+  # A ClusterIssuer, so it does not have to live in this namespace.
+  issuerName: platform-ca
+  duration: 2160h    # 90 days
+  renewBefore: 360h  # 15 days - cert-manager renews at 75 days

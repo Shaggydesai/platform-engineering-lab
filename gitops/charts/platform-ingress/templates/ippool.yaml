@@ -1,0 +1,28 @@
+{{- if .Values.loadBalancer.enabled }}
+{{- if or (not .Values.loadBalancer.poolStart) (not .Values.loadBalancer.poolStop) }}
+{{- fail "loadBalancer.enabled is true but poolStart/poolStop are empty - set them in the environment overlay" }}
+{{- end }}
+# The addresses Cilium may hand to type=LoadBalancer Services.
+#
+# apiVersion cilium.io/v2 - NOT v2alpha1. This CRD graduated; the L2 announcement policy next
+# to it did not, and the two are part of the same feature. Guessing that both moved together
+# produces a manifest the API server rejects as an unknown type.
+#
+# LB-IPAM needs no Helm flag: it is always compiled in and stays dormant until the first pool
+# exists. Creating this object is what switches it on, which is also why it is safe for this
+# chart to be the only thing that owns it.
+apiVersion: cilium.io/v2
+kind: CiliumLoadBalancerIPPool
+metadata:
+  name: platform
+spec:
+  blocks:
+    # start and stop are ONE block and must be a single list item. Written as two items they
+    # become two half-specified blocks.
+    - start: {{ .Values.loadBalancer.poolStart | quote }}
+      stop: {{ .Values.loadBalancer.poolStop | quote }}
+  # No serviceSelector on purpose. With one pool and one cluster, selecting on labels would
+  # only mean that a Service which forgot the label sits <pending> with the condition
+  # io.cilium/lb-ipam-request-satisfied=False and reason no_pool - a failure mode with no
+  # upside here.
+{{- end }}

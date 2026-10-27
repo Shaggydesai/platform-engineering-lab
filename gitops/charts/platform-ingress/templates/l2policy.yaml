@@ -1,0 +1,42 @@
+{{- if .Values.l2.enabled }}
+# Who answers ARP for those addresses.
+#
+# apiVersion cilium.io/v2alpha1, unlike the pool above. Still beta in Cilium.
+#
+# Without this object the pool still ALLOCATES addresses - a Service gets an EXTERNAL-IP and
+# looks finished - and nothing on the network has ever heard of the address. That split is the
+# single most confusing thing about this feature: allocation and announcement are separate
+# objects, and only one of them is visible in `kubectl get svc`.
+apiVersion: cilium.io/v2alpha1
+kind: CiliumL2AnnouncementPolicy
+metadata:
+  name: platform
+spec:
+  # Interface names as Go regexes. `^en` matches enp1s0 here and ens3 or eno1 elsewhere, which
+  # is the same reason Module 01's netplan matches on a pattern: predictable interface names
+  # depend on the machine type and the bus, and a hardcoded enp1s0 breaks silently.
+  interfaces:
+{{- range .Values.l2.interfaces }}
+    - {{ . | quote }}
+{{- end }}
+
+  # Announce LoadBalancer addresses. externalIPs is left off: it needs its own Helm flag
+  # (externalIPs.enable) and nothing here uses Service.spec.externalIPs.
+  loadBalancerIPs: true
+  externalIPs: false
+
+  # Workers only. Not a correctness requirement - any node with the network can answer - but
+  # k8s-cp01 has 4 GB and the control plane on it, and being the ARP responder for every
+  # LoadBalancer address means carrying that ingress traffic too.
+  #
+  # Leaving this out would also have worked. It is here so that the failover test has somewhere
+  # to fail over TO: with two eligible nodes, killing the announcer proves the lease moves.
+  nodeSelector:
+    matchExpressions:
+      - key: node-role.kubernetes.io/control-plane
+        operator: DoesNotExist
+
+  # No serviceSelector, so every LoadBalancer Service is announced. Note the constraint that is
+  # not visible here: a Service must leave loadBalancerClass unset or set it to
+  # io.cilium/l2-announcer, or it is ignored by this policy whatever the selector says.
+{{- end }}

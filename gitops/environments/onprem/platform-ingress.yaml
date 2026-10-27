@@ -1,0 +1,28 @@
+# Ingress, on-prem.
+#
+# The only environment where this is fully on. The numbers here MUST match the loadbalancer
+# block in clusters/onprem/nodes.json - `make lint` checks it, because two files holding the
+# same address is exactly how a lab ends up announcing an address nothing expects.
+#
+# Why these addresses are safe to claim: the libvirt platform network has no DHCP range at all
+# (terraform/onprem/main.tf declares only the bridge address), so the only occupied addresses on
+# 192.168.100.0/24 are .1 and the three nodes. ADR-0013.
+loadBalancer:
+  enabled: true
+  poolStart: "192.168.100.200"
+  poolStop: "192.168.100.239"
+
+l2:
+  enabled: true
+  # Replaces the chart default rather than adding to it - Helm replaces lists, it does not merge
+  # them (ADR-0010). Written out here so the override is visible at the point of use.
+  interfaces:
+    - "^en"
+
+gateway:
+  enabled: true
+  address: "192.168.100.200"
+  hostname: "gw.platform.local"
+
+certificate:
+  enabled: true

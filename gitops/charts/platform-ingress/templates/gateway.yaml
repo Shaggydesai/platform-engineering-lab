@@ -1,0 +1,68 @@
+{{- if .Values.gateway.enabled }}
+{{- if not .Values.gateway.address }}
+{{- fail "gateway.enabled is true but gateway.address is empty - a Gateway whose address moves is worse than one with no name pointed at it" }}
+{{- end }}
+# The Gateway itself.
+#
+# Cilium's operator reconciles this into a type=LoadBalancer Service, which LB-IPAM gives an
+# address and the L2 policy announces. Three objects and two controllers between this file and
+# a packet, which is why each of them is verified separately in the runbook rather than as one
+# "is the Gateway up" question.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: platform
+  annotations:
+    # Wave 1, after the Certificate is Ready. Applied earlier it is accepted and sits with
+    # Programmed=False and a resolvedRefs error about a missing Secret - which recovers on
+    # the next sync and teaches nothing, the exact failure mode ADR-0010 Decision 4 says a
+    # wave is for.
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  gatewayClassName: {{ .Values.gateway.className | quote }}
+
+  # Pinned, LB-IPAM aware, and the supported way to do this. The older
+  # io.cilium/lb-ipam-ips annotation under spec.infrastructure.annotations has the same effect
+  # and takes PRECEDENCE over this field where both are set - Cilium's own docs show
+  # spec.addresses being ignored in that case - but it is documented as heading for
+  # deprecation, so only one of the two mechanisms appears here.
+  addresses:
+    - type: IPAddress
+      value: {{ .Values.gateway.address | quote }}
+
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      hostname: {{ .Values.gateway.hostname | quote }}
+      allowedRoutes:
+        namespaces:
+          # All, not Same. These are two different permissions and conflating them is the
+          # usual Gateway API confusion:
+          #
+          #   allowedRoutes decides which namespaces may ATTACH a Route to this listener.
+          #   ReferenceGrant decides whether a Route may point at a backend in ANOTHER
+          #   namespace.
+          #
+          # A platform gateway that tenants attach to needs the first to be permissive and the
+          # second to stay strict - which it does, because a missing ReferenceGrant leaves the
+          # route's backendRef resolved to a 500 rather than silently working.
+          from: All
+
+    - name: https
+      protocol: HTTPS
+      port: 443
+      hostname: {{ .Values.gateway.hostname | quote }}
+      allowedRoutes:
+        namespaces:
+          from: All
+      tls:
+        # Terminate here. Passthrough would need a TLSRoute and would mean the Gateway cannot
+        # see the HTTP it is routing, which defeats the point of having it.
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            # Same namespace as this Gateway, so no ReferenceGrant is needed. A certificateRef
+            # into another namespace DOES need one, and that is the mistake worth not making.
+            name: platform-gateway-tls
+{{- end }}

@@ -1,0 +1,56 @@
+# Ingress for the on-prem cluster: the LoadBalancer address pool, the L2 announcement policy,
+# the Gateway, and its serving certificate from the internal CA.
+#
+# Layer 3 (ADR-0002): every object here is an ordinary custom resource, so Argo CD owns all of
+# them. The CAPABILITY they depend on - Cilium's l2announcements and gatewayAPI, and the
+# kube-proxy replacement the latter requires - is Layer 1, set in the Cilium values and applied
+# by Ansible. That seam is the interesting part of ADR-0013: a Helm value that changes how the
+# CNI behaves cannot be owned by the thing that needs the CNI to be working.
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-ingress
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+
+  sources:
+    - repoURL: https://github.com/Shaggydesai/platform-engineering-lab.git
+      targetRevision: main
+      path: gitops/charts/platform-ingress
+      helm:
+        valueFiles:
+          - values.yaml
+          - $values/gitops/environments/onprem/platform-ingress.yaml
+
+    - repoURL: https://github.com/Shaggydesai/platform-engineering-lab.git
+      targetRevision: main
+      ref: values
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: platform-ingress
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      # The Certificate in wave 0 has to be issued before the Gateway in wave 1 is applied, and
+      # on nodes this size cert-manager's webhook can take a moment. Same reasoning as the
+      # cert-manager Application, fewer waves.
+      limit: 10
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 5m
+
+  # No ignoreDifferences. Worth saying explicitly: the Gateway's status is written by Cilium's
+  # operator and the Service it creates is NOT in this Application at all - it is a child object
+  # Cilium owns, so there is nothing for Argo CD to fight over. If a diff ever appears on the
+  # Gateway itself, it is a real one.

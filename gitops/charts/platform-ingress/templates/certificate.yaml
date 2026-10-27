@@ -1,0 +1,53 @@
+{{- if .Values.certificate.enabled }}
+{{- if not .Values.gateway.hostname }}
+{{- fail "certificate.enabled is true but gateway.hostname is empty - the certificate needs a name to be for" }}
+{{- end }}
+# The Gateway's serving certificate, issued by our own CA (ADR-0011).
+#
+# The first certificate in this cluster that something outside the cluster will be asked to
+# trust. Everything cert-manager has issued so far was consumed by Kubernetes components; this
+# one is presented to a browser on the Windows host, which will reject it until the CA is
+# imported - and that rejection is the honest consequence of a private CA, not a misconfiguration.
+#
+# cert-manager writes the Secret; this chart never contains a key. The Gateway below references
+# the Secret by name and would stay un-Programmed if cert-manager had not run first, which is
+# what the sync wave on the Application is for.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: platform-gateway
+  annotations:
+    # Wave 0: after cert-manager (wave -10) and before the Gateway (wave 1). Argo CD has a
+    # built-in health check for cert-manager Certificates, so it genuinely waits for Ready
+    # here rather than for "applied" - which is the whole reason the Gateway can assume the
+    # Secret exists.
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  secretName: platform-gateway-tls
+  commonName: {{ .Values.gateway.hostname | quote }}
+  dnsNames:
+    - {{ .Values.gateway.hostname | quote }}
+
+  # 90 days with renewal at 75, on a CA that is good until 2036. Short-lived deliberately: a
+  # certificate that renews four times a year proves the renewal path works, and one that lasts
+  # ten years only proves it was issued once.
+  duration: {{ .Values.certificate.duration | quote }}
+  renewBefore: {{ .Values.certificate.renewBefore | quote }}
+
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    # Rotate the key on renewal, not just the certificate. The default (Never) reuses the key
+    # forever, which makes renewal a weaker operation than it looks.
+    rotationPolicy: Always
+
+  usages:
+    - server auth
+    - digital signature
+    - key encipherment
+
+  issuerRef:
+    name: {{ .Values.certificate.issuerName | quote }}
+    kind: ClusterIssuer
+    group: cert-manager.io
+{{- end }}

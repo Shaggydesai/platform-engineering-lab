@@ -36,9 +36,22 @@ warn() { printf '    %s%s%s\n' "$c_warn" "$*" "$c_off"; }
 
 domain=$(jq -r '.network.domain' "$CONFIG")
 
+# The nodes, plus the Gateway's pinned LoadBalancer address. The Gateway entry is what makes
+# `https://gw.platform.local` work from this workstation at all: the address is announced by ARP
+# on the libvirt network by whichever worker holds the lease (ADR-0013), but nothing resolves the
+# NAME - there is no DNS on this network, which is the same reason the nodes are here.
+#
+# `|| true` on the loadbalancer lookup: nodes.json had no loadbalancer block before Module 05,
+# and this script must keep working against an older checkout rather than failing with a jq
+# error about a null value.
 block=$(printf '%s\n' "$MARK_BEGIN"
   jq -r --arg d "$domain" \
     '.nodes[] | "\(.address)\t\(.name) \(.name).\($d)"' "$CONFIG"
+  jq -r '
+    .loadbalancer // empty
+    | select(.gateway_address and .gateway_hostname)
+    | "\(.gateway_address)\t\(.gateway_hostname) \(.gateway_hostname | split(".") | .[0])"
+  ' "$CONFIG" 2>/dev/null || true
   printf '%s\n' "$MARK_END")
 
 step 'Updating /etc/hosts'
@@ -131,3 +144,16 @@ for n in $(jq -r '.nodes[].name' "$CONFIG"); do
   addr=$(getent hosts "$n.$domain" | awk '{print $1}')
   [[ -n "$addr" ]] && ok "$n.$domain -> $addr" || warn "$n.$domain does NOT resolve"
 done
+
+gw_name=$(jq -r '.loadbalancer.gateway_hostname // empty' "$CONFIG" 2>/dev/null || true)
+if [[ -n "${gw_name:-}" ]]; then
+  gw_addr=$(getent hosts "$gw_name" | awk '{print $1}' || true)
+  if [[ -n "${gw_addr:-}" ]]; then
+    ok "$gw_name -> $gw_addr"
+    # Resolving is not reaching. The name is in /etc/hosts whether or not any node is
+    # announcing the address, so say which of the two was actually tested.
+    warn 'resolves only - run `make smoke` or curl it to find out if anything answers'
+  else
+    warn "$gw_name does NOT resolve"
+  fi
+fi
