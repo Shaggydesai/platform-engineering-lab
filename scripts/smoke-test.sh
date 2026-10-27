@@ -147,7 +147,11 @@ while read -r name addr; do
   np_total=$((np_total + 1))
   code=000
   for _ in $(seq 1 10); do
-    code=$(curl -sS -o /dev/null -m 3 -w '%{http_code}' "http://$addr:$nodeport" 2>/dev/null || echo 000)
+    # No `|| echo 000`: curl's -w already prints 000 when the request fails, so the fallback
+    # appended a second one and the output read "000000". `|| true` keeps set -e happy without
+    # writing anything.
+    code=$(curl -sS -o /dev/null -m 3 -w '%{http_code}' "http://$addr:$nodeport" 2>/dev/null || true)
+    code=${code:-000}
     [[ $code == 200 ]] && break
     sleep 2
   done
@@ -205,7 +209,8 @@ else
     # only thing that distinguishes the two.
     code=000
     for _ in $(seq 1 15); do
-      code=$(curl -sS -o /dev/null -m 3 -w '%{http_code}' "http://$lbip" 2>/dev/null || echo 000)
+      code=$(curl -sS -o /dev/null -m 3 -w '%{http_code}' "http://$lbip" 2>/dev/null || true)
+      code=${code:-000}
       [[ $code == 200 ]] && break
       sleep 2
     done

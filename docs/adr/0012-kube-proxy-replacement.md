@@ -165,3 +165,22 @@ care, because they all ran from the wrong place.
 
 A green test that cannot fail on the thing that broke is worse than no test, because it is
 believed.
+
+### Addendum, 2026-10-27: the same bug, one layer up
+
+The fix above was applied to one field. Enabling `l2announcements` for ADR-0013 changed
+`cilium-config` again, the reconciliation checked whether the agents disagreed about
+`kubeProxyReplacement` — which they did not — and so nothing restarted. The agents ran without
+L2 announcements, and the only symptom was a LoadBalancer address that was allocated correctly
+and answered by nobody.
+
+So the lesson at the end of the postscript was right and the fix was too narrow. "Ask the
+component what it is doing" became a question about one setting, which just moves the blind spot
+to whichever setting is added next.
+
+The staleness question has a general form that does not depend on enumerating fields: **an agent
+that started before `cilium-config` was last written is running stale configuration, whatever
+changed in it.** `managedFields` carries a per-manager timestamp that helm updates on every
+upgrade, so the latest of those is when the config last moved. The role now restarts when any of
+three things is true — helm changed something, the agents predate the config, or the observed
+mode disagrees — because each one alone has a blind spot and only the second one scales.

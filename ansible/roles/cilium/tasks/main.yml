@@ -141,6 +141,75 @@
   register: cilium_running
   changed_when: false
 
+- name: When was cilium-config last written, and when did the agents start?
+  # The GENERAL form of the staleness question, instead of the one field I happened to think of.
+  #
+  # The field-by-field check below caught kubeProxyReplacement and missed l2announcements
+  # completely: the helm upgrade added enable-l2-announcements to the ConfigMap, the agents kept
+  # running without it, and the only symptom was a LoadBalancer address that was allocated and
+  # answered by nobody. Enumerating fields does not scale and I will keep forgetting one.
+  #
+  # An agent that started BEFORE the ConfigMap was last written is stale, whatever changed in
+  # it. managedFields carries a timestamp per manager and helm updates its own entry on every
+  # upgrade, so the latest of those times is when the config last moved.
+  #
+  # Degrades to a skip rather than a failure when managedFields has no times - it is metadata
+  # about a metadata mechanism, and a check that breaks the role when it cannot read itself is
+  # worse than no check.
+  ansible.builtin.shell: |
+    set -o pipefail
+    kubectl --namespace kube-system get configmap cilium-config -o json \
+      | jq -r '[.metadata.managedFields[]?.time] | map(select(. != null)) | sort | last // ""'
+    kubectl --namespace kube-system get pods -l k8s-app=cilium -o json \
+      | jq -r '[.items[].status.startTime] | map(select(. != null)) | sort | first // ""'
+  args:
+    executable: /bin/bash
+  delegate_to: localhost
+  run_once: true
+  become: false
+  environment:
+    KUBECONFIG: "{{ kubeconfig_fetch_path }}"
+  register: cilium_times
+  changed_when: false
+
+- name: Are the agents older than the configuration they are supposed to be running?
+  ansible.builtin.set_fact:
+    cilium_config_written: "{{ cilium_times.stdout_lines[0] | default('', true) }}"
+    cilium_oldest_agent: "{{ cilium_times.stdout_lines[1] | default('', true) }}"
+  run_once: true
+
+- name: Decide whether a restart is needed
+  ansible.builtin.set_fact:
+    # Three independent reasons, because each one alone has a blind spot:
+    #
+    #   helm just changed something  - a ConfigMap-only change never rolls the DaemonSet, so
+    #                                  "the upgrade succeeded" and "the agents run it" differ.
+    #   the agents predate the config - catches a change from ANY earlier run, including one
+    #                                  interrupted halfway, and catches fields nobody listed.
+    #   the observed mode disagrees  - the recovery path. Neither of the above fires on a
+    #                                  cluster that is already wrong with no upgrade pending,
+    #                                  which is the state this role had to dig out of once.
+    cilium_restart_needed: >-
+      {{ (cilium_install is changed)
+         or (cilium_config_written | length > 0 and cilium_oldest_agent | length > 0
+             and (cilium_oldest_agent | to_datetime('%Y-%m-%dT%H:%M:%SZ'))
+                 < (cilium_config_written | to_datetime('%Y-%m-%dT%H:%M:%SZ')))
+         or (cilium_running.stdout_lines
+             | map('regex_replace', '^.*=', '')
+             | reject('equalto', cilium_desired_kpr)
+             | list | length > 0) }}
+  run_once: true
+
+- name: Why a restart is or is not happening
+  ansible.builtin.debug:
+    msg: >-
+      restart={{ cilium_restart_needed }}
+      (helm changed={{ cilium_install is changed }},
+      config written={{ cilium_config_written | default('unknown', true) }},
+      oldest agent={{ cilium_oldest_agent | default('unknown', true) }},
+      modes={{ cilium_running.stdout_lines | map('regex_replace', '^.*=', '') | list | join(',') }})
+  run_once: true
+
 - name: Restart the agents and the operator when the running config disagrees with Git
   # Deliberately driven by the OBSERVED disagreement rather than by `cilium_install is changed`.
   # Gating on the helm task would not have recovered this cluster: the release already holds the
@@ -151,11 +220,7 @@
   # Safe to restart with kube-proxy already gone only because of k8sServiceHost/k8sServicePort:
   # a starting agent reaches the API server by name through the node's /etc/hosts, not through
   # the 10.96.0.1 ClusterIP that nothing would be programming during the restart.
-  when: >-
-    cilium_running.stdout_lines
-    | map('regex_replace', '^.*=', '')
-    | reject('equalto', cilium_desired_kpr)
-    | list | length > 0
+  when: cilium_restart_needed | bool
   ansible.builtin.command: >-
     kubectl --namespace kube-system rollout restart {{ item }}
   loop:
