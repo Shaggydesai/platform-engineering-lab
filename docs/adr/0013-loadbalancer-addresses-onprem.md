@@ -168,3 +168,54 @@ stay: they are useful on their own.
   `type: LoadBalancer` Service is fulfilled by the provider. The contrast is the lesson —
   on-prem this took a pool, a policy, a beta feature and an ADR; in a cloud it is one field, and
   the bill arrives monthly, which is why ADR-0003 forbids leaving one running.
+
+---
+
+## Verified, 2026-10-27
+
+Working, and the upstream risk did not materialise.
+
+```
+7/7 LoadBalancer address, announced on the node network
+    allocated from pool          192.168.100.201
+    answers from workstation     200  (announced by k8s-w02)
+
+$ kubectl get leases -n kube-system | grep l2announce
+cilium-l2announce-platform-ingress-cilium-gateway-platform   k8s-w02   75s
+cilium-l2announce-smoke-31430-web-lb                         k8s-w02   13s
+
+$ curl --cacert <platform-ca> https://gw.platform.local
+404
+```
+
+Four things in that output are worth keeping.
+
+**The Gateway path works on 1.20.3.** [cilium/cilium#43819](https://github.com/cilium/cilium/issues/43819)
+— Gateway plus L2 announcements reachable inside the cluster and timing out from outside — was
+reported against 1.18.x with no root cause, so it could have applied here. It does not. The
+staged verification (plain `type: LoadBalancer` first, Gateway second) cost nothing and would
+have isolated the fault in one step if it had. **The risk is retired for 1.20.3 only** — if this
+cluster is ever upgraded and the Gateway stops answering from outside while step 7 still passes,
+that issue is the first place to look.
+
+**`404` is the success condition.** No HTTPRoute exists yet, so `cilium-envoy` terminating TLS
+with a certificate `platform-ca` signed and then honestly reporting that it has nothing to route
+to is the whole chain working. The `--cacert` is doing real work: without it curl refuses, which
+is the correct behaviour toward a private CA and not a misconfiguration.
+
+**There are two leases, one per announced address**, not one per node or one per policy. So the
+announcement is per-service and Cilium elects a holder for each independently — both happen to be
+`k8s-w02` here, and nothing requires them to be.
+
+**The Gateway's generated Service is named `cilium-gateway-<gateway-name>` in the Gateway's own
+namespace**, which is visible in the lease name
+(`cilium-l2announce-platform-ingress-cilium-gateway-platform` = namespace `platform-ingress`,
+service `cilium-gateway-platform`). Cilium's documentation does not state this, and it is the
+name needed to inspect the Service directly.
+
+### Not yet tested: failover
+
+The policy deliberately selects both workers so that there is somewhere to fail over **to**. That
+the lease *moves* when the holder dies has not been demonstrated, only made possible. Until it
+is, the default 15s lease duration and 5s renew deadline are numbers from a document rather than
+measured behaviour.

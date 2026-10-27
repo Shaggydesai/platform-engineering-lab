@@ -5,7 +5,7 @@
 > not stall like the last one.
 
 **Last updated:** 2026-10-27
-**Current module:** 05 — The platform baseline (4th component written, not yet verified)
+**Current module:** 05 — The platform baseline (4 of 4 components in; storage and the gate remain)
 **Overall progress:** Modules 00–04 complete — 5 / 13
 
 ---
@@ -18,7 +18,8 @@
 | **On-prem cluster** | **running, and rebuildable from nothing in ~4 minutes** — 3 nodes, v1.34.12, Cilium 1.20.3 |
 | **Dataplane** | **no kube-proxy.** All 3 agents `KubeProxyReplacement: True`, 0 `KUBE-SVC` iptables rules, Services in eBPF maps. `cilium-dbg service list`, not `iptables-save` |
 | **Gateway API** | CRDs v1.6.3, pinned by digest `356c2b8e…`. `gatewayclass/cilium` **Accepted=True** |
-| **LoadBalancer addresses** | pool `192.168.100.200–.239`, Gateway pinned at `.200` as `gw.platform.local` (ADR-0013). **Written, not yet applied** |
+| **LoadBalancer addresses** | **working** — pool `192.168.100.200–.239`, announced by a worker over ARP (ADR-0013) |
+| **Gateway** | **working** — `gw.platform.local` at `.200`, HTTPS terminated with a `platform-ca` certificate. Returns 404: no HTTPRoute yet |
 | **Certificates expire** | **2027-10-22** — `sudo kubeadm certs renew all` before then, or nothing works |
 | **GCP cluster** | not built — account verified empty, ₹0 running |
 | **AWS cluster** | not built |
@@ -48,19 +49,12 @@ Healthy, nothing installed by hand.
 
 Remaining in this module:
 
-1. **A Gateway (ingress via Gateway API).** *Written, awaiting its first run.* The CRDs,
-   `gatewayAPI.enabled` and the kube-proxy replacement are in and verified (ADR-0012). The
-   address pool, the L2 announcement policy, the Gateway and its certificate from `platform-ca`
-   are committed as `gitops/charts/platform-ingress` — a Layer 3 chart, so Argo CD applies it.
-   Needs `make onprem-up TAGS=cni` first, because `l2announcements.enabled` is a Cilium value
-   and the agents will not pick it up without a restart (ADR-0012's postscript).
+1. ~~**A Gateway (ingress via Gateway API).**~~ **Done 2026-10-27.** CRDs pinned by digest,
+   `gatewayAPI` and the kube-proxy replacement it forced (ADR-0012), a Cilium address pool and
+   L2 announcement policy (ADR-0013), the Gateway, and its certificate from `platform-ca`.
+   `make smoke` is 7/7 and `https://gw.platform.local` returns 404 over TLS our own CA signed,
+   which is the whole chain working with nothing to route to yet.
 
-   **Verify in this order, and not as one question.** There is an open upstream issue where a
-   Cilium Gateway with L2 announcements works from inside the cluster and times out from
-   outside (cilium/cilium#43819, 1.18.x, no root cause). So: `make smoke` step 7 proves
-   LB-IPAM + L2 with a plain LoadBalancer Service and no L7 proxy; only then curl the Gateway.
-   If step 7 passes and the Gateway does not, the fault is the L7 path, not the announcement —
-   and the rollback is a NodePort Gateway, a values change with no rebuild.
 2. **A storage class.** Nothing has needed persistence yet; ShopVerse will in Module 06.
 3. **The module gate:** the whole app-of-apps Synced and Healthy, and the overlay mechanism
    proven by a value that genuinely differs per environment — which the cert-manager
