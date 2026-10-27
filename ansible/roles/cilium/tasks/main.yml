@@ -141,7 +141,7 @@
   register: cilium_running
   changed_when: false
 
-- name: When was cilium-config last written, and when did the agents start?
+- name: When was the configuration last written, and when did the agents start?
   # The GENERAL form of the staleness question, instead of the one field I happened to think of.
   #
   # The field-by-field check below caught kubeProxyReplacement and missed l2announcements
@@ -149,21 +149,49 @@
   # running without it, and the only symptom was a LoadBalancer address that was allocated and
   # answered by nobody. Enumerating fields does not scale and I will keep forgetting one.
   #
-  # An agent that started BEFORE the ConfigMap was last written is stale, whatever changed in
-  # it. managedFields carries a timestamp per manager and helm updates its own entry on every
-  # upgrade, so the latest of those times is when the config last moved.
+  # An agent that started BEFORE the configuration was last written is stale, whatever changed
+  # in it. TWO independent sources for "last written", because the first attempt at this read
+  # nothing and silently concluded everything was fine:
   #
-  # Degrades to a skip rather than a failure when managedFields has no times - it is metadata
-  # about a metadata mechanism, and a check that breaks the role when it cannot read itself is
-  # worse than no check.
-  ansible.builtin.shell: |
-    set -o pipefail
-    kubectl --namespace kube-system get configmap cilium-config -o json \
-      | jq -r '[.metadata.managedFields[]?.time] | map(select(. != null)) | sort | last // ""'
-    kubectl --namespace kube-system get pods -l k8s-app=cilium -o json \
-      | jq -r '[.items[].status.startTime] | map(select(. != null)) | sort | first // ""'
-  args:
+  #   managedFields  - catches a change by ANY writer, including a hand-edited ConfigMap.
+  #                    REQUIRES --show-managed-fields: kubectl strips managedFields from its
+  #                    output by default, so without the flag the jq below returns "" and the
+  #                    whole check degrades to "cannot tell", which it then reported as
+  #                    "no restart needed".
+  #   helm history   - catches our own upgrades even if managedFields is unavailable or has no
+  #                    timestamps. Independent of kubectl's output conventions entirely.
+  #
+  # Whichever is later wins. RFC3339 with a Z offset sorts lexicographically in chronological
+  # order, which is why `sort | tail -1` is a legitimate maximum here and not a trick.
+  # `shell:` with a `cmd:` mapping, NOT the free-form `shell: |` block. Free-form module args
+  # are run through shlex to look for key=value pairs, so a single apostrophe anywhere in the
+  # script - including inside a comment - is an unbalanced quote. That is how this task first
+  # failed: the word "Kubernetes'" in the comment below, reported as "unbalanced jinja2 block or
+  # quotes" with the error pointing at the task's name line, several lines above the apostrophe.
+  ansible.builtin.shell:
     executable: /bin/bash
+    cmd: |
+      set -o pipefail
+
+      cm=$(kubectl --namespace kube-system get configmap cilium-config \
+             --show-managed-fields -o json 2>/dev/null \
+           | jq -r '[.metadata.managedFields[]?.time] | map(select(. != null)) | sort | last // ""' \
+           2>/dev/null || true)
+
+      raw=$(helm history cilium --namespace kube-system -o json 2>/dev/null \
+            | jq -r '[.[] | select(.status == "deployed")] | (last // {}) | .updated // ""' \
+            2>/dev/null || true)
+      # helm prints a local-offset timestamp with nanoseconds; normalise before comparing it with
+      # the Z-suffixed times Kubernetes reports, or the string comparison is meaningless.
+      hl=""
+      if [ -n "$raw" ]; then
+        hl=$(date -u -d "$raw" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)
+      fi
+
+      printf '%s\n%s\n' "$cm" "$hl" | grep -v '^$' | sort | tail -1
+
+      kubectl --namespace kube-system get pods -l k8s-app=cilium -o json \
+        | jq -r '[.items[].status.startTime] | map(select(. != null)) | sort | first // ""'
   delegate_to: localhost
   run_once: true
   become: false
@@ -174,8 +202,34 @@
 
 - name: Are the agents older than the configuration they are supposed to be running?
   ansible.builtin.set_fact:
-    cilium_config_written: "{{ cilium_times.stdout_lines[0] | default('', true) }}"
-    cilium_oldest_agent: "{{ cilium_times.stdout_lines[1] | default('', true) }}"
+    # Two lines of output, and the first may be absent if both sources came back empty - in
+    # which case stdout_lines[0] is the pod time, not the config time. Keyed off the line count
+    # rather than the index so that "both sources failed" cannot be misread as "the config was
+    # written at the time the pod started".
+    cilium_config_written: >-
+      {{ cilium_times.stdout_lines[0] | default('', true)
+         if (cilium_times.stdout_lines | length) > 1 else '' }}
+    cilium_oldest_agent: "{{ cilium_times.stdout_lines[-1] | default('', true) }}"
+  run_once: true
+
+- name: Say so loudly when staleness cannot be determined
+  # Not a failure: restarting on "cannot tell" would restart on every run forever if these
+  # sources are permanently unavailable, and a role that cannot reach changed=0 is a role whose
+  # output nobody reads. But it must not be silent either - the previous version of this check
+  # printed "config written=unknown" in a debug line nobody had reason to look at, and
+  # concluded no restart was needed.
+  when: cilium_config_written | length == 0
+  ansible.builtin.debug:
+    msg: |
+      WARNING: could not determine when cilium-config was last written.
+
+      Neither managedFields nor `helm history cilium -n kube-system` gave a timestamp, so the
+      staleness check is NOT protecting this run. A values change that only touches the
+      ConfigMap would leave the agents running the old configuration, and the only remaining
+      guards are "helm reported a change this run" and the single-field mode check below.
+
+      To restart them regardless:
+        kubectl -n kube-system rollout restart daemonset/cilium deployment/cilium-operator
   run_once: true
 
 - name: Decide whether a restart is needed
