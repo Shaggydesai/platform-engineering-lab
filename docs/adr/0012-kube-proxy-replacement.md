@@ -108,3 +108,60 @@ fallback to limp along on: it is the only implementation now. Mitigated by `make
 tests DNS, ClusterIP routing and cross-node pod traffic — and by `make onprem-up` rebuilding the
 cluster in four minutes. The rollback is `kubeProxyReplacement: false` plus a rebuild, and it is
 written down in `docs/runbooks/05-gateway.md` rather than left as an exercise.
+
+---
+
+## Postscript, 2026-10-26: the mitigation above did not work
+
+The paragraph before this one says the risk is "mitigated by `make smoke`, which tests DNS,
+ClusterIP routing and cross-node pod traffic." That sentence was true about what the smoke test
+tested and wrong about what it could catch. This is what happened when the decision was carried
+out, recorded because the shape of the failure is more instructive than the decision was.
+
+**The sequence.** `helm upgrade` wrote `kubeProxyReplacement: true` into the `cilium-config`
+ConfigMap, waited, and reported success. Nothing restarted: the Cilium chart puts no config
+checksum on the DaemonSet's pod template, deliberately, because a config change nobody asked to
+be rolled should not restart the CNI on every node at once. So the ConfigMap held the new
+request while all three agents went on running the configuration they had loaded days earlier,
+with replacement off. The `kube_proxy_removal` role then read the ConfigMap, saw `true`, and
+deleted kube-proxy.
+
+**Why nothing looked wrong.** Cilium serves pod-sourced ClusterIP through socket-LB whether or
+not it is in replacement mode. So `cilium-dbg service list` was fully populated, every pod could
+reach every Service, cluster DNS resolved, and `make smoke` passed five of five. What had no
+implementation at all was NodePort, externalIPs, HostPort, and ClusterIP reached from a node's
+own network namespace. Every probe in the smoke test originated inside a pod, so not one of them
+could fail on any of it.
+
+**Three things were wrong, and they rhyme.**
+
+1. The role asserted against the ConfigMap. Its own comment, three lines above the task, said it
+   checked "the RUNNING config rather than the values file, which might not have been applied."
+   It was right about what to check and wrong about where to look: a ConfigMap is where helm
+   writes the *request*. `cilium-dbg status` is the answer. The role now reads it from every
+   agent pod — not `exec ds/cilium`, which picks one, because a half-rolled DaemonSet is exactly
+   the state worth catching.
+2. The reconciliation is driven by *observed disagreement*, not by `helm changed`. Gating on the
+   helm task could never have recovered this cluster: the release already held the right values,
+   so no upgrade was pending, so no restart would ever have fired, and the agents would have
+   stayed wrong indefinitely.
+3. Gateway API had the same fault for the same reason — the operator never restarted either, so
+   it had no Gateway support and left the GatewayClass the chart created sitting at
+   `ACCEPTED=Unknown`. It is now verified by waiting for `Accepted` on `gatewayclass/cilium`
+   rather than for the object's existence, because the chart creates that object whether or not
+   a controller is listening. Only the controller can set the condition.
+
+**The general lesson, which outlives this ADR.** Every one of these checks confirmed that a
+*request* had been recorded, and called it proof that the request had taken effect. Helm's exit
+code, a ConfigMap's contents, a CRD's existence: all three are upstream of the thing worth
+asserting. Ask the component what it is doing.
+
+**And the test.** `make smoke` now has a sixth step that probes the NodePort from the
+workstation — outside the cluster, not from a pod — against all three nodes, including the two
+with no backend pod, so one of them must forward to the node that has it. That forwarding is
+precisely what kube-proxy used to own. It is the narrowest check that fails when nothing has
+taken the job over, and the old five could not have been made to fail on it by any amount of
+care, because they all ran from the wrong place.
+
+A green test that cannot fail on the thing that broke is worse than no test, because it is
+believed.

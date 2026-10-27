@@ -4,8 +4,8 @@
 > before you close the laptop. It takes thirty seconds and it is the reason this project will
 > not stall like the last one.
 
-**Last updated:** 2026-10-23
-**Current module:** 05 — The platform baseline (2 of 4 components in)
+**Last updated:** 2026-10-27
+**Current module:** 05 — The platform baseline (3 of 4 components in)
 **Overall progress:** Modules 00–04 complete — 5 / 13
 
 ---
@@ -16,6 +16,8 @@
 |:--|:--|
 | **On-prem nodes** | **built and verified** — k8s-cp01 .10, k8s-w01 .11, k8s-w02 .12, destroy/apply round trip passes |
 | **On-prem cluster** | **running, and rebuildable from nothing in ~4 minutes** — 3 nodes, v1.34.12, Cilium 1.20.3 |
+| **Dataplane** | **no kube-proxy.** All 3 agents `KubeProxyReplacement: True`, 0 `KUBE-SVC` iptables rules, Services in eBPF maps. `cilium-dbg service list`, not `iptables-save` |
+| **Gateway API** | CRDs v1.6.3, pinned by digest `356c2b8e…`. `gatewayclass/cilium` **Accepted=True**. No `Gateway` object yet |
 | **Certificates expire** | **2027-10-22** — `sudo kubeadm certs renew all` before then, or nothing works |
 | **GCP cluster** | not built — account verified empty, ₹0 running |
 | **AWS cluster** | not built |
@@ -41,13 +43,15 @@ Healthy, nothing installed by hand.
 |:--|:--|:--|
 | metrics-server | 3.14.0 | the four-file pattern, and the per-environment overlay — `--kubelet-insecure-tls` is on-prem only |
 | cert-manager | v1.21.3 | sync waves, a wrapper chart carrying its own templates, and the PKI from ADR-0011 |
+| Cilium kube-proxy replacement | 1.20.3 | that a ConfigMap is a request and `cilium-dbg status` is the answer — see the postscript on ADR-0012 |
 
 Remaining in this module:
 
-1. **A Gateway (ingress via Gateway API).** Cilium already provides it — one of the two reasons
-   ADR-0007 chose Cilium — so this is enabling `gatewayAPI` in the Cilium values plus a
-   `Gateway` and a serving certificate from `platform-ca`. First component whose TLS chains to
-   our own CA, and the first thing reachable from the Windows host.
+1. **A Gateway (ingress via Gateway API).** *Half done.* The CRDs, `gatewayAPI.enabled`, and
+   the kube-proxy replacement it forced are all in and verified (ADR-0012). What remains is the
+   `Gateway` object itself plus a serving certificate from `platform-ca` — the first component
+   whose TLS chains to our own CA, and the first thing reachable from the Windows host. It is a
+   Layer 3 wrapper chart, so it arrives through Argo CD, not by hand.
 2. **A storage class.** Nothing has needed persistence yet; ShopVerse will in Module 06.
 3. **The module gate:** the whole app-of-apps Synced and Healthy, and the overlay mechanism
    proven by a value that genuinely differs per environment — which the cert-manager
@@ -160,3 +164,22 @@ Keep this short. One line per session: what you did, what broke, what is next.
 | 2026-10-22 | 01 | WSL confirmed available → ADR-0005: WSL becomes the control workstation, bash version of the VM script is now primary, PowerShell kept as fallback. GitHub App access granted, pushes work. | Build the image from WSL |
 | 2026-10-22 | 01 | Module 01 written: Packer golden image (autoinstall, containerd, kubeadm held, sealed identity) plus a clone script that discovers the NAT subnet instead of editing VMware's DHCP config. Not yet run. | Build the image, run the create/destroy round trip |
 | 2026-10-22 | 00 | Hardware captured: 32 GB, 12 threads, C: 106 GB SSD, D: 625 GB HDD. ADR-0004 fixes the substrate: 3 kubeadm VMs on the SSD, because etcd on a mechanical disk is a known failure mode. Repo created, scaffold ready to push. | Push scaffold, budget alarms, `make doctor` |
+
+## Verified on 2026-10-27
+
+- `make smoke` **6 of 6**, including the new step 6: NodePort answered on all three nodes from
+  the workstation, with the two forwarded hops (no local backend) marked as such.
+- `make onprem-up` **changed=0** on all three nodes — the Module 03 gate still holds with the
+  CNI, the Gateway API CRDs and the kube-proxy removal all in the playbook.
+- `make hosts` reconciles stale SSH host keys after a VM rebuild, so the man-in-the-middle
+  warning means something again.
+
+## Open, not yet understood
+
+**The Argo CD seam applied itself once without a reason.** On 2026-10-26 the
+`argocd : Apply the seam` task reported `changed` for `root-onprem.yaml` with nothing in Git
+having touched that file. It has not reproduced — the next two runs skipped the apply with both
+diffs returning 0. The `kubectl diff --server-side` gate in front of it is supposed to make
+that impossible, so either the gate has a hole or the live object genuinely differed for a
+moment. Harmless when it happens (the apply is a no-op), but it makes `changed=0` less
+trustworthy than it looks. **Watch for it; do not invent a mechanism.**
