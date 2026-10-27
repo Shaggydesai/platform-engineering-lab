@@ -18,7 +18,14 @@
     "pool_stop": "192.168.100.239",
     "gateway_comment": "The Gateway's address is PINNED out of the pool rather than taken from it, because /etc/hosts points a name at it and a name that moves is worse than no name. Pinned with Gateway spec.addresses[type=IPAddress], which is LB-IPAM aware; the older io.cilium/lb-ipam-ips annotation does the same thing and is documented as heading for deprecation.",
     "gateway_address": "192.168.100.200",
-    "gateway_hostname": "gw.platform.local"
+    "gateway_hostname": "gw.platform.local",
+    "gateway_wildcard_comment": "The HTTPS listener and its certificate are WILDCARD, so adding an application to the platform means adding an HTTPRoute and a line in /etc/hosts - not touching the Gateway or reissuing a certificate (ADR-0014). Our own CA can sign a wildcard for a domain we invented, which a public CA could not; that is the one thing a private CA is unambiguously better at.",
+    "gateway_wildcard": "*.platform.local",
+    "gateway_hostnames_comment": "Every name that must resolve to the Gateway from this workstation. There is no DNS on this network, so each one needs an /etc/hosts line even though the certificate covers them all - `make hosts` writes them.",
+    "gateway_hostnames": [
+      "gw.platform.local",
+      "argocd.platform.local"
+    ]
   },
   "kubernetes": {
     "comment": "Fixed in ADR-0007, before kubeadm ran. Changing either CIDR later means rebuilding the cluster, so they live here where the kubeadm config, the Cilium values and the Ansible roles all read the same number. Neither may overlap the node network above.",

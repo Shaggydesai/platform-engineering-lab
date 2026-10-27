@@ -20,3 +20,6 @@ gateway:
   enabled: false
 certificate:
   enabled: false
+routes:
+  argocd:
+    enabled: false

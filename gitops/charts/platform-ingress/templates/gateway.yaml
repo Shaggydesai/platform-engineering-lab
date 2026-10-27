@@ -34,7 +34,7 @@ spec:
     - name: http
       protocol: HTTP
       port: 80
-      hostname: {{ .Values.gateway.hostname | quote }}
+      hostname: {{ .Values.gateway.wildcardHostname | quote }}
       allowedRoutes:
         namespaces:
           # All, not Same. These are two different permissions and conflating them is the
@@ -52,7 +52,11 @@ spec:
     - name: https
       protocol: HTTPS
       port: 443
-      hostname: {{ .Values.gateway.hostname | quote }}
+      # Wildcard, so an application gets a name on this Gateway by creating an HTTPRoute - the
+      # Gateway and its certificate never change (ADR-0014). A listener hostname CONSTRAINS which
+      # routes may attach: a route for argocd.platform.local cannot attach to a listener that
+      # says gw.platform.local, which is what the first version of this did.
+      hostname: {{ .Values.gateway.wildcardHostname | quote }}
       allowedRoutes:
         namespaces:
           from: All

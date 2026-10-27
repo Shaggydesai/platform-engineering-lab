@@ -24,9 +24,15 @@ metadata:
     argocd.argoproj.io/sync-wave: "0"
 spec:
   secretName: platform-gateway-tls
-  commonName: {{ .Values.gateway.hostname | quote }}
+  # One wildcard rather than a name per application. A public CA would not issue this for a
+  # domain nobody owns; our own CA signs it without ceremony, which is the one thing a private
+  # CA is unambiguously better at than a real one.
+  #
+  # Note what a wildcard does NOT cover: *.platform.local matches argocd.platform.local and
+  # gw.platform.local, but not platform.local itself, and not a.b.platform.local.
+  commonName: {{ .Values.gateway.wildcardHostname | quote }}
   dnsNames:
-    - {{ .Values.gateway.hostname | quote }}
+    - {{ .Values.gateway.wildcardHostname | quote }}
 
   # 90 days with renewal at 75, on a CA that is good until 2036. Short-lived deliberately: a
   # certificate that renews four times a year proves the renewal path works, and one that lasts

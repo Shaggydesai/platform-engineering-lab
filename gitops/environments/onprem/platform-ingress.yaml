@@ -23,6 +23,12 @@ gateway:
   enabled: true
   address: "192.168.100.200"
   hostname: "gw.platform.local"
+  wildcardHostname: "*.platform.local"
+
+routes:
+  argocd:
+    enabled: true
+    hostname: "argocd.platform.local"
 
 certificate:
   enabled: true

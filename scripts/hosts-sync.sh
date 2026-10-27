@@ -49,8 +49,10 @@ block=$(printf '%s\n' "$MARK_BEGIN"
     '.nodes[] | "\(.address)\t\(.name) \(.name).\($d)"' "$CONFIG"
   jq -r '
     .loadbalancer // empty
-    | select(.gateway_address and .gateway_hostname)
-    | "\(.gateway_address)\t\(.gateway_hostname) \(.gateway_hostname | split(".") | .[0])"
+    | select(.gateway_address)
+    | . as $lb
+    | (($lb.gateway_hostnames // [$lb.gateway_hostname]) | map(select(. != null)))[]
+    | "\($lb.gateway_address)\t\(.) \(. | split(".") | .[0])"
   ' "$CONFIG" 2>/dev/null || true
   printf '%s\n' "$MARK_END")
 
@@ -145,15 +147,21 @@ for n in $(jq -r '.nodes[].name' "$CONFIG"); do
   [[ -n "$addr" ]] && ok "$n.$domain -> $addr" || warn "$n.$domain does NOT resolve"
 done
 
-gw_name=$(jq -r '.loadbalancer.gateway_hostname // empty' "$CONFIG" 2>/dev/null || true)
-if [[ -n "${gw_name:-}" ]]; then
-  gw_addr=$(getent hosts "$gw_name" | awk '{print $1}' || true)
-  if [[ -n "${gw_addr:-}" ]]; then
-    ok "$gw_name -> $gw_addr"
-    # Resolving is not reaching. The name is in /etc/hosts whether or not any node is
-    # announcing the address, so say which of the two was actually tested.
-    warn 'resolves only - run `make smoke` or curl it to find out if anything answers'
-  else
-    warn "$gw_name does NOT resolve"
-  fi
+gw_names=$(jq -r '
+  .loadbalancer // empty
+  | (.gateway_hostnames // [.gateway_hostname]) | map(select(. != null))[]
+' "$CONFIG" 2>/dev/null || true)
+if [[ -n "${gw_names:-}" ]]; then
+  while read -r gw_name; do
+    [[ -z "$gw_name" ]] && continue
+    gw_addr=$(getent hosts "$gw_name" | awk '{print $1}' || true)
+    if [[ -n "${gw_addr:-}" ]]; then
+      ok "$gw_name -> $gw_addr"
+    else
+      warn "$gw_name does NOT resolve"
+    fi
+  done <<<"$gw_names"
+  # Resolving is not reaching. These names are in /etc/hosts whether or not any node is
+  # announcing the address, so say which of the two was actually tested.
+  warn 'resolve only - run `make smoke` or curl them to find out if anything answers'
 fi

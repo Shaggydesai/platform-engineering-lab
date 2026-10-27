@@ -138,6 +138,39 @@ for node in json.load(open('clusters/onprem/nodes.json'))['nodes']:
         print('    node %s (%s) is inside the load balancer pool' % (node['name'], node['address']))
         bad.append(1)
 
+# The wildcard the certificate is issued for, and every name expected to be covered by it.
+# A name that does not match the wildcard gets a certificate error that reads like a CA
+# problem rather than a naming one, which is an afternoon to track down (ADR-0014).
+wild = n.get('gateway_wildcard', '')
+if wild != o['gateway'].get('wildcardHostname'):
+    print('    wildcard: nodes.json says %s, the overlay says %s'
+          % (wild, o['gateway'].get('wildcardHostname')))
+    bad.append(1)
+
+names = n.get('gateway_hostnames') or [n['gateway_hostname']]
+if wild.startswith('*.'):
+    suffix = wild[1:]                      # '.platform.local'
+    for h in names:
+        # A wildcard covers exactly ONE extra label: *.platform.local matches
+        # argocd.platform.local but not a.b.platform.local, and not platform.local itself.
+        label = h[:-len(suffix)] if h.endswith(suffix) else None
+        if label is None or not label or '.' in label:
+            print('    %s is not covered by the certificate wildcard %s' % (h, wild))
+            bad.append(1)
+
+if n['gateway_hostname'] not in names:
+    print('    gateway_hostname %s is missing from gateway_hostnames, so `make hosts` will not '
+          'write it' % n['gateway_hostname'])
+    bad.append(1)
+
+# Every route's hostname must be a name the workstation can resolve, or the route works and
+# nothing can reach it.
+for rname, r in (o.get('routes') or {}).items():
+    if r.get('enabled') and r.get('hostname') and r['hostname'] not in names:
+        print('    route %s uses %s, which is not in gateway_hostnames - nothing will resolve it'
+              % (rname, r['hostname']))
+        bad.append(1)
+
 sys.exit(1 if bad else 0)
 PYCHECK
   then ok 'addresses agree, gateway inside the pool, no node collision'

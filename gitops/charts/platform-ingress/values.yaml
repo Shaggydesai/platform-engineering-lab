@@ -25,7 +25,22 @@ gateway:
   className: cilium
   # Pinned, and must fall inside the pool above.
   address: ""
+  # The Gateway's own name - what the certificate used to be issued for, and still the name the
+  # Gateway answers on with no route attached.
   hostname: ""
+  # The listener and certificate hostname. A wildcard, so applications do not touch the Gateway.
+  wildcardHostname: ""
+
+routes:
+  # One entry per application that gets a name on this Gateway. Each renders an HTTPRoute into
+  # the APPLICATION's namespace, beside its backend - see the template for why that matters.
+  argocd:
+    enabled: false
+    hostname: ""
+    serviceName: argocd-server
+    servicePort: 80
+    gatewayName: platform
+    gatewayNamespace: platform-ingress
 
 certificate:
   enabled: false
