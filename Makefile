@@ -132,6 +132,20 @@ onprem-config: _no-stray-flags ## Module 03 - re-render the kubeadm config only
 onprem-argocd: _no-stray-flags ## Module 04 - install/repair Argo CD and re-apply the GitOps seam
 	@$(PLAYBOOK) ansible/playbooks/cluster.yml --tags argocd $(ARGS)
 
+.PHONY: onprem-ca
+onprem-ca: ## Export the internal CA so curl and browsers can verify the Gateway
+	@mkdir -p .cache
+	@kubectl --context $$(jq -r '.kubernetes.kube_context // "onprem-admin"' clusters/onprem/nodes.json 2>/dev/null || echo onprem-admin) \
+	  -n cert-manager get secret platform-ca-tls -o jsonpath='{.data.ca\.crt}' \
+	  | base64 -d > .cache/platform-ca.crt
+	@printf 'wrote .cache/platform-ca.crt\n\n'
+	@openssl x509 -in .cache/platform-ca.crt -noout -subject -enddate | sed 's/^/    /'
+	@printf '\nVerify the Gateway with it:\n'
+	@jq -r '.loadbalancer.gateway_hostnames[]? // .loadbalancer.gateway_hostname' clusters/onprem/nodes.json \
+	  | sed 's|^|    curl -sS -o /dev/null -w "%{http_code}\\n" --cacert .cache/platform-ca.crt https://|'
+	@printf '\nNOT in /tmp on purpose: a WSL restart clears /tmp, and the first thing that\n'
+	@printf 'happens after a restart is wanting to check the Gateway still works.\n'
+
 .PHONY: onprem-down
 onprem-down: ## Destroy the on-prem cluster (keeps the VMs)
 	@$(PLAYBOOK) ansible/playbooks/reset.yml

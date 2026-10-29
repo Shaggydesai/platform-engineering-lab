@@ -161,6 +161,68 @@
   # kubeconfig would read as "no differences" and the apply would be skipped silently.
   failed_when: argocd_seam_diff.rc not in [0, 1]
 
+- name: A timestamp, and somewhere to put the evidence
+  # Not the gathered-facts date, and not for style: that fact only exists if facts were
+  # gathered, and `make onprem-argocd` runs --tags argocd, which skips the preflight play that
+  # gathers them. The task would work on a full run and fail on exactly the run someone reaches
+  # for when Argo CD is the broken thing - the one job this role exists to do.
+  #
+  # The directory is created here as well as in the gateway_api role, because that role is
+  # skipped by the same tag. Fourth time for this class of bug: nothing in Ansible creates a
+  # parent directory, and "it exists because another role made it" is a coincidence, not a
+  # dependency.
+  ansible.builtin.set_fact:
+    seam_stamp: "{{ lookup('pipe', 'date -u +%Y%m%dT%H%M%SZ') }}"
+  run_once: true
+
+- name: Make sure there is somewhere to write the evidence
+  ansible.builtin.file:
+    path: "{{ repo_root }}/.cache"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+  run_once: true
+  become: false
+  changed_when: false
+
+- name: Record WHAT differs, whenever something does
+  # Added after the second unexplained occurrence, both times on the first run after the cluster
+  # was restarted. The parking-lot entry said to capture the diff next time it happened; relying
+  # on a human to remember that, during the one run where it is visible, is not a plan - the
+  # apply fires in the same playbook and the evidence is gone.
+  #
+  # So the role keeps it. The file is the thing to read when this recurs; the printed form is
+  # for whoever is watching the run.
+  when: item.rc == 1
+  ansible.builtin.copy:
+    dest: "{{ repo_root }}/.cache/seam-diff-{{ item.item }}-{{ seam_stamp }}.diff"
+    mode: "0644"
+    content: |
+      # {{ item.item }} differed from the live object at {{ seam_stamp }}
+      # Context: {{ kube_context }}. This file is evidence for docs/parking-lot.md, not config.
+      # Written by the argocd role because the apply below erases the difference immediately.
+      {{ item.stdout }}
+  loop: "{{ argocd_seam_diff.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  delegate_to: localhost
+  run_once: true
+  become: false
+  changed_when: false
+
+- name: Show the difference while it is still visible
+  when: item.rc == 1
+  ansible.builtin.debug:
+    msg: |
+      {{ item.item }} differs from the live object. Saved to
+      .cache/seam-diff-{{ item.item }}-{{ seam_stamp }}.diff
+
+      {{ item.stdout | default('(kubectl diff printed nothing, which is itself the finding)', true) }}
+  loop: "{{ argocd_seam_diff.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  run_once: true
+
 - name: Apply the seam - the AppProjects and the root Application
   # THE ONLY in-cluster objects Ansible applies besides the Helm release, and ADR-0009 says
   # nothing may be added here without amending it. Order matters: an Application referencing a
