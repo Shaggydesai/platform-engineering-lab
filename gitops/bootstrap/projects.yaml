@@ -19,11 +19,23 @@ spec:
     Platform components. Trusted: these are the things that make the cluster usable, and they
     legitimately need cluster-scoped resources - CRDs, webhooks, storage classes, RBAC.
 
-  # Only this repository. The URL is listed even though the repository is public and needs no
-  # credential, because that is what makes adding one later a change to a Secret rather than a
-  # change to every Application (ADR-0009, Decision 3).
+  # Where platform components may be rendered FROM. The URLs are listed even though both
+  # repositories are public and need no credential, because that is what makes adding one later
+  # a change to a Secret rather than a change to every Application (ADR-0009, Decision 3).
+  #
+  # This list did its job on 2026-10-29. The local-path Application was added pointing at
+  # Rancher's repository, and Argo CD reported it Unknown/Unknown with no revision - not a sync
+  # error, a REJECTION, because the project would not let it read from a repository nobody had
+  # listed. Adding the second line below is the deliberate act the boundary exists to force.
+  #
+  # The second entry is narrow on purpose: one repository, not github.com. A platform component
+  # that can render a chart from anywhere on GitHub is a platform component that can render
+  # anything.
   sourceRepos:
     - https://github.com/Shaggydesai/platform-engineering-lab.git
+    # local-path-provisioner. Rancher publishes no Helm repository for this chart, so Argo CD
+    # renders it from their git repository at a pinned tag (ADR-0015).
+    - https://github.com/rancher/local-path-provisioner.git
 
   destinations:
     - server: https://kubernetes.default.svc

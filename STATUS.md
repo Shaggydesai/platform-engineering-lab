@@ -22,7 +22,7 @@
 | **Gateway** | **working** — wildcard listener `*.platform.local` at `.200`, HTTPS terminated with a `platform-ca` certificate |
 | **Argo CD UI** | `https://argocd.platform.local` through the Gateway (ADR-0014). `make argocd-ui` port-forward stays as the recovery path |
 | **Ingress failover** | **measured: ~15s** on a hard node power-off, bounded by the L2 lease duration (ADR-0013) |
-| **Storage** | local-path-provisioner v0.0.37, default class `platform-local` (ADR-0015). **Written, not yet synced.** Node-local: a dead node takes its data with it |
+| **Storage** | local-path-provisioner v0.0.37, default class `platform-local` (ADR-0015). **Awaiting `make onprem-up TAGS=argocd`** — the AppProject had to be opened to Rancher's repo first. Node-local: a dead node takes its data with it |
 | **Certificates expire** | **2027-10-22** — `sudo kubeadm certs renew all` before then, or nothing works |
 | **GCP cluster** | not built — account verified empty, ₹0 running |
 | **AWS cluster** | not built |

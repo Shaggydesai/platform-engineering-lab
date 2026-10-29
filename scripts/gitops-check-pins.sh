@@ -130,8 +130,13 @@ for app in "$REPO_ROOT"/gitops/clusters/*/platform/*.yaml; do
     name=$(basename "$cpath")
 
     sha=$(git ls-remote "$url" "refs/tags/$rev" 2>/dev/null | awk '{print $1}' | head -1)
+    # Release candidates are not newer than the release they preceded. `sort -V` disagrees:
+    # it puts v0.0.37-rc2 after v0.0.37, so the first version of this reported the pinned
+    # v0.0.37 as being behind v0.0.37-rc2 - advice to downgrade onto a pre-release, phrased as
+    # a version check. Anything with a hyphen in the tag is a pre-release by convention.
     newest=$(git ls-remote --tags --refs "$url" 2>/dev/null \
-             | awk -F/ '{print $NF}' | grep -E '^v?[0-9]' | sort -V | tail -1)
+             | awk -F/ '{print $NF}' | grep -E '^v?[0-9]' | grep -v -- '-' \
+             | sort -V | tail -1)
 
     if [[ -z "$sha" ]]; then
       printf '%s%-22s %-10s %-10s unreachable or tag missing%s\n' \

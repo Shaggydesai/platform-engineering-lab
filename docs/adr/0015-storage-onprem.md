@@ -136,3 +136,35 @@ takes replication to get it, which is Longhorn, which is a module of its own.
   command to find it.
 - Nothing in the cloud overlays. `gitops/environments/{gcp,aws}/local-path.yaml` exist stating
   that, so a missing file never has to be read as either "not yet" or "not applicable".
+
+---
+
+## First sync, 2026-10-29: the AppProject refused it
+
+```
+APP               PROJECT   SYNC     HEALTH   REVISION
+local-path        platform  Unknown  Unknown  -
+```
+
+Not a sync failure — a **rejection**. `Unknown/Unknown` with no revision at all means Argo CD
+never got as far as reading the repository. The `platform` AppProject lists `sourceRepos`, and it
+contained one entry: this repository. An Application rendering a chart from
+`github.com/rancher/local-path-provisioner.git` was therefore not permitted to read its own
+source.
+
+This is the boundary working, and it is worth recording because the comment above that list in
+`gitops/bootstrap/projects.yaml` already predicted it: *"An AppProject is a boundary, not a
+folder. It answers three questions about every Application inside it: which repositories may it
+read, where may it deploy, and what kinds of object may it create."* Adding an external chart
+source is supposed to cost a deliberate edit to that boundary, and it did.
+
+Two details about the fix:
+
+**The entry is one repository, not `github.com`.** A platform component permitted to render a
+chart from anywhere on GitHub is a platform component permitted to render anything.
+
+**It is applied by Ansible, not by Argo CD.** `projects.yaml` is the seam (ADR-0009, Decision 1):
+Argo CD cannot own the object that defines what Argo CD may do. So this change needs
+`make onprem-up TAGS=argocd` and will not arrive from a `git push` alone — which is the one case
+where "nothing in this cluster is installed by hand" has a genuine exception, and the reason the
+exception exists.
