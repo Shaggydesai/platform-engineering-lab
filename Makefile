@@ -221,6 +221,22 @@ gitops-status: ## What Argo CD thinks the cluster should look like, and whether 
 	  | { column -t 2>/dev/null || cat; } \
 	  || { echo "Argo CD is not installed - run: make onprem-argocd"; exit 1; }
 
+.PHONY: gitops-refresh
+gitops-refresh: ## Make Argo CD re-read Git NOW instead of waiting for its poll
+	@# Argo CD reconciles on a timer - 180s by default - so for the first minutes after a push
+	@# `gitops-status` shows every Application Synced and Healthy at the PREVIOUS revision. That
+	@# is not drift and not a failure, but it reads exactly like the new thing is broken: the
+	@# route you just added returns 404 because it does not exist yet.
+	@#
+	@# This annotation is what the UI's Refresh button sets. It asks for a re-read of Git; it
+	@# does not force a sync, so an Application with automated sync off still only reports.
+	@for app in $$(kubectl -n argocd get applications -o jsonpath='{range .items[*]}{.metadata.name}{" "}{end}'); do 	  kubectl -n argocd annotate application "$$app" 	    argocd.argoproj.io/refresh=normal --overwrite >/dev/null; 	done
+	@printf 'asked Argo CD to re-read Git for every Application. Give it a few seconds, then:\n'
+	@printf '  make gitops-status\n\n'
+	@printf 'Compare the REVISION column against:  git rev-parse --short=12 HEAD\n'
+	@printf 'A revision behind HEAD after this means the repo-server cannot reach Git, which is\n'
+	@printf 'a different problem from a slow poll and shows up in the Application conditions.\n'
+
 .PHONY: gitops-drift
 gitops-drift: ## Anything running that Argo CD does NOT own (ADR-0009's detectable rule)
 	@bash scripts/gitops-drift.sh
