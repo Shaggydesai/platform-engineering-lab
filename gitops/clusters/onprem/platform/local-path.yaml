@@ -1,0 +1,54 @@
+# Dynamic persistent storage for the on-prem cluster: Rancher's local-path-provisioner.
+#
+# The chart comes from a GIT source, not a Helm repository, because Rancher does not publish one -
+# the chart exists only inside their repository (ADR-0015). Argo CD renders a Helm chart from git
+# natively, which keeps this on the upstream chart instead of a third party's republish of it.
+# Two such republishes exist on Artifact Hub at different chart versions; neither is Rancher.
+#
+# This is a variant of ADR-0010's wrapper pattern rather than the pattern itself: there is no
+# local Chart.yaml and therefore no Chart.lock digest, because a wrapper chart needs a Helm
+# repository to depend on. The per-environment values overlay works exactly as everywhere else.
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: local-path
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    # Wave -5: after cert-manager (-10) and before anything that might want a PVC. Nothing here
+    # needs certificates, but a component that wants storage should not have to know whether
+    # storage arrives before or after it.
+    argocd.argoproj.io/sync-wave: "-5"
+spec:
+  project: platform
+
+  sources:
+    - repoURL: https://github.com/rancher/local-path-provisioner.git
+      # A TAG, and the honest limitation: Argo CD follows wherever the tag points, so a
+      # re-tagged release would be synced. `make gitops-check-pins` resolves this tag and
+      # compares it against the commit recorded in clusters/onprem/nodes.json, so a move is
+      # DETECTED. It is not prevented - the Gateway API bundle is pinned by content digest and
+      # this is not, and the difference is worth knowing rather than glossing.
+      targetRevision: v0.0.37
+      path: deploy/chart/local-path-provisioner
+      helm:
+        valueFiles:
+          # The chart's own values.yaml is applied implicitly; only the overlay is named here.
+          - $values/gitops/environments/onprem/local-path.yaml
+
+    - repoURL: https://github.com/Shaggydesai/platform-engineering-lab.git
+      targetRevision: main
+      ref: values
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: local-path-storage
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

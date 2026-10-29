@@ -87,6 +87,101 @@ else
 EOT
 fi
 
+# ---------------------------------------------------------------- git-sourced charts
+#
+# A chart rendered from a GIT source is invisible to the loop above: there is no local
+# Chart.yaml, so there is no dependency to compare. local-path-provisioner is one of these,
+# because Rancher publishes no Helm repository for it (ADR-0015).
+#
+# Two different questions get asked here, and only the first is the same as above:
+#
+#   is a newer tag available?   - information, same as a chart version being behind.
+#   does the pinned tag still point where it did?  - a MOVED TAG, which is not the same thing
+#     at all. Argo CD follows a tag, so a re-tagged upstream release would be synced silently.
+#     The Gateway API bundle is pinned by content digest and cannot do this; a git tag can, and
+#     the only defence here is noticing.
+
+printf '\n%s%-22s %-10s %-10s %s%s\n' "$c_hdr" "GIT CHART" "PINNED" "NEWEST" "RESOLVES TO" "$c_off"
+
+# Our own repository, so its sources are skipped - derived rather than hardcoded, because this
+# repo has been cloned under more than one name already.
+ours=$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null | sed 's/\.git$//' || echo '')
+
+git_found=0
+moved=0
+
+for app in "$REPO_ROOT"/gitops/clusters/*/platform/*.yaml; do
+  [[ -f "$app" ]] || continue
+  n=$(yq -r '.spec.sources // [] | length' "$app" 2>/dev/null || echo 0)
+  [[ "$n" == "0" || -z "$n" ]] && continue
+
+  for i in $(seq 0 $((n - 1))); do
+    url=$(yq -r ".spec.sources[$i].repoURL // \"\"" "$app")
+    rev=$(yq -r ".spec.sources[$i].targetRevision // \"\"" "$app")
+    cpath=$(yq -r ".spec.sources[$i].path // \"\"" "$app")
+
+    # A chart, from somewhere else, over git. A Helm-repo source has no `path`; our own repo is
+    # where the values live, not a chart.
+    [[ -z "$cpath" || -z "$rev" ]] && continue
+    [[ -n "$ours" && "$url" == "$ours"* ]] && continue
+    [[ "$url" != *.git ]] && continue
+
+    git_found=$((git_found + 1))
+    name=$(basename "$cpath")
+
+    sha=$(git ls-remote "$url" "refs/tags/$rev" 2>/dev/null | awk '{print $1}' | head -1)
+    newest=$(git ls-remote --tags --refs "$url" 2>/dev/null \
+             | awk -F/ '{print $NF}' | grep -E '^v?[0-9]' | sort -V | tail -1)
+
+    if [[ -z "$sha" ]]; then
+      printf '%s%-22s %-10s %-10s unreachable or tag missing%s\n' \
+        "$c_warn" "$name" "$rev" "${newest:-?}" "$c_off"
+      continue
+    fi
+
+    short="${sha:0:7}"
+    colour="$c_ok"
+    note=""
+
+    # The recorded commit, for the one git source this project has. Compared by prefix because
+    # a release page shows a short SHA and ls-remote returns the full one.
+    recorded=""
+    if [[ "$url" == "$(jq -r '.storage.local_path_repo // "x"' "$REPO_ROOT/clusters/onprem/nodes.json")" ]]; then
+      recorded=$(jq -r '.storage.local_path_commit // ""' "$REPO_ROOT/clusters/onprem/nodes.json")
+    fi
+
+    if [[ -n "$recorded" ]]; then
+      if [[ "$sha" == "$recorded"* ]]; then
+        note="matches nodes.json"
+      else
+        colour="$c_warn"
+        note="MOVED - nodes.json records $recorded"
+        moved=$((moved + 1))
+      fi
+    else
+      colour="$c_warn"
+      note="no commit recorded in nodes.json - record $short"
+    fi
+
+    [[ -n "$newest" && "$newest" != "$rev" ]] && note="$note; newest tag $newest"
+
+    printf '%s%-22s %-10s %-10s %s  %s%s\n' \
+      "$colour" "$name" "$rev" "${newest:-?}" "$short" "$note" "$c_off"
+  done
+done
+
+if [[ "$git_found" == 0 ]]; then
+  printf '%s  (none)%s\n' "$c_dim" "$c_off"
+elif [[ "$moved" != 0 ]]; then
+  cat <<'EOT'
+
+  A PINNED TAG HAS MOVED. Upstream re-pointed a tag this cluster syncs from, so Argo CD is
+  rendering different code under the same version number. Read the upstream diff between the
+  two commits before doing anything else; if the move is legitimate, record the new commit in
+  clusters/onprem/nodes.json in the same commit as whatever else changes because of it.
+EOT
+fi
+
 # Deliberately exit 0 even when pins are behind. This is information, not a failure: `make lint`
 # should not break because an upstream project published a release this morning.
 exit 0

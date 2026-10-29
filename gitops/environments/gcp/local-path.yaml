@@ -1,0 +1,14 @@
+# local-path-provisioner, gcp — not used.
+#
+# GKE ships a default StorageClass of its own (standard-rwo, backed by Persistent Disk), so this component has no
+# counterpart there. The file exists saying so rather than being absent, so a missing file never
+# has to be read as either "not yet" or "not applicable".
+#
+# The contrast is the lesson, and it is sharper than the ingress one. On-prem, dynamic
+# provisioning meant choosing a provisioner, accepting that volumes are node-local, and knowing
+# that a dead node takes its data with it. In a cloud the volume is a network device: it detaches
+# from the failed node and reattaches elsewhere, and the pod moves with its data. That single
+# property is most of what people mean by "cloud native storage", and paying for it is why
+# ADR-0003 forbids leaving one running.
+storageClass:
+  defaultClass: false

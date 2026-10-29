@@ -1,0 +1,30 @@
+# local-path-provisioner, on-prem.
+#
+# Only the values this project has a real opinion about. Everything else stays at the chart's
+# default ON PURPOSE: this chart cannot be rendered in the authoring environment, so a value set
+# from a guessed structure is a sync failure discovered by the operator rather than by me.
+# `make gitops-render CHART=...` shows what actually lands, and anything worth moving moves after
+# that has been read (ADR-0015).
+storageClass:
+  # Named for the platform rather than for the implementation. A workload asking for
+  # "platform-local" keeps working if the provisioner behind it is ever replaced; one asking for
+  # "local-path" has the implementation baked into every PVC in the cluster.
+  name: platform-local
+
+  # THE DEFAULT CLASS. A PVC with no storageClassName gets this one, which is what makes a stock
+  # Helm chart with persistence enabled work here without per-chart configuration.
+  defaultClass: true
+
+  # Stated rather than inherited, because it is the single most important setting here and the
+  # one whose absence is hardest to diagnose. WaitForFirstConsumer delays binding the volume
+  # until a pod using it is scheduled, so the volume is created on the node the pod lands on.
+  #
+  # With Immediate binding the volume is created first, on some node the scheduler had no say
+  # in, and the pod is then permanently unschedulable if it cannot be placed there - which
+  # presents as a Pending pod with a node-affinity message and nothing obviously wrong.
+  volumeBindingMode: WaitForFirstConsumer
+
+  # Delete, not Retain. On a lab that gets rebuilt, Retain leaves orphaned directories on the
+  # nodes and Released PVs that no new claim can bind to - the storage equivalent of the
+  # orphaned-disk problem ADR-0003 forbids in the cloud.
+  reclaimPolicy: Delete

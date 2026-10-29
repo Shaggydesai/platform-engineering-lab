@@ -27,6 +27,14 @@
       "argocd.platform.local"
     ]
   },
+  "storage": {
+    "comment": "Node-local dynamic provisioning (ADR-0015). Rancher publishes no Helm repository for this chart - it exists only inside their git repository - so Argo CD renders it from a git source rather than from a third party's republish of it. The commit is recorded so `make gitops-check-pins` can tell if the tag is ever moved; Argo CD follows the TAG, so the check is detection, not prevention.",
+    "local_path_version": "v0.0.37",
+    "local_path_commit": "49b2be8e26d6d34c9afaa21fa33108d2e82f8955",
+    "local_path_chart_path": "deploy/chart/local-path-provisioner",
+    "local_path_repo": "https://github.com/rancher/local-path-provisioner.git",
+    "storage_class": "platform-local"
+  },
   "kubernetes": {
     "comment": "Fixed in ADR-0007, before kubeadm ran. Changing either CIDR later means rebuilding the cluster, so they live here where the kubeadm config, the Cilium values and the Ansible roles all read the same number. Neither may overlap the node network above.",
     "pod_cidr": "10.244.0.0/16",
