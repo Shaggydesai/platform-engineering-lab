@@ -152,6 +152,50 @@ onprem-down: ## Destroy the on-prem cluster (keeps the VMs)
 
 # ---------------------------------------------------------------- gitops
 
+.PHONY: shopverse-secret
+shopverse-secret: ## Create ShopVerse's credentials IN-CLUSTER (never in Git) - safe to re-run
+	@set -eu; \
+	ns=$$(yq -r '.spec.destination.namespace' gitops/clusters/onprem/apps/shopverse.yaml); \
+	name=$$(yq -r '.secrets.existingSecret' gitops/environments/onprem/shopverse.yaml); \
+	kubectl get namespace "$$ns" >/dev/null 2>&1 || kubectl create namespace "$$ns"; \
+	if kubectl -n "$$ns" get secret "$$name" >/dev/null 2>&1; then \
+	  printf '%s already exists in %s - nothing done.\n\n' "$$name" "$$ns"; \
+	  printf 'NOT regenerated on purpose. mongo-password initialises the MongoDB root user on\n'; \
+	  printf 'the volume FIRST BOOT ONLY. Replacing it later leaves the database expecting the\n'; \
+	  printf 'old one, and every service fails to authenticate against a Mongo that is running\n'; \
+	  printf 'and healthy - which reads like a connection-string bug for about an hour.\n\n'; \
+	  printf 'To rotate deliberately, the volume goes too:\n'; \
+	  printf '  kubectl -n %s delete secret %s\n' "$$ns" "$$name"; \
+	  printf '  kubectl -n %s delete statefulset shopverse-mongodb\n' "$$ns"; \
+	  printf '  kubectl -n %s delete pvc -l app.kubernetes.io/component=mongodb\n' "$$ns"; \
+	  printf '  make shopverse-secret\n'; \
+	  exit 0; \
+	fi; \
+	gen() { openssl rand -hex 24; }; \
+	kubectl -n "$$ns" create secret generic "$$name" \
+	  --from-literal=jwt-secret="$$(gen)" \
+	  --from-literal=internal-token="$$(gen)" \
+	  --from-literal=admin-email=admin@shopverse.local \
+	  --from-literal=admin-password="$$(gen)" \
+	  --from-literal=mongo-username=shopverse \
+	  --from-literal=mongo-password="$$(gen)" >/dev/null; \
+	printf 'created %s in %s\n\n' "$$name" "$$ns"; \
+	printf 'Six random values, hex so they are URL-safe (mongo-password is embedded in a\n'; \
+	printf 'connection string). They exist in this cluster and nowhere else: not in Git, not in\n'; \
+	printf 'this terminal, not in any file. Read the admin login back with:\n'; \
+	printf '  make shopverse-admin\n\n'; \
+	printf 'This is Module 07 work done the cheap way on purpose (ADR-0016). A hand-made Secret\n'; \
+	printf 'is a deliberate exception to ADR-0002 Rule 3, and the exception is that it cannot be\n'; \
+	printf 'in Git. External Secrets replaces it; the chart already supports that path.\n'
+
+.PHONY: shopverse-admin
+shopverse-admin: ## Show ShopVerse's admin login (from the Secret, never from Git)
+	@set -eu; \
+	ns=$$(yq -r '.spec.destination.namespace' gitops/clusters/onprem/apps/shopverse.yaml); \
+	name=$$(yq -r '.secrets.existingSecret' gitops/environments/onprem/shopverse.yaml); \
+	printf 'email:    %s\n' "$$(kubectl -n "$$ns" get secret "$$name" -o jsonpath='{.data.admin-email}' | base64 -d)"; \
+	printf 'password: %s\n' "$$(kubectl -n "$$ns" get secret "$$name" -o jsonpath='{.data.admin-password}' | base64 -d)"
+
 .PHONY: argocd-password
 argocd-password: ## Show the Argo CD admin password (from the Secret, never from Git)
 	@kubectl -n argocd get secret argocd-initial-admin-secret \

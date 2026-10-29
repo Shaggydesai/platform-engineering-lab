@@ -1,0 +1,62 @@
+# ShopVerse, the platform's first tenant.
+#
+# The chart comes from the APPLICATION's repository, not from this one. The platform does not
+# vendor its tenant's code: ShopVerse owns its Helm chart, this repository owns where it runs and
+# with what settings (ADR-0016). Same git-source mechanism as local-path-provisioner, for a
+# different reason - there the chart had no Helm repo, here it has no business being here.
+#
+# Pinned to a COMMIT, not a tag, because the repository has no tags. That is strictly stronger
+# than the local-path pin: a commit cannot be moved, so there is no re-tag to detect.
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: shopverse
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  # THE TENANTS PROJECT, used here for the first time. It restricts destinations to
+  # `shopverse-*`, forbids every cluster-scoped resource, and forbids ResourceQuota,
+  # LimitRange and NetworkPolicy even inside the tenant's own namespace.
+  #
+  # That last one is why networkPolicy.enabled is false in the overlay: the chart ships
+  # NetworkPolicies and the tenant is not allowed to create them. The platform will supply them
+  # instead - a tenant that writes its own network policy can write one that opens itself up.
+  project: tenants
+
+  sources:
+    - repoURL: https://github.com/Shaggydesai/microservice-app.git
+      targetRevision: d3cfecb3aeb14a9d2db167fec24ae9cb100a2703
+      path: helm/shopverse
+      helm:
+        valueFiles:
+          - $values/gitops/environments/onprem/shopverse.yaml
+
+    - repoURL: https://github.com/Shaggydesai/platform-engineering-lab.git
+      targetRevision: main
+      ref: values
+
+  destination:
+    server: https://kubernetes.default.svc
+    # Must match the tenants project's `shopverse-*` pattern. It does, and that is worth
+    # checking rather than assuming - a destination outside the pattern is rejected with the
+    # same Unknown/Unknown that the storage Application produced when its repo was not listed.
+    namespace: shopverse-prod
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      # MongoDB has to be Running before the services that connect to it settle, and the chart
+      # has no sync waves. So the first sync legitimately churns: services crash-loop until
+      # Mongo accepts connections, and Argo CD retries. More patience than the platform
+      # components need.
+      limit: 10
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 5m

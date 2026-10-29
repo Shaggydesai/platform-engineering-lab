@@ -1,0 +1,86 @@
+# ShopVerse, on-prem. Everything here is a disagreement with the chart's defaults, and every one
+# of them has a reason in this cluster rather than a preference (ADR-0016).
+
+global:
+  # TODO PIN THIS. `latest` is a moving reference and this repository pins everything else by
+  # version or digest - the Gateway API bundle by SHA-256, Cilium and Argo CD by chart version,
+  # local-path by tag plus recorded commit, the chart above by commit.
+  #
+  # It is `latest` only because the available tags in ghcr.io/shaggydesai/microservice-app could
+  # not be listed from where this file was written. Parked with the command to list them.
+  imageTag: latest
+
+# ---------------------------------------------------------------- ingress
+#
+# OFF, and not because ingress is unwanted - because this cluster has no Ingress controller at
+# all. There is no nginx here; ingress is Gateway API served by Cilium (ADR-0013/0014), and an
+# Ingress object would be created, accepted, and silently serve nothing.
+#
+# The route arrives separately as an HTTPRoute. Note what that means for the tenant: it cannot
+# give itself a hostname. The Gateway and its listeners are platform-owned, so a name on it is
+# something the platform grants.
+ingress:
+  enabled: false
+
+# ---------------------------------------------------------------- secrets
+#
+# The chart's default is `secrets.create: true` with `change-me-jwt-secret` and `admin123` in
+# values.yaml. That is correct for a demo and wrong here for one specific reason: those values
+# would be in Git, and ADR-0003's sibling rule - no secrets in Git in plaintext - has held for
+# five modules.
+#
+# So the Secret is created OUT of band by `make shopverse-secret`, which generates random values
+# and applies them, and this chart consumes it by name. Keys: jwt-secret, internal-token,
+# admin-email, admin-password, mongo-username, mongo-password.
+#
+# THIS IS A DELIBERATE, TIME-BOXED EXCEPTION to "nothing in this cluster is installed by hand"
+# (ADR-0002 Rule 3), and it is the honest shape of the problem rather than a shortcut: Module 07
+# is where secrets get solved properly, and the chart already supports External Secrets for
+# exactly that. Until then the credential exists in the cluster and nowhere else - not in Git,
+# not in a terminal history, not in this file.
+secrets:
+  create: false
+  existingSecret: shopverse-credentials
+
+# ---------------------------------------------------------------- network policy
+#
+# OFF because the tenants AppProject forbids a tenant from creating NetworkPolicy objects, by
+# design: a tenant that writes its own network policy can write one that opens itself up.
+#
+# Also, the chart's policy would be wrong here even if permitted. It allows ingress from a
+# namespace labelled `ingress-nginx`; traffic to these pods will arrive from Cilium's Envoy,
+# which is not that. Getting the real selector right needs the traffic to exist first, so the
+# platform-side policies come after the app is running and are verified by breaking them.
+networkPolicy:
+  enabled: false
+
+# ---------------------------------------------------------------- storage
+#
+# storageClass left empty on purpose, so the PVC takes the cluster's DEFAULT class. That is
+# `platform-local` (ADR-0015), and letting the default apply is the whole reason it is marked
+# default - a chart that names a class has the platform's implementation baked into it.
+#
+# 5Gi of a 35Gi worker disk, node-local. ADR-0015's warning applies in full: lose that node and
+# this data is gone. For a storefront demo that is acceptable and should stay uncomfortable.
+mongodb:
+  enabled: true
+  persistence:
+    enabled: true
+    size: 5Gi
+    storageClass: ""
+
+# ---------------------------------------------------------------- not yet
+#
+# Observability arrives in Module 10. These are already false in the chart's defaults; they are
+# restated so that enabling them is a visible edit here rather than a surprise when Prometheus
+# appears and starts selecting objects that were quietly already present.
+monitoring:
+  serviceMonitor:
+    enabled: false
+  prometheusRule:
+    enabled: false
+  dashboards:
+    enabled: false
+
+profiling:
+  enabled: false

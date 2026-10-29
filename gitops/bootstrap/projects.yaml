@@ -60,7 +60,12 @@ spec:
     is cheaper than discovering it is false later.
 
   sourceRepos:
+    # This repository, for the per-environment values overlay that the tenant Application
+    # layers on top of the chart.
     - https://github.com/Shaggydesai/platform-engineering-lab.git
+    # ShopVerse itself. The chart lives with the application, not here - the platform does not
+    # vendor its tenant's code (ADR-0016). Pinned to a commit in the Application.
+    - https://github.com/Shaggydesai/microservice-app.git
 
   destinations:
     - server: https://kubernetes.default.svc

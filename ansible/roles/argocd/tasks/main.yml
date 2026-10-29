@@ -155,6 +155,9 @@
   loop:
     - projects.yaml
     - root-onprem.yaml
+    # Added by ADR-0016. The seam is three objects now, and the ORDER still matters: an
+    # Application referencing a missing project is rejected, so projects.yaml stays first.
+    - root-tenants-onprem.yaml
   register: argocd_seam_diff
   changed_when: false
   # 0 = identical, 1 = differs. Anything else is a real error, and without this a broken

@@ -1,0 +1,49 @@
+# The root Application for TENANT workloads. ANSIBLE APPLIES THIS FILE - it is part of the seam
+# (ADR-0009, amended by ADR-0016).
+#
+# Why a second root rather than another file under the platform one: the platform root reads
+# gitops/clusters/onprem/platform/ with recursion off (ADR-0002 Rule 4), so there is no way to
+# add a sibling directory to it. A tenant workload is not a platform component and should not
+# share a directory with one.
+#
+# NOTE THE PROJECT. This Application is in `platform`, not `tenants`, and that is not a mistake:
+# it creates Application OBJECTS in the argocd namespace, and the tenants project is restricted
+# to `shopverse-*` destinations precisely so a tenant cannot write there. A tenants-project root
+# could not create the very Applications it exists to create.
+#
+# The Applications it creates are in `tenants`. So the boundary sits one level down, where it
+# belongs: this object is platform-owned plumbing, and what it deploys is tenant-owned.
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: tenants-onprem
+  namespace: argocd
+spec:
+  project: platform
+
+  source:
+    repoURL: https://github.com/Shaggydesai/platform-engineering-lab.git
+    targetRevision: main
+    path: gitops/clusters/onprem/apps
+    directory:
+      # Non-recursive, same reasoning as the platform root. `recurse` is ABSENT rather than
+      # written as false - stating that default explicitly caused a permanent phantom diff on
+      # the other root Application, which cost two parking-lot entries before the saved diff
+      # showed it was a line of ours. See gitops/bootstrap/root-onprem.yaml.
+      include: '*.yaml'
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
