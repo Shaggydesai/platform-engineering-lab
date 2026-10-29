@@ -168,3 +168,32 @@ Argo CD cannot own the object that defines what Argo CD may do. So this change n
 `make onprem-up TAGS=argocd` and will not arrive from a `git push` alone — which is the one case
 where "nothing in this cluster is installed by hand" has a genuine exception, and the reason the
 exception exists.
+
+## What the render showed, 2026-10-29
+
+`make gitops-render CHART=local-path` fetched `v0.0.37`, confirmed it resolves to
+`49b2be8e26d6…`, and rendered. The StorageClass arrived as intended:
+
+```
+NAME                       PROVISIONER                                       RECLAIMPOLICY   VOLUMEBINDINGMODE
+platform-local (default)   cluster.local/local-path-local-path-provisioner   Delete          WaitForFirstConsumer
+```
+
+Three things in the rendered output that were not visible before, and would not have been
+guessable:
+
+**The node path is `/opt/local-path-provisioner`**, from the chart's default `nodePathMap`, now
+confirmed rather than assumed. ADR section 6 said this value was left alone because the chart
+could not be rendered where these files were written; it can be rendered now, so moving it is
+available as a decision. Leaving it is also fine — the point was never the path.
+
+**The setup script is `mkdir -m 0777 -p "$VOL_DIR"`.** Every provisioned volume directory is
+world-writable on the node. That is upstream's choice and it is what lets a container running as
+an arbitrary non-root UID write to its own volume without an fsGroup dance. It also means any
+process on that node can read and write any volume's contents. On a single-tenant lab this is
+acceptable; it is worth knowing before a tenant workload is given a PVC, because it is a property
+of the provisioner and not something a PodSecurity setting fixes.
+
+**`ALLOWVOLUMEEXPANSION` is `true`.** For a hostPath-backed directory there is nothing to expand —
+the volume is a folder on a filesystem whose size it does not control. Treat a successful PVC
+resize here as meaningless rather than as working, and do not build anything that relies on it.

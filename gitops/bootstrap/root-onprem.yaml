@@ -26,12 +26,25 @@ spec:
     targetRevision: main
     path: gitops/clusters/onprem/platform
     directory:
-      # recurse: false is the line that makes ADR-0002 Rule 4 structural rather than a
-      # convention. With recurse: true over a wider path, Argo CD would also walk
-      # gitops/charts/ and manage those templates directly - the same objects the child
-      # Applications manage, two owners each. Both Applications then report Synced while
-      # fighting over fields, which is the hardest class of GitOps bug to see.
-      recurse: false
+      # NON-RECURSION IS WHAT MAKES ADR-0002 Rule 4 structural rather than a convention. With
+      # recursion over a wider path, Argo CD would also walk gitops/charts/ and manage those
+      # templates directly - the same objects the child Applications manage, two owners each.
+      # Both Applications then report Synced while fighting over fields, which is the hardest
+      # class of GitOps bug to see.
+      #
+      # So the important thing about `recurse` is that it must stay OFF. It is absent here
+      # rather than written as `recurse: false`, and that is a deliberate correction:
+      #
+      # false is the field's default, and the Application CRD omits it on persist. So the live
+      # object can NEVER contain it, `kubectl diff` reported the line as an addition on every
+      # run, and `argocd : Apply the seam` re-applied a no-op forever. Two sightings went into
+      # docs/parking-lot.md as an unexplained drift before the role was taught to save the diff
+      # - and the first time it did, the answer was one line of my own file asserting a value
+      # the API server is required to discard.
+      #
+      # The lesson generalises past this field: stating a default explicitly is free in most
+      # config systems and is NOT free in a Kubernetes object you also diff against. Document
+      # the default in a comment; do not write it into the spec.
       include: '*.yaml'
 
   destination:

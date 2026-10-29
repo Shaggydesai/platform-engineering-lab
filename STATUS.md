@@ -180,12 +180,14 @@ Keep this short. One line per session: what you did, what broke, what is next.
 - `make hosts` reconciles stale SSH host keys after a VM rebuild, so the man-in-the-middle
   warning means something again.
 
-## Open, not yet understood
+## Answered
 
-**The Argo CD seam applied itself once without a reason.** On 2026-10-26 the
-`argocd : Apply the seam` task reported `changed` for `root-onprem.yaml` with nothing in Git
-having touched that file. It has not reproduced — the next two runs skipped the apply with both
-diffs returning 0. The `kubectl diff --server-side` gate in front of it is supposed to make
-that impossible, so either the gate has a hole or the live object genuinely differed for a
-moment. Harmless when it happens (the apply is a no-op), but it makes `changed=0` less
-trustworthy than it looks. **Watch for it; do not invent a mechanism.**
+**The Argo CD seam's phantom re-apply is solved** (2026-10-29). `root-onprem.yaml` stated
+`directory.recurse: false`, which is the field's default and is dropped on persist - so the live
+object could never contain it and `kubectl diff` flagged it forever. The line is gone, the
+reasoning is now a comment, and `docs/parking-lot.md` records the general form: do not write a
+default into a spec you also diff against.
+
+The diff-capture task added to the `argocd` role answered it on its first real run. Two sightings
+had produced a parking-lot entry and no knowledge; one saved diff produced the cause.
+
