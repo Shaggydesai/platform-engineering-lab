@@ -180,14 +180,19 @@ Keep this short. One line per session: what you did, what broke, what is next.
 - `make hosts` reconciles stale SSH host keys after a VM rebuild, so the man-in-the-middle
   warning means something again.
 
-## Answered
+## Answered, partly
 
-**The Argo CD seam's phantom re-apply is solved** (2026-10-29). `root-onprem.yaml` stated
-`directory.recurse: false`, which is the field's default and is dropped on persist - so the live
-object could never contain it and `kubectl diff` flagged it forever. The line is gone, the
-reasoning is now a comment, and `docs/parking-lot.md` records the general form: do not write a
-default into a spec you also diff against.
+**The Argo CD seam's phantom re-apply is fixed** (2026-10-29). `root-onprem.yaml` stated
+`directory.recurse: false`; the saved diff showed the live object missing that field while our
+manifest had it. The line is removed and the oscillation stops.
 
-The diff-capture task added to the `argocd` role answered it on its first real run. Two sightings
-had produced a parking-lot entry and no knowledge; one saved diff produced the cause.
+**The mechanism is not established.** My first explanation — that the API server could never
+store the field — was disproved by the very next run, which found it present in the live object
+and removed it. Something drops it between applies; an omitempty round-trip is a suspect, not a
+finding. Not chased further because the fix does not depend on it.
+
+One real cost, recorded in `docs/parking-lot.md`: non-recursion now relies on `false` staying
+Argo CD's default, so re-check that on any Argo CD upgrade.
+
+The diff-capture task in the `argocd` role found this on its first real run. Two sightingshad produced a parking-lot entry and no knowledge; one saved diff produced the cause.
 

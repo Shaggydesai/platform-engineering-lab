@@ -197,3 +197,41 @@ of the provisioner and not something a PodSecurity setting fixes.
 **`ALLOWVOLUMEEXPANSION` is `true`.** For a hostPath-backed directory there is nothing to expand —
 the volume is a folder on a filesystem whose size it does not control. Treat a successful PVC
 resize here as meaningless rather than as working, and do not build anything that relies on it.
+
+## Verified, 2026-10-29
+
+```
+$ kubectl -n pvc-test get pvc t
+t      Pending                      platform-local
+  Normal  WaitForFirstConsumer  waiting for first consumer to be created before binding
+
+$ kubectl -n pvc-test get pvc,pod -o wide        # after creating a pod that mounts it
+t      Bound   pvc-3d81f8dd-…   1Gi   RWO   platform-local
+pod/w  1/1     Running                             k8s-w01
+
+$ kubectl -n pvc-test exec w -- sh -c 'echo hello > /data/f && cat /data/f'
+hello
+
+$ kubectl get pv -o custom-columns=PV:…,NODE:…,PATH:…
+pvc-3d81f8dd-…   k8s-w01   /opt/local-path-provisioner/pvc-3d81f8dd-…_pvc-test_t
+```
+
+Four claims in this ADR were tested rather than asserted:
+
+**The default class works.** The PVC named no `storageClassName` and was assigned
+`platform-local` — which is the entire reason section 5 makes it the default, and what lets a
+stock chart with `persistence.enabled` work here untouched.
+
+**`WaitForFirstConsumer` behaves as section 3 describes.** The claim sat `Pending` with that
+exact event for 49 seconds and bound only once a pod existed to be scheduled. `Pending` there is
+the correct state, not a fault — which is worth knowing because it looks identical to a broken
+provisioner for as long as nobody creates a consumer.
+
+**The volume is node-local, concretely.** The PV's node affinity names `k8s-w01` and its path
+names one directory on that node's disk. Nothing about this volume exists anywhere else. The
+"what this cluster now cannot do" section above is not a caveat about the technology in general;
+it is a property of this exact PV.
+
+**The path confirms the chart default**, `/opt/local-path-provisioner/<pv>_<namespace>_<claim>`.
+The naming is useful: a directory found on a node can be traced back to the claim that made it,
+which matters when cleaning up after a cluster that was rebuilt without draining.
