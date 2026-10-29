@@ -5,7 +5,7 @@
 > not stall like the last one.
 
 **Last updated:** 2026-10-27
-**Current module:** 06 — ShopVerse runs (stage 1 written: the app, not yet the route)
+**Current module:** 06 — ShopVerse runs (serving and gated; browser + image pin remain)
 **Overall progress:** Modules 00–05 complete — 6 / 13
 
 ---
@@ -29,7 +29,8 @@
 | **Argo CD** | **running** — chart 10.11.0 / Argo CD v3.5.5, root app Synced, self-heal verified |
 | **Platform components** | metrics-server 3.14.0, cert-manager v1.21.3 + internal PKI — both Synced/Healthy |
 | **Internal CA** | `platform-ca` ClusterIssuer, Ready. Root valid to **2036-10-21**, key in `cert-manager/platform-ca-tls` |
-| **ShopVerse running** | **not yet** — Application written, pinned to app commit `d3cfecb`, awaiting `make shopverse-secret` then its first sync (ADR-0016) |
+| **ShopVerse running** | **yes** — `https://shopverse.platform.local`, 8 pods, 20 seeded products, MongoDB on a 5Gi `platform-local` volume |
+| **ShopVerse gate** | `make shopverse-check` passes: register → cart → checkout → delete MongoDB → order survives, same PV |
 | **Monthly spend** | ₹0 |
 
 To bring the nodes back after a reboot or a `wsl --shutdown`:

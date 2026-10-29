@@ -137,3 +137,56 @@ session it is first confirmed working.
   `make argocd-password` does, so the value never needs to be printed at creation time.
 - Nothing is verified. This ADR is written before the first sync, and the sections above will be
   wrong in at least one place.
+
+---
+
+## Verified, 2026-10-29
+
+`make shopverse-check` against `https://shopverse.platform.local`:
+
+```
+1/7  GET /                     -> 200     (CA verifies; no -k anywhere)
+2/7  GET /api/products         -> 200     20 products; "Atomic Habits"
+3/7  POST /api/users/register  -> 201     token issued
+4/7  POST /api/cart/items      -> 201     1 line
+5/7  POST /api/orders          -> 201     SV794262878409, total 439
+6/7  delete shopverse-mongodb-0          back Ready on k8s-w01 (was k8s-w01)
+                                          same PersistentVolume: pvc-3a7105d5-…
+7/7  GET /api/orders/SV794262878409      attempt 1: 502 … 2: 502 … 3: 502 … then 200
+```
+
+Most of this ADR survived contact. Three things it got right that were not obvious, and one new
+finding that matters more than any of them.
+
+**The tenant fits inside its box.** Eight pods, a StatefulSet, a Secret, Services and a
+ServiceAccount, all created under a project that forbids every cluster-scoped resource. Section 4
+predicted this; it is now a fact.
+
+**The default StorageClass was taken by not naming one**, and the volume survived the pod being
+deleted — same PV, same node, which is what node-local means (ADR-0015). The script asserts the
+PV is unchanged rather than only that the order is readable, because "the order is still there"
+would also be true of a pod that returned with an empty volume and an order recreated by
+something else.
+
+**The route points at the frontend and that was sufficient**, as section 5 argued: `/api/products`
+traverses nginx → api-gateway → product-service → MongoDB on one route, and the checkout call
+alone crossed five of the seven services.
+
+### The nine-second window
+
+Steps 7's three `502`s are a measured property of this platform, not noise.
+
+After MongoDB's pod is deleted, the **services report healthy while being unable to serve**. The
+api-gateway returns 502 for roughly nine seconds — three retries at three-second intervals — and
+during that window a real customer gets an error page, not a slow response.
+
+MongoDB itself came back in seconds; the delay is the Node.js services re-establishing their
+connections. Their readiness probes pass throughout, because they answer `/readyz` from the
+process rather than from the database. So Kubernetes keeps sending traffic to pods that cannot
+complete a request, which is correct behaviour given what it was told and the wrong outcome.
+
+This is squarely **Module 11 (Resilience)** material and it is the application's concern rather
+than the platform's, so nothing here changes. But the number is now measured rather than
+imagined, and it belongs next to ADR-0013's ~15 seconds of ingress failover: losing a node costs
+about 15 seconds of ingress, and losing the database pod costs about nine seconds of 502s. Both
+were invisible until something deliberately broke them.
