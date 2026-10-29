@@ -24,7 +24,8 @@
     "gateway_hostnames_comment": "Every name that must resolve to the Gateway from this workstation. There is no DNS on this network, so each one needs an /etc/hosts line even though the certificate covers them all - `make hosts` writes them.",
     "gateway_hostnames": [
       "gw.platform.local",
-      "argocd.platform.local"
+      "argocd.platform.local",
+      "shopverse.platform.local"
     ]
   },
   "storage": {

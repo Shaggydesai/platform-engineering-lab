@@ -34,11 +34,35 @@ gateway:
 routes:
   # One entry per application that gets a name on this Gateway. Each renders an HTTPRoute into
   # the APPLICATION's namespace, beside its backend - see the template for why that matters.
+  #
+  # `namespace` is required and has no default: a wrong guess puts a route where no backend is,
+  # which resolves to a 500 at request time rather than to an error anyone is watching.
+  #
+  # `routeName` is optional and defaults to the key. It exists only so the Argo CD route can
+  # keep the name it already had when this moved from one-template-per-app to a loop; renaming a
+  # live HTTPRoute means Argo CD prunes and recreates it, which is a brief outage for no reason.
   argocd:
     enabled: false
     hostname: ""
+    namespace: argocd
+    routeName: argocd-server
     serviceName: argocd-server
     servicePort: 80
+    gatewayName: platform
+    gatewayNamespace: platform-ingress
+
+  shopverse:
+    enabled: false
+    hostname: ""
+    namespace: ""
+    # The FRONTEND, not the api-gateway. The frontend's nginx proxies /api/ to the gateway by
+    # its in-cluster name, which the chart wires up itself - so one route is enough and a second
+    # one for /api would be a second answer to the same question.
+    serviceName: shopverse-frontend
+    # 8080, not 80. Every service in that chart is on 8080, hardcoded in its template rather
+    # than taken from values - which is why `port-forward svc/shopverse-frontend 8081:80` fails
+    # with "does not have a service port 80".
+    servicePort: 8080
     gatewayName: platform
     gatewayNamespace: platform-ingress
 

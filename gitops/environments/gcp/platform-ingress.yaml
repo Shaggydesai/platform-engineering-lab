@@ -23,3 +23,5 @@ certificate:
 routes:
   argocd:
     enabled: false
+  shopverse:
+    enabled: false

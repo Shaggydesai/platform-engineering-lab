@@ -30,5 +30,13 @@ routes:
     enabled: true
     hostname: "argocd.platform.local"
 
+  shopverse:
+    enabled: true
+    hostname: "shopverse.platform.local"
+    # Must match the Application's destination namespace in
+    # gitops/clusters/onprem/apps/shopverse.yaml, which the tenants AppProject constrains to
+    # shopverse-*.
+    namespace: "shopverse-prod"
+
 certificate:
   enabled: true

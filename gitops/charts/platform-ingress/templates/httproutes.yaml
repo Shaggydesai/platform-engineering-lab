@@ -1,0 +1,55 @@
+{{- range $name, $r := .Values.routes }}
+{{- if $r.enabled }}
+{{- if not $r.hostname }}{{ fail (printf "routes.%s.enabled is true but hostname is empty" $name) }}{{ end }}
+{{- if not $r.namespace }}{{ fail (printf "routes.%s.enabled is true but namespace is empty - the route must live beside its backend" $name) }}{{ end }}
+---
+# A name on the platform Gateway for {{ $name }}.
+#
+# One template for every route, rather than one template per application. The first version of
+# this was httproute-argocd.yaml with the namespace written into it, which would have meant a
+# near-identical file per tenant - and the second copy is where they start to drift.
+#
+# Two things about where this object lands, both deliberate (ADR-0014).
+#
+# It is in the APPLICATION's namespace, not this chart's. A backendRef that crosses namespaces
+# needs a ReferenceGrant in the target namespace; a route beside its backend does not. It is also
+# where the ownership boundary is - except for who may ASK, which is the point below.
+#
+# Its parentRef crosses namespaces, pointing at the Gateway in {{ $r.gatewayNamespace }}. That is
+# allowed because the Gateway's listeners say allowedRoutes.namespaces.from: All. These are two
+# different permissions:
+#
+#   allowedRoutes (on the Gateway)              - who may ATTACH a route to this listener.
+#   ReferenceGrant (in the backend's namespace) - who may POINT AT a backend there.
+#
+# NOTE FOR TENANTS: this file is in the PLATFORM chart, so a tenant cannot give itself a
+# hostname even though the object ends up in the tenant's namespace. The Gateway and its
+# listeners are platform-owned; a name on them is granted, not taken (ADR-0016).
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ default $name $r.routeName }}
+  namespace: {{ $r.namespace }}
+  annotations:
+    # After the Gateway in wave 1. A route attached to a Gateway that does not exist yet is
+    # accepted and sits at Accepted=False with reason NoMatchingParent, recovers on the next
+    # sync, and teaches nothing.
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  parentRefs:
+    - name: {{ $r.gatewayName | quote }}
+      namespace: {{ $r.gatewayNamespace | quote }}
+      # Pin the listener by name. Without sectionName the route attaches to EVERY compatible
+      # listener, which includes plain HTTP on port 80 - serving the application unencrypted on
+      # the same address with no error anywhere. Verified by curling port 80 and getting 404.
+      sectionName: https
+
+  hostnames:
+    - {{ $r.hostname | quote }}
+
+  rules:
+    - backendRefs:
+        - name: {{ $r.serviceName | quote }}
+          port: {{ $r.servicePort }}
+{{- end }}
+{{- end }}
