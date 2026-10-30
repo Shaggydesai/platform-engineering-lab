@@ -75,8 +75,12 @@ ESO_NS=$(q '.spec.provider.vault.auth.kubernetes.serviceAccountRef.namespace')
 # one that checks whether ESO can even mint its own token - never ran. The most informative
 # checks were gated behind the symptom they explain, so the script reported the failure and
 # withheld the diagnosis. On the first real run that cost exactly what it sounds like it cost.
-ready=$(printf '%s' "$store" | jq -r '.status.conditions[]? | select(.type=="Ready") | .status' | head -1)
-rmsg=$(printf '%s' "$store" | jq -r '.status.conditions[]? | select(.type=="Ready") | .message' | head -1)
+store_ready() {
+  store=$(kubectl get clustersecretstore "$STORE_NAME" -o json 2>/dev/null)
+  ready=$(printf '%s' "$store" | jq -r '.status.conditions[]? | select(.type=="Ready") | .status' | head -1)
+  rmsg=$(printf '%s' "$store" | jq -r '.status.conditions[]? | select(.type=="Ready") | .message' | head -1)
+}
+store_ready
 case "$ready" in
   True) ok "ClusterSecretStore/$STORE_NAME is Ready" ;;
   "")   warn "ClusterSecretStore/$STORE_NAME has no Ready condition yet - the operator may not have looked at it" ;;
@@ -112,17 +116,25 @@ FINDINGS=()
 # With a ClusterSecretStore naming a serviceAccountRef, ESO calls the TokenRequest API for that
 # service account. No permission, no token, no Vault client - and the store's condition says
 # "unable to create client", which names neither RBAC nor Kubernetes.
-if kubectl auth can-i create serviceaccounts/token -n "$ESO_NS" \
-     --as="system:serviceaccount:$ESO_NS:$ESO_SA" >/dev/null 2>&1; then
-  ok "$ESO_NS/$ESO_SA can mint a token for itself (TokenRequest)"
-else
-  bad "$ESO_NS/$ESO_SA CANNOT create serviceaccounts/token"
-  FINDINGS+=("ESO cannot mint its own service account token, so it cannot build a Vault client.
-      The store names serviceAccountRef $ESO_NS/$ESO_SA, which requires the TokenRequest API.
+# `--subresource=token`, NOT `serviceaccounts/token` - see the long note in vault-bootstrap.sh.
+# `auth can-i` reads `resource/name` as a resource plus a resource NAME, so the slash form asks
+# whether you may create a ServiceAccount *called* token, answers no, and looks like a finding
+# about TokenRequest. It cost an hour and a wrong hypothesis on the first real run.
+#
+# Three outcomes, because a check that cannot tell must not say "no".
+sa_token_check=$(kubectl auth can-i create serviceaccounts --subresource=token -n "$ESO_NS" \
+                 --as="system:serviceaccount:$ESO_NS:$ESO_SA" 2>&1)
+case "$sa_token_check" in
+  yes*) ok "$ESO_NS/$ESO_SA can mint a token for itself (TokenRequest)" ;;
+  no*)  bad "$ESO_NS/$ESO_SA CANNOT create serviceaccounts/token"
+        FINDINGS+=("ESO cannot mint its own service account token, so it cannot build a Vault
+      client. The store names serviceAccountRef $ESO_NS/$ESO_SA, which requires TokenRequest.
       What is actually granted:
         kubectl get clusterrole -o json | jq -r '.items[]
-          | select(.rules[]?.resources[]? == \"serviceaccounts/token\") | .metadata.name'")
-fi
+          | select(.rules[]?.resources[]? == \"serviceaccounts/token\") | .metadata.name'") ;;
+  *)    warn 'could not determine whether ESO can mint its own token - reporting UNKNOWN, not no'
+        printf '      %s%s%s\n' "$c_dim" "${sa_token_check%%$'\n'*}" "$c_off" ;;
+esac
 
 ctrl=$(kubectl -n "$ESO_NS" get pods -o json 2>/dev/null \
        | jq -r --arg sa "$ESO_SA" '.items[]
@@ -157,6 +169,34 @@ fi
 # ---------------------------------------------------------------- 1b  now judge the store
 # The probe below cannot mean anything against a store ESO has rejected, so this is where the run
 # stops - AFTER the diagnostics rather than before them.
+#
+# But NOT-READY-RIGHT-NOW IS NOT A VERDICT, and the first real run proved that the hard way.
+# `make vault-bootstrap` had just created the Vault role; ESO had been failing to log in before
+# it existed and was sitting in exponential backoff - its own log showed retries at 1s, 4s, 8s,
+# 16s, 32s. This script read the condition during that gap, declared the store broken, and sent
+# the next hour after a cause that did not exist. The store turned Ready on its own a minute
+# later, with no change to anything.
+#
+# So: wait. A transient state read once is an observation, not a result.
+if [[ "$ready" != "True" ]]; then
+  echo
+  step 'waiting for ESO to re-validate the store'
+  printf '    %sESO retries a failed store with exponential backoff, so a store fixed seconds ago\n' "$c_dim"
+  printf '    is still reported broken until the next attempt. Up to 150s.%s\n' "$c_off"
+  waited=0
+  for _ in $(seq 1 30); do
+    sleep 5; waited=$((waited + 5))
+    store_ready
+    [[ "$ready" == "True" ]] && break
+    (( waited % 30 == 0 )) && same "${waited}s: Ready=${ready:-<none>} ${rmsg}"
+  done
+  if [[ "$ready" == "True" ]]; then
+    ok "became Ready after ~${waited}s - the earlier state was backoff, not a fault"
+  else
+    bad "still not Ready after ${waited}s: $rmsg"
+  fi
+fi
+
 if [[ "$ready" != "True" ]]; then
   echo
   bad "ClusterSecretStore/$STORE_NAME is not Ready, so the probe would prove nothing."
@@ -170,6 +210,11 @@ if [[ "$ready" != "True" ]]; then
     printf '    make vault-bootstrap     re-runs clean and says what was missing\n'
     printf '    make vault-status        a sealed Vault refuses every request\n\n'
   fi
+  printf '%s  Read the logs by TIME, not by presence.%s A 403 from before the last\n' "$c_warn" "$c_off"
+  printf '  `make vault-bootstrap` is history, not evidence - compare the error timestamps against\n'
+  printf '  the store'"'"'s lastTransitionTime before concluding anything from them.\n\n'
+  printf '  To reset the backoff rather than wait it out:\n'
+  printf '    kubectl -n %s rollout restart deploy/external-secrets\n\n' "$ESO_NS"
   die "ESO's own logs name the reason it could not build a client:
   kubectl -n $ESO_NS logs deploy/external-secrets --tail=40
   kubectl get clustersecretstore $STORE_NAME -o jsonpath='{.status}' | jq ."

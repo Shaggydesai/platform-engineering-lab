@@ -145,16 +145,33 @@ chart's release name produced a different service account name than the overlay 
   kubectl -n $ESO_SA_NS get serviceaccount"
 ok "serviceaccount $ESO_SA_NS/$ESO_SA exists"
 
-# The other half of the chain: ESO mints a token for itself via the TokenRequest API. If it
-# cannot, it never gets as far as talking to Vault.
-if kubectl auth can-i create serviceaccounts/token -n "$ESO_SA_NS" \
-     --as="system:serviceaccount:$ESO_SA_NS:$ESO_SA" >/dev/null 2>&1; then
-  ok "$ESO_SA_NS/$ESO_SA can mint its own tokens (TokenRequest)"
-else
-  warn "$ESO_SA_NS/$ESO_SA cannot create serviceaccounts/token"
-  warn 'ESO may not be able to obtain the token it presents to Vault. Continuing - the login'
-  warn 'test at the end will say whether this actually matters.'
-fi
+# The other half of the chain: ESO mints a token for itself via the TokenRequest API.
+#
+# `--subresource=token`, NOT `serviceaccounts/token`. The first version of this check wrote
+# `kubectl auth can-i create serviceaccounts/token`, and `auth can-i` parses `resource/name` as a
+# resource and a RESOURCE NAME - so it asked "may you create a ServiceAccount called token?",
+# correctly answered no, and I read it as an answer about TokenRequest. ESO's ClusterRole grants
+# `create` on `serviceaccounts/token` with no resourceNames, so the permission was there the
+# whole time.
+#
+# A new failure shape for the collection, and a worse one than the usual: not a check that
+# confirms a request was recorded, but **a check whose "no" does not mean no**. It reported a
+# problem that did not exist and became the leading hypothesis for an unrelated failure.
+#
+# Hence three outcomes rather than two. If the answer cannot be obtained - an older kubectl with
+# no --subresource flag, no impersonation permission - that is reported as NOT KNOWN, because a
+# check that cannot tell must not say "no".
+sa_token_check=$(kubectl auth can-i create serviceaccounts --subresource=token -n "$ESO_SA_NS" \
+                 --as="system:serviceaccount:$ESO_SA_NS:$ESO_SA" 2>&1)
+case "$sa_token_check" in
+  yes*) ok "$ESO_SA_NS/$ESO_SA can mint its own tokens (TokenRequest)" ;;
+  no*)  warn "$ESO_SA_NS/$ESO_SA cannot create serviceaccounts/token (TokenRequest)"
+        warn 'ESO may not be able to obtain the token it presents to Vault. Continuing - the login'
+        warn 'test at the end will say whether this actually matters.' ;;
+  *)    warn 'could not determine whether ESO can mint its own token:'
+        printf '      %s%s%s\n' "$c_dim" "${sa_token_check%%$'\n'*}" "$c_off"
+        warn 'Treating that as UNKNOWN rather than as a denial.' ;;
+esac
 
 # ---------------------------------------------------------------- 3  KV v2 at the mount
 step "KV v2 at $KV_MOUNT/"
@@ -371,4 +388,9 @@ printf '    policy %s   read-only on %d prefix(es)\n' "$POLICY_NAME" "${#ALLOWED
 printf '    role %s     bound to %s/%s\n\n' "$ROLE" "$ESO_SA_NS" "$ESO_SA"
 printf 'This is re-runnable and reports "unchanged" when nothing moved, which is the only reason\n'
 printf 'an imperative step is acceptable here (ADR-0018 Decision 4).\n\n'
+printf '%sIf External Secrets was already running and failing%s - which it is, on a first run, because\n' "$c_warn" "$c_off"
+printf 'the role above did not exist until a moment ago - it is in exponential backoff and its\n'
+printf 'ClusterSecretStore still reports NotReady for up to a minute. That is the operator\n'
+printf 'retrying, not a fault. `make eso-check` waits for it. To reset the backoff instead:\n'
+printf '    kubectl -n %s rollout restart deploy/external-secrets\n\n' "$ESO_SA_NS"
 printf 'Next:  make eso-check    - writes a FRESH value to Vault and proves it reaches a pod\n'

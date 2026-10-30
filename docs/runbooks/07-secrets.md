@@ -127,3 +127,29 @@ Both are in `docs/parking-lot.md` with the full reasoning, and both are Module 0
 - **Vault's egress is unrestricted.** Writable, unlike the tenant's edge case, and deferred rather
   than impossible. The rules must permit DNS *and* the API server, because Kubernetes auth works
   by Vault calling TokenReview.
+
+## A failure that is not one
+
+On a first run the order is necessarily: ESO starts, fails to log in because the Vault role does
+not exist yet, and backs off. `make vault-bootstrap` then creates the role — and ESO does **not**
+notice immediately. It retries on an exponential backoff (observed: 1s, 4s, 8s, 16s, 32s), so the
+`ClusterSecretStore` keeps reporting `Ready=False: unable to create client` for up to a minute
+after everything is correct.
+
+`make eso-check` waits for that. If you are looking by hand instead:
+
+```bash
+# compare the TIMES, not the presence of errors
+kubectl get clustersecretstore vault-backend -o jsonpath='{.status.conditions[0].lastTransitionTime}'
+kubectl -n external-secrets logs deploy/external-secrets --tail=5 | jq -r '.ts'
+```
+
+An error older than the last `lastTransitionTime` is history, not evidence. Reading a controller's
+log as a current-state report is how a fixed problem gets diagnosed for an hour — it happened here
+on 2026-10-30 and is recorded in `docs/parking-lot.md`.
+
+To reset the backoff rather than wait it out:
+
+```bash
+kubectl -n external-secrets rollout restart deploy/external-secrets
+```
