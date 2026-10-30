@@ -62,7 +62,10 @@ outcome for a boundary written two modules early:
 **`networking.k8s.io/NetworkPolicy` is blacklisted inside the tenant's own namespace**, so
 `networkPolicy.enabled: false`. The chart ships policies and the tenant may not create them. That
 is deliberate — a tenant that writes its own network policy can write one that opens itself up —
-and it means the platform must supply them instead, which it does not yet.
+and it means the platform must supply them instead.
+
+**It now does — ADR-0017**, written from a graph Hubble observed rather than from the chart's
+defaults, and proven by denying a pod that differs from an allowed one by a single label.
 
 The chart's policy would also have been wrong here: it allows ingress from a namespace labelled
 `ingress-nginx`, and traffic will arrive from Cilium's Envoy, which is not that. The correct
