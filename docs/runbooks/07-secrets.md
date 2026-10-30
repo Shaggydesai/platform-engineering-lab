@@ -153,3 +153,63 @@ To reset the backoff rather than wait it out:
 ```bash
 kubectl -n external-secrets rollout restart deploy/external-secrets
 ```
+
+## Rotating a secret
+
+The roadmap's bar for this module says *"rotating one secret takes one commit"*. That bar is not
+met, and the reason is worth more than the bar: **with Vault and ESO, rotation is not a Git
+operation at all.** The value is not in Git, so there is nothing to commit. It is a Vault write.
+
+```bash
+# rotate jwt-secret. Reads the root token from .cache/, nothing is echoed.
+NEW=$(openssl rand -hex 24)
+printf '%s\n{"jwt-secret":"%s"}\n' "$(jq -r .root_token .cache/vault-init.json)" "$NEW" \
+  | kubectl -n vault exec -i vault-0 -- sh -c '
+      ALL=$(cat); VAULT_TOKEN=$(printf %s "$ALL" | head -1); export VAULT_TOKEN
+      printf %s "$ALL" | tail -n +2 | vault kv patch -mount=secret shopverse/prod -'
+unset NEW
+```
+
+`kv patch`, not `kv put` — `put` replaces the whole secret, so it would drop the other five keys.
+
+**Then two more steps, and the second one is the one people miss.**
+
+ESO re-reads Vault on the ExternalSecret's `refreshInterval`, which is **1h** here. Until then the
+Kubernetes Secret still holds the old value. To force it:
+
+```bash
+kubectl -n shopverse-prod annotate externalsecret shopverse-secrets \
+  force-sync="$(date +%s)" --overwrite
+kubectl -n shopverse-prod get secret shopverse-secrets -o jsonpath='{.data.jwt-secret}' | base64 -d | sha256sum
+```
+
+And then — **the Secret updating does not change a running pod.** The chart consumes all six
+values as `secretKeyRef` environment variables (verified in `deployments.yaml` and
+`mongodb.yaml` at the pinned commit), and env vars are resolved once, at pod creation. A mounted
+Secret volume would update in place; an env var never does. So:
+
+```bash
+kubectl -n shopverse-prod rollout restart deploy -l app.kubernetes.io/instance=shopverse
+```
+
+So the honest cost of rotating one secret is: **one Vault write, one forced refresh, and one
+rollout** — zero commits, and roughly the ~9s of 502s per service that ADR-0016 measured.
+
+### `mongo-password` is the exception, and it is a big one
+
+It cannot be rotated this way at all. MongoDB's root user was created from that value on the
+volume's **first boot only**, so changing it in Vault gives every service a password the database
+has never heard of — and MongoDB stays `Running` and `Ready` while refusing every connection.
+
+Rotating it means rotating the database with it:
+
+```bash
+# destroys every order. Read this twice.
+kubectl -n shopverse-prod delete statefulset shopverse-mongodb
+kubectl -n shopverse-prod delete pvc -l app.kubernetes.io/component=mongodb
+# write the new value to Vault, force the refresh, then let Argo CD recreate the StatefulSet
+```
+
+One of the six credentials is effectively immutable without data loss. That is a property of
+MongoDB's initialisation, not of Vault or ESO, and no secrets mechanism would change it — which is
+precisely why it is written down here rather than discovered during an incident.

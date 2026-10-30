@@ -83,28 +83,36 @@ secrets:
 # Module 07. `externalSecret.enabled: true` makes the chart create an ExternalSecret instead of
 # consuming a hand-made Secret, and External Secrets syncs the six values out of Vault.
 #
-# STILL FALSE, deliberately, and the ordering is the reason (ADR-0018 Decision 6). Flipping this
-# does two things at once:
+# TRUE as of 2026-10-30, and only after the seed was verified (ADR-0018 Decision 6). This flag
+# does three things at once, which is why it got its own commit:
 #
 #   1. the chart creates an ExternalSecret reading `remoteKey` below
 #   2. `shopverse.secretName` stops returning `shopverse-credentials` and starts returning
 #      `shopverse-secrets` - so EVERY Deployment's secretKeyRef changes
+#   3. MongoDB's StatefulSet reads mongo-username and mongo-password from that same name, so
+#      `shopverse-mongodb-0` is replaced too
 #
 # (2) is a pod template change, which means a rollout of all seven services whether or not the
 # values are identical - the same lesson as pinning the image tag above, where identical bytes
-# still replaced every pod. And if the new Secret does not exist yet, that rollout hands seven
-# pods a reference to nothing.
+# still replaced every pod.
 #
-# So: `make vault-seed-shopverse` first. It copies the six EXISTING values into Vault, verifies
-# each one by hash, and proves ESO can read them back through a throwaway ExternalSecret in
-# another namespace - all without touching the running application. Then this flips, in its own
-# commit, and `make shopverse-check` is the gate.
+# (3) IS THE ONE THAT COULD HAVE GONE BADLY, and it is worth being precise about why it did not.
+# The database pod restarts, keeps its volume (ADR-0015, node-local), and therefore keeps the root
+# user that `mongo-password` initialised on first boot. Authentication survives because the value
+# in Vault is BYTE-IDENTICAL to the one that initialised it - which is exactly what ADR-0018
+# Decision 5 is for, and exactly what `make vault-seed-shopverse` verifies by hash rather than by
+# intention. Had the migration generated fresh values, this flag is the moment it would have
+# broken, and the symptom would have been a Running, Ready MongoDB refusing every connection.
+#
+# Verified before this was flipped: all six values present in `secret/shopverse/prod`, each
+# hash-matched against the live Secret, and read back through a throwaway ExternalSecret in
+# another namespace while ShopVerse kept serving from the old one.
 #
 # `secrets.existingSecret` above stays, and `shopverse-credentials` is deliberately NOT deleted:
 # with this flag false the chart goes back to using it, so rollback is one line rather than a
 # recovery.
 externalSecret:
-  enabled: false
+  enabled: true
 
   # The Vault KV path, relative to the store's mount - so this is `secret/shopverse/prod`, read
   # as `secret/data/shopverse/prod` by the v2 API.
