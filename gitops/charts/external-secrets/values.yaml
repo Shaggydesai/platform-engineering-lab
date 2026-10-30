@@ -1,0 +1,87 @@
+# Values nested under the DEPENDENCY NAME, per ADR-0010.
+#
+# A warning specific to this chart: External Secrets ships THREE deployments - the controller,
+# a validating webhook, and a cert controller that issues the webhook's certificate - and each
+# has its own values block. A `resources:` map at the top of this file applies to the controller
+# ONLY, which is the kind of thing that looks like it worked.
+#
+# Helm silently ignores a value path that does not exist, so "I set it" and "it took effect" are
+# different claims here, as they have been in every other instance this week. `make gitops-limits`
+# renders every wrapper chart and prints the limits each container actually ended up with, so the
+# question is answered by the render rather than by this file.
+external-secrets:
+  # The CRDs. ESO cannot work without them, and installing them separately from the controller is
+  # how a controller ends up watching resource types that do not exist (the same argument as
+  # cert-manager's `crds.enabled`).
+  installCRDs: true
+
+  # One replica of each. ESO takes a leader election lock, so a second replica buys failover
+  # rather than throughput - and on three workers that already run the tenant, a spare pod costs
+  # more than the failover is worth in a lab. ADR-0011's sizing argument.
+  replicaCount: 1
+
+  # The controller: watches ExternalSecret objects, talks to Vault, writes Secrets.
+  #
+  # Modest because it does nothing between refreshes. The refresh interval is per-ExternalSecret
+  # and defaults to an hour, so the steady state is an idle informer.
+  resources:
+    requests:
+      cpu: 10m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 192Mi
+
+  # The validating webhook. In the request path of every ExternalSecret and SecretStore write,
+  # which is why it gets a limit rather than being left unbounded: a webhook that cannot be
+  # scheduled makes those objects unwritable.
+  webhook:
+    replicaCount: 1
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+
+  # The cert controller issues and rotates the webhook's serving certificate. Note what this is
+  # NOT: it does not use cert-manager, even though this cluster has one (ADR-0012). ESO generates
+  # its own CA for its own webhook, which is one more private key in the cluster that nothing
+  # here manages - recorded in the parking lot rather than pretended away.
+  certController:
+    replicaCount: 1
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+
+# ------------------------------------------------------------------ this repository's own object
+
+# The ClusterSecretStore: WHERE secrets come from.
+#
+# This is the seam ADR-0018 was chosen for, and it is worth being precise about what is portable:
+#
+#   the ExternalSecret manifest   -> identical on onprem, GKE and EKS
+#   the ClusterSecretStore        -> different on each, and ONLY this
+#
+# So the provider block is not in this file. It is a raw map supplied by the environment overlay
+# and passed through with toYaml, because `vault:`, `gcpsm:` and `aws:` have nothing structurally
+# in common and a template that tried to abstract over all three would be a worse version of the
+# CRD it renders.
+#
+# Default off and empty: a store pointing at a backend that is not there reports Ready=False and
+# every ExternalSecret bound to it fails, which is a loud failure but a pointless one.
+secretStore:
+  enabled: false
+  # The name is referenced by every ExternalSecret in the cluster, including the tenant's chart,
+  # which hardcodes `vault-backend`. Changing it here means changing it there.
+  name: vault-backend
+  provider: {}
+
+# Cluster-scoped, so it renders regardless of the Application's destination namespace. Kept as a
+# separate flag from secretStore.enabled because the namespace of the ESO install and the
+# existence of a store are independent decisions.

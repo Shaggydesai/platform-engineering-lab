@@ -1,0 +1,15 @@
+apiVersion: v2
+name: external-secrets
+description: >-
+  External Secrets Operator: the component that reads a secret out of a backend and writes it
+  into an ordinary Kubernetes Secret. The half of ADR-0018 that is identical on every substrate.
+type: application
+version: 0.1.0
+
+dependencies:
+  # 2.14.0 carries app version v2.14.0 - the chart and the operator are versioned together here,
+  # unlike Vault (chart 0.34.1 / app 2.0.4) or Argo CD. That is a property of this chart, not a
+  # rule, so `make gitops-check-pins` still asserts the app version separately.
+  - name: external-secrets
+    version: 2.14.0
+    repository: https://charts.external-secrets.io

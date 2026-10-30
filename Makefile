@@ -200,6 +200,18 @@ vault-init: ## ONE TIME - initialise Vault and write the unseal keys to .cache/ 
 vault-unseal: ## Unseal Vault - needed after every cluster restart
 	@bash scripts/vault-ops.sh unseal
 
+.PHONY: vault-bootstrap
+vault-bootstrap: ## Configure Vault's INSIDE - KV v2, Kubernetes auth, policy, the ESO role (idempotent)
+# The fifth kind of state (ADR-0018 Decision 4): Vault's auth methods and policies live inside an
+# application and are reachable only through its own API, so neither Terraform, Ansible nor Argo
+# CD can own them. This is the explicit owner, and it is re-runnable so that being imperative
+# costs as little as possible.
+	@bash scripts/vault-bootstrap.sh
+
+.PHONY: eso-check
+eso-check: ## Write a FRESH value to Vault and prove it reaches a Kubernetes Secret
+	@bash scripts/eso-check.sh
+
 .PHONY: netpol-check
 netpol-check: ## Prove the tenant network policy denies something (two pods, one label apart)
 	@bash scripts/netpol-check.sh
@@ -279,6 +291,13 @@ gitops-check-pins: ## Is any wrapper chart's pinned version behind what the repo
 # front of it - so the repository answers "is this behind?" rather than someone remembering to
 # ask.
 	@bash scripts/gitops-check-pins.sh
+
+.PHONY: gitops-limits
+gitops-limits: ## What resource limits every container ACTUALLY got (catches a wrong values path)
+# Helm ignores a value path that does not exist, in silence. So `resources:` set under the wrong
+# key produces a correct-looking values file and an unbounded container, with nothing anywhere
+# reporting it. This renders every chart and reads the answer off the containers.
+	@bash scripts/gitops-limits.sh $(or $(ENV),onprem)
 
 .PHONY: gitops-render
 gitops-render: ## Render a wrapper chart as Argo CD will (CHART=cert-manager [ENV=onprem])

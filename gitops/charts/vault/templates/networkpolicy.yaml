@@ -1,0 +1,72 @@
+{{- if .Values.networkPolicy.enabled }}
+# Who may talk to Vault over the network.
+#
+# This is the mitigation for `tls_disable = 1`. Vault's API carries a bearer token in and a
+# plaintext secret out, over HTTP, so the question "which pods can open a socket to port 8200"
+# stops being a hardening nicety and becomes the actual control. Before this object, the answer
+# was every pod in the cluster.
+#
+# It is not a substitute for TLS and is not described as one. A pod that IS allowed - or anyone
+# with root on the node running Vault - still sees cleartext. Cilium does no transparent
+# encryption here. The real fix is a cert-manager-issued serving certificate (ADR-0012), which is
+# Module 08 work and is in the parking lot.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: vault-api
+  annotations:
+    argocd.argoproj.io/sync-wave: "5"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: vault
+      app.kubernetes.io/instance: vault
+
+  # Ingress only, for the same reason as the tenant policy (ADR-0017 Decision 4): an egress
+  # policy must also permit DNS, and here it must additionally permit Vault to reach the API
+  # SERVER - because the Kubernetes auth method works by Vault calling TokenReview. Get that
+  # wrong and every ESO login fails with a message about the token rather than about egress.
+  #
+  # That rule is writable, unlike the tenant's edge case, so this is a deferral rather than a
+  # limitation. It is in the parking lot.
+  policyTypes: [Ingress]
+
+  ingress:
+    - from:
+        {{- range .Values.networkPolicy.clients }}
+        # {{ .reason }}
+        - namespaceSelector:
+            matchLabels:
+              # Set automatically by Kubernetes on every namespace since 1.22, so it needs no
+              # cooperation from whoever created the namespace - which matters, because a
+              # namespaceSelector that relies on a hand-applied label fails OPEN if the label is
+              # missing: the selector matches nothing, the rule permits nothing, and the symptom
+              # is a broken client rather than an open door. Worth knowing which way it fails.
+              kubernetes.io/metadata.name: {{ .namespace }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ .name }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.port }}
+
+# What is NOT in the list, and why nothing broke:
+#
+# The KUBELET's liveness and readiness probes. Probe traffic originates on the node, so it
+# arrives as `reserved:host` - and ADR-0017 established that plain NetworkPolicy has no selector
+# for that. By the letter of the object above, every probe should be dropped and Vault should
+# never become Ready.
+#
+# It is not dropped, because Cilium's `allow-localhost=auto` auto-allows the LOCAL host to reach
+# local endpoints, and a kubelet probing its own pod is always local.
+#
+# That is the same mechanism ADR-0017 refused to rely on at the ingress edge, and the difference
+# is the whole point: there, the peer was Cilium's Envoy, which runs on whichever node holds the
+# L2 announcement lease and therefore moves - so a policy depending on local auto-allow would
+# have worked until the lease moved and then failed, about fifteen seconds after a node died. A
+# kubelet probing its own pod cannot move. Same mechanism, one case sound and one unsound, and
+# the distinction is "is the peer always local" rather than anything about the policy.
+#
+# The check is blunt: if vault-0 stays 1/1 Ready after this lands, probes are getting through.
+{{- end }}

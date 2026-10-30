@@ -7,3 +7,23 @@
 vault:
   server:
     enabled: true
+
+# The exception to "says nothing twice": this is not a duplicate of anything, it is the one
+# setting that depends on what else exists in THIS cluster. Vault's API is plaintext HTTP
+# (tls_disable = 1 in the chart's default config), so restricting who can open a socket to it is
+# the mitigation rather than a refinement.
+networkPolicy:
+  enabled: true
+  port: 8200
+  clients:
+    - namespace: external-secrets
+      # The ESO CONTROLLER only. Its webhook and cert-controller pods carry different
+      # app.kubernetes.io/name values (external-secrets-webhook, external-secrets-cert-controller)
+      # and neither talks to Vault, so neither is listed.
+      #
+      # If this name is wrong, ESO cannot reach Vault and the symptom is a ClusterSecretStore that
+      # never becomes Ready - not an obviously network-shaped failure. `make eso-check` compares
+      # this selector against the controller pod's real labels before it probes anything, because
+      # a label typo and a broken Vault role look identical from the outside.
+      name: external-secrets
+      reason: External Secrets Operator reads secrets from Vault on every namespace's behalf

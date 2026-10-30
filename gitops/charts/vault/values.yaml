@@ -78,3 +78,19 @@ vault:
     # it). Not taken, because relying on "swap is off elsewhere" is how a guarantee quietly
     # becomes an assumption.
     extraArgs: ""
+
+# ------------------------------------------------------------------ this repository's own object
+
+# Who may reach Vault's API over the network.
+#
+# Default OFF, and the default is the honest one: a policy listing clients that do not exist yet
+# locks out the clients that do. It is switched on by the on-prem overlay, where External Secrets
+# is also switched on, so the policy and the only thing it permits arrive together.
+networkPolicy:
+  enabled: false
+  port: 8200
+  # Every entry needs a `reason`, which the template renders as a comment into the object itself.
+  # The point is that `kubectl get networkpolicy vault-api -o yaml` on a bad night answers "why
+  # is this peer allowed" without anyone finding this file.
+  clients: []
+
