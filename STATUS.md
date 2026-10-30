@@ -5,7 +5,7 @@
 > not stall like the last one.
 
 **Last updated:** 2026-10-27
-**Current module:** 06 — ShopVerse runs (serving, gated and pinned; the browser half remains)
+**Current module:** 07 — Secrets properly (ADR-0018 decided: Vault + External Secrets; stage 1 of 4 not yet built)
 **Overall progress:** Modules 00–05 complete — 6 / 13
 
 ---
