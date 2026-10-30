@@ -18,10 +18,24 @@ global:
   #     user-service     70ae9f27      payment-service  015aa767
   #     product-service  b5db7d1d
   #
-  # So this pin names exactly the bytes that `make shopverse-check` passed against, and applying
-  # it changes nothing at runtime - no pod needs to restart, because every one is already on
-  # these digests. A pin that requires a rollout to take effect is a pin plus an upgrade, and
-  # the two should not arrive together.
+  # So this pin names exactly the bytes that `make shopverse-check` passed against.
+  #
+  # IT STILL ROLLED ALL SEVEN SERVICES, and the claim originally written here - that applying it
+  # would change nothing at runtime because the digests already matched - was wrong. Kubernetes
+  # rolls a Deployment on the image STRING, not on the digest that string resolves to. Changing
+  # `:latest` to `:sha-6fd8524` is a pod template change even when both resolve to the same
+  # bytes, so the hash changes, new ReplicaSets are created, and every pod is replaced.
+  #
+  # Verified after the fact, which is the only reason it is known:
+  #
+  #     diff of the two ReplicaSets' pod templates
+  #     -  "image": "ghcr.io/shaggydesai/microservice-app/frontend:latest"
+  #     +  "image": "ghcr.io/shaggydesai/microservice-app/frontend:sha-6fd8524"
+  #
+  # The useful form of the original point survives: the bytes did not change, so the rollout
+  # carried no new code and could not have introduced a regression. That is worth distinguishing
+  # from a pin that also upgrades - but it is a rollout, it costs the ~9s of 502s per service
+  # that ADR-0016 measured, and anyone pinning an image in a live system should expect one.
   #
   # `make gitops-check-pins` now reports PINNED, REGISTRY and RUNNING per service, so the next
   # time these disagree it is a line of output rather than an investigation.

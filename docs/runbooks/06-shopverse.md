@@ -93,3 +93,40 @@ kubectl -n shopverse-prod exec deploy/shopverse-api-gateway -- \
 Every service in that chart listens on **8080**, hardcoded in its template rather than taken from
 values. `port-forward svc/shopverse-frontend 8081:80` fails with "does not have a service port 80"
 for that reason.
+
+## A restart that looks like a fault
+
+`shopverse-mongodb-0` showed `RESTARTS 1` with:
+
+```
+Last State:  Terminated
+  Reason:    Unknown
+  Exit Code: 255
+  Finished:  2026-10-30T06:05:48Z
+```
+
+Not OOMKilled, and the workers were at 25% memory — no pressure. `Exit Code 255` with
+`Reason: Unknown` is what a container looks like when it is *killed abruptly* rather than when it
+crashes: the node went away underneath it.
+
+The cause was mundane — the laptop was restarted. `uptime` on the workstation and on `k8s-w01`
+both put the boot a few minutes before `06:05:48Z`.
+
+**The detail worth keeping** is what the Node objects said about it:
+
+```
+NODE       READY_SINCE
+k8s-cp01   2026-10-23T09:30:59Z
+k8s-w01    2026-10-23T09:32:25Z
+```
+
+Unchanged — days earlier. The nodes **never went NotReady**, despite having rebooted. A libvirt VM
+comes back in roughly 25 seconds, and `node-monitor-grace-period` is 40 seconds, so the control
+plane never waited long enough to mark them down. The node-failure timeline in
+`docs/runbooks/cluster-bootstrap.md` is why: lease expiry at 10s, grace period at 40s, taint, then
+a 300s toleration before eviction. A reboot that finishes inside 40 seconds is invisible to it.
+
+So after a host restart, expect container restart counts to go up with no corresponding node
+event, and do not read a steady `READY_SINCE` as proof that a node has been up. The two facts are
+not the same, and `kubectl get nodes` cannot tell them apart.
+

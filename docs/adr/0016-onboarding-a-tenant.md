@@ -128,9 +128,16 @@ were actually running. The details are in
 
 Two things learned in the doing, both recorded in `scripts/gitops-check-pins.sh`:
 
-**The pin was a runtime no-op**, and that is the property to aim for. It names the bytes already
-running and already gate-tested, so no pod restarted. A pin that requires a rollout to take
-effect is a pin *plus* an upgrade, and those should not arrive in the same change.
+**Pinning an image rolls the workload, even when the bytes are identical.** I predicted the
+opposite — that no pod would restart because all seven were already on those digests — and the
+ReplicaSets disproved it within the hour. Kubernetes rolls a Deployment on the image **string**,
+not on the digest that string resolves to, so `:latest` → `:sha-6fd8524` changes the pod template
+hash and replaces every pod.
+
+What survives of the point I was making: the bytes did not change, so the rollout carried no new
+code and could not have introduced a regression. That is still worth distinguishing from a pin
+that also upgrades. But it is a rollout, it cost the ~9 seconds of 502s per service measured
+above, and anyone pinning an image in a live system should expect one.
 
 **An empty digest is never a match.** A first attempt at the comparison had no guard against
 failed lookups and reported all eight candidate tags as identical to `latest` — when in fact
