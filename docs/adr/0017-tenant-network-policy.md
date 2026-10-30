@@ -117,3 +117,41 @@ RST. That silence is the policy working.
   `shopverse-prod` does not exist there is nothing to police, and creating it here would make the
   policy Application the owner of a namespace the tenant lives in.
 - Nothing here is verified at the time of writing. The sections above will be wrong somewhere.
+
+---
+
+## Verified, 2026-10-30
+
+```
+==> the policy object exists and selects the database
+    shopverse-database selects {instance: shopverse, name: mongodb}
+    5 allowed client selector(s)
+==> 1/3 the application still works
+    GET /api/products -> 200   (product-service is reaching the database)
+==> 2/3 a pod the policy does NOT list cannot reach the database
+    netpol-probe -> shopverse-mongodb:27017   refused/timed out, as it should be
+==> 3/3 a pod the policy DOES list can reach it (label: user-service)
+    a pod labelled user-service -> shopverse-mongodb:27017   connected
+```
+
+Two pods in the same namespace, from the same image, differing in one label value. One reached
+MongoDB and one did not.
+
+**That pair is the whole result.** Probe 2 alone would have passed against a MongoDB that had
+simply crashed, and probe 1 alone only shows the application works — which it did before any
+policy existed. Only the three together distinguish "the policy is enforced" from "something is
+broken" and from "nothing is happening".
+
+The denial presents as a **timeout**, not a refusal: a dropped packet produces no RST, so the
+connection hangs until the probe's own deadline. Anyone debugging this from inside the tenant sees
+an unresponsive database rather than an access error, which is worth knowing before it costs
+someone an afternoon.
+
+### What is now true, and what is still not
+
+`gitops/bootstrap/projects.yaml` says a tenant "cannot reach outside its own namespaces". At the
+network level that claim is still broader than the enforcement: what is enforced is that **only
+five named services may reach the database**. Egress is unrestricted and the edge is unpoliced.
+Both are recorded in `docs/parking-lot.md` rather than implied by the project description, because
+a boundary that is described more confidently than it is enforced is the failure this whole module
+was closing.
