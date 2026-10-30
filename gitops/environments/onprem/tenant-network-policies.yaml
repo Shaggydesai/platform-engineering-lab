@@ -1,0 +1,28 @@
+# Tenant network policies, on-prem.
+tenant:
+  enabled: true
+  namespace: shopverse-prod
+  instance: shopverse
+
+database:
+  enabled: true
+  name: mongodb
+  port: 27017
+  # Written from an OBSERVED graph, not from the deployment's convenience. Hubble was asked what
+  # actually connects to MongoDB across a full checkout and saw exactly these five:
+  #
+  #   user-service     ->  shopverse-mongodb-0:27017
+  #   product-service  ->  shopverse-mongodb-0:27017
+  #   cart-service     ->  shopverse-mongodb-0:27017
+  #   order-service    ->  shopverse-mongodb-0:27017
+  #   payment-service  ->  shopverse-mongodb-0:27017
+  #
+  # frontend and api-gateway never did, and the chart's env wiring agrees - the gateway proxies
+  # HTTP and holds no database connection. So they are not listed, and a compromised frontend
+  # cannot read the orders table.
+  clients:
+    - user-service
+    - product-service
+    - cart-service
+    - order-service
+    - payment-service

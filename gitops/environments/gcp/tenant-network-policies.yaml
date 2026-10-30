@@ -1,0 +1,19 @@
+# Tenant network policies, gcp — off, and the reason is the most interesting thing in this file.
+#
+# The POD-TO-POD rules here are perfectly portable. `networking.k8s.io/v1` NetworkPolicy means
+# the same thing on GKE as it does on Cilium, and the database rule would work unchanged.
+#
+# What is NOT portable is the rule this chart does not yet contain: "allow traffic from the
+# ingress layer". On-prem that source is Cilium's Envoy, which presents as `reserved:host` -
+# an identity plain NetworkPolicy has no way to select. On GKE it is a Google load balancer, whose source is a Google-owned range.
+#
+# So "let the front door in" is the one network rule that cannot be written once for three
+# substrates, which is a sharper finding than it sounds: the portable language covers the
+# traffic between your own pods and stops exactly at the boundary where traffic enters.
+#
+# This file is off rather than absent so that a missing file never has to be read as either
+# "not yet" or "not applicable".
+tenant:
+  enabled: false
+database:
+  enabled: false

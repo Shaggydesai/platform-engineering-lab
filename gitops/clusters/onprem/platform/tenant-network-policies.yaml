@@ -1,0 +1,49 @@
+# Network policies the platform imposes on its tenants.
+#
+# PLATFORM-owned and in the platform project, even though every object lands in a tenant's
+# namespace. That is the point: the tenants AppProject blacklists
+# networking.k8s.io/NetworkPolicy inside the tenant's own namespace (ADR-0016), so ShopVerse
+# cannot write these and cannot remove them. A tenant that controls its own network policy
+# controls whether it has one.
+#
+# Same shape as the HTTPRoute arrangement in platform-ingress: the object lives beside what it
+# governs, the decision does not.
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: tenant-network-policies
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+
+  sources:
+    - repoURL: https://github.com/Shaggydesai/platform-engineering-lab.git
+      targetRevision: main
+      path: gitops/charts/tenant-network-policies
+      helm:
+        valueFiles:
+          - values.yaml
+          - $values/gitops/environments/onprem/tenant-network-policies.yaml
+
+    - repoURL: https://github.com/Shaggydesai/platform-engineering-lab.git
+      targetRevision: main
+      ref: values
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: shopverse-prod
+
+  syncPolicy:
+    automated:
+      prune: true
+      # selfHeal matters more here than anywhere else in this repository. A network policy that
+      # someone deletes to debug something, and then forgets to restore, leaves the database
+      # open with nothing reporting it. Argo CD putting it back is the control.
+      selfHeal: true
+    syncOptions:
+      # NOT CreateNamespace. If shopverse-prod does not exist there is nothing to police, and
+      # creating it here would make this Application the owner of a namespace a tenant lives in.
+      - CreateNamespace=false

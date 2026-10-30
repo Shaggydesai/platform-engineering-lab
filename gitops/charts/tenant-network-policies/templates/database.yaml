@@ -1,0 +1,46 @@
+{{- if and .Values.tenant.enabled .Values.database.enabled }}
+{{- if not .Values.tenant.namespace }}{{ fail "tenant.namespace is required" }}{{ end }}
+{{- if not .Values.tenant.instance }}{{ fail "tenant.instance is required" }}{{ end }}
+# Only these pods may reach the database. Everything else in the namespace is denied.
+#
+# NetworkPolicy semantics worth stating because they are the opposite of a firewall's: a pod with
+# NO policy selecting it accepts everything. Selecting a pod at all switches it to deny-by-default
+# for that direction, and the rules below are then the only exceptions. So this single object both
+# denies and permits - there is no separate "deny" rule to write, and removing this file does not
+# "open" the database, it returns it to accepting everything.
+#
+# plain networking.k8s.io, NOT CiliumNetworkPolicy, and deliberately: this expresses pod-to-pod
+# intent that is identical on GKE and EKS (ADR-0001's premise is one platform definition across
+# three substrates). Cilium enforces it here and Hubble observes it; nothing in this object is
+# Cilium-specific.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Values.tenant.instance }}-database
+  namespace: {{ .Values.tenant.namespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "5"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Values.tenant.instance }}
+      app.kubernetes.io/name: {{ .Values.database.name }}
+
+  # Ingress only. Egress is left unrestricted on purpose: an egress policy must also permit DNS
+  # to kube-dns or every service loses name resolution, and that failure presents as the
+  # application being broken rather than as a policy being wrong. Egress is its own change, with
+  # its own test, and it is not this one.
+  policyTypes: [Ingress]
+
+  ingress:
+    - from:
+        {{- range .Values.database.clients }}
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ $.Values.tenant.instance }}
+              app.kubernetes.io/name: {{ . }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.database.port }}
+{{- end }}

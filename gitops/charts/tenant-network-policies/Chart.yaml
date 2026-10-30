@@ -1,0 +1,11 @@
+apiVersion: v2
+name: tenant-network-policies
+description: >-
+  Network policies the PLATFORM supplies on a tenant's behalf, because the tenants AppProject
+  forbids a tenant from creating its own (ADR-0016) - a tenant that writes its own network policy
+  can write one that opens itself up.
+type: application
+version: 0.1.0
+
+# No dependencies, like platform-ingress: there is no upstream chart for "the policies this
+# platform imposes". ADR-0010's wrapper pattern does not apply; the overlay mechanism does.

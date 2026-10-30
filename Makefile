@@ -188,6 +188,10 @@ shopverse-secret: ## Create ShopVerse's credentials IN-CLUSTER (never in Git) - 
 	printf 'is a deliberate exception to ADR-0002 Rule 3, and the exception is that it cannot be\n'; \
 	printf 'in Git. External Secrets replaces it; the chart already supports that path.\n'
 
+.PHONY: netpol-check
+netpol-check: ## Prove the tenant network policy denies something (two pods, one label apart)
+	@bash scripts/netpol-check.sh
+
 .PHONY: shopverse-check
 shopverse-check: ## Module 06's gate - checkout end to end, then restart MongoDB and re-read the order
 	@bash scripts/shopverse-check.sh

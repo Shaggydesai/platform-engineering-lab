@@ -1,0 +1,30 @@
+# Defaults are OFF and EMPTY. A network policy applied to the wrong namespace either does nothing
+# or breaks an application, and neither failure announces itself - so this chart renders nothing
+# until an environment overlay says who it is for.
+
+tenant:
+  enabled: false
+  # The namespace to police, and the Helm release label its pods carry.
+  namespace: ""
+  instance: ""
+
+# Which pods may reach the database, BY NAME rather than "any pod in the release".
+#
+# The names below are not a guess: Hubble was asked what actually connects to MongoDB over a full
+# checkout, and it saw exactly these five. frontend and api-gateway never do, which the chart's
+# own env wiring also implies - the api-gateway proxies HTTP and holds no database connection.
+#
+# A policy that allows "every pod of this release" would permit a compromised frontend to read
+# every order in the database. This one does not, and that difference is the entire point of
+# writing it from an observed graph instead of from the deployment's convenience.
+database:
+  enabled: false
+  # The pod label value for the database itself.
+  name: mongodb
+  port: 27017
+  clients:
+    - user-service
+    - product-service
+    - cart-service
+    - order-service
+    - payment-service
