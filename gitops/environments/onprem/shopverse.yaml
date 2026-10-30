@@ -78,6 +78,56 @@ secrets:
   create: false
   existingSecret: shopverse-credentials
 
+# ---------------------------------------------------------------- secrets, properly (ADR-0018)
+#
+# Module 07. `externalSecret.enabled: true` makes the chart create an ExternalSecret instead of
+# consuming a hand-made Secret, and External Secrets syncs the six values out of Vault.
+#
+# STILL FALSE, deliberately, and the ordering is the reason (ADR-0018 Decision 6). Flipping this
+# does two things at once:
+#
+#   1. the chart creates an ExternalSecret reading `remoteKey` below
+#   2. `shopverse.secretName` stops returning `shopverse-credentials` and starts returning
+#      `shopverse-secrets` - so EVERY Deployment's secretKeyRef changes
+#
+# (2) is a pod template change, which means a rollout of all seven services whether or not the
+# values are identical - the same lesson as pinning the image tag above, where identical bytes
+# still replaced every pod. And if the new Secret does not exist yet, that rollout hands seven
+# pods a reference to nothing.
+#
+# So: `make vault-seed-shopverse` first. It copies the six EXISTING values into Vault, verifies
+# each one by hash, and proves ESO can read them back through a throwaway ExternalSecret in
+# another namespace - all without touching the running application. Then this flips, in its own
+# commit, and `make shopverse-check` is the gate.
+#
+# `secrets.existingSecret` above stays, and `shopverse-credentials` is deliberately NOT deleted:
+# with this flag false the chart goes back to using it, so rollback is one line rather than a
+# recovery.
+externalSecret:
+  enabled: false
+
+  # The Vault KV path, relative to the store's mount - so this is `secret/shopverse/prod`, read
+  # as `secret/data/shopverse/prod` by the v2 API.
+  #
+  # `prod` rather than the chart's default `dev`, because the namespace is `shopverse-prod` and a
+  # path called dev holding the only copy of a live database's password is the kind of small lie
+  # that outlives the person who wrote it.
+  #
+  # It must stay under `shopverse/`: scripts/vault-bootstrap.sh grants ESO read on
+  # `secret/data/platform/*` and `secret/data/shopverse/*` only, and a path outside those would
+  # be writable by the root token and unreadable by ESO - a permission failure on a path that
+  # looks correct in both places. `make vault-seed-shopverse` checks this rather than trusting it.
+  remoteKey: shopverse/prod
+
+  # Left at the chart's defaults, named here so they are visible rather than inherited:
+  #   apiVersion: external-secrets.io/v1          matches the CRDs this cluster has
+  #   refreshInterval: 1h                         how often ESO re-reads Vault
+  #   secretStoreRef: ClusterSecretStore/vault-backend
+  #
+  # That last one is why the gcp and aws overlays keep the name `vault-backend` even though
+  # neither will run Vault: the store name is the contract a tenant writes against, and this is
+  # the tenant writing against it.
+
 # ---------------------------------------------------------------- network policy
 #
 # OFF because the tenants AppProject forbids a tenant from creating NetworkPolicy objects, by

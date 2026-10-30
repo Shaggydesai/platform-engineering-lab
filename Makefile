@@ -212,6 +212,13 @@ vault-bootstrap: ## Configure Vault's INSIDE - KV v2, Kubernetes auth, policy, t
 eso-check: ## Write a FRESH value to Vault and prove it reaches a Kubernetes Secret
 	@bash scripts/eso-check.sh
 
+.PHONY: vault-seed-shopverse
+vault-seed-shopverse: ## Copy ShopVerse's EXISTING six credentials into Vault (never regenerates)
+# ADR-0018 Decision 5. mongo-password initialised MongoDB's root user on first boot only, so the
+# migration copies rather than generates - a fresh value would leave every service authenticating
+# against a database that still expects the old one, with MongoDB Running and Ready throughout.
+	@bash scripts/vault-seed-shopverse.sh
+
 .PHONY: netpol-check
 netpol-check: ## Prove the tenant network policy denies something (two pods, one label apart)
 	@bash scripts/netpol-check.sh

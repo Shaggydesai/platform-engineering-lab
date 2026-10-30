@@ -101,6 +101,29 @@ vsh() {
         eval "$PROG"' sh "$prog" "$@"
 }
 
+# Run a program inside the pod with the root token AND a payload, both on stdin.
+#
+# For writing secrets. `vault kv put path key=value` would put the secret itself in argv, which
+# is the thing the whole note at the top of this file exists to avoid - and for the tenant's
+# actual credentials that matters more than it does for the root token, not less. So the values
+# travel as JSON on stdin and `vault kv put path -` reads them from there.
+#
+# This is the one case where the token shares stdin with something else, so it does NOT use
+# `read`: it slurps all of stdin with `cat` first and splits afterwards. `read` on a pipe may
+# buffer past the newline, and whether it does is a property of the container's shell - fine to
+# depend on when nothing follows the token, not fine when the next bytes are the payload.
+vsh_payload() {
+  local prog=$1; shift
+  { printf '%s\n' "$VAULT_ROOT_TOKEN"; cat; } \
+    | kubectl -n "$VAULT_NS" exec -i "$VAULT_POD" -- sh -c '
+        ALL=$(cat)
+        VAULT_TOKEN=$(printf %s "$ALL" | head -1)
+        export VAULT_TOKEN
+        PAYLOAD=$(printf %s "$ALL" | tail -n +2)
+        PROG=$1; shift
+        printf %s "$PAYLOAD" | eval "$PROG"' sh "$prog" "$@"
+}
+
 # Run a shell program inside the Vault pod with NO token, passing this function's stdin through
 # untouched. For the one case where the program supplies its own credential: logging in as
 # somebody else to check that the login works.
