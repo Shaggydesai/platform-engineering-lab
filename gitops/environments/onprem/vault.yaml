@@ -1,0 +1,9 @@
+# Vault, on-prem. The chart's values already express every decision (ADR-0018), so this overlay
+# exists to turn it on and to say nothing twice.
+#
+# Deliberately empty of settings: duplicating the chart's values here would create two places to
+# change one thing, which is the mistake `make lint` had to be taught to catch for the load
+# balancer addresses.
+vault:
+  server:
+    enabled: true

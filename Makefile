@@ -188,6 +188,18 @@ shopverse-secret: ## Create ShopVerse's credentials IN-CLUSTER (never in Git) - 
 	printf 'is a deliberate exception to ADR-0002 Rule 3, and the exception is that it cannot be\n'; \
 	printf 'in Git. External Secrets replaces it; the chart already supports that path.\n'
 
+.PHONY: vault-status
+vault-status: ## Is Vault initialised, is it sealed, are the keys present
+	@bash scripts/vault-ops.sh status
+
+.PHONY: vault-init
+vault-init: ## ONE TIME - initialise Vault and write the unseal keys to .cache/ (read the output)
+	@bash scripts/vault-ops.sh init
+
+.PHONY: vault-unseal
+vault-unseal: ## Unseal Vault - needed after every cluster restart
+	@bash scripts/vault-ops.sh unseal
+
 .PHONY: netpol-check
 netpol-check: ## Prove the tenant network policy denies something (two pods, one label apart)
 	@bash scripts/netpol-check.sh

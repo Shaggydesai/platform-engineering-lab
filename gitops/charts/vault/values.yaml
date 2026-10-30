@@ -1,0 +1,80 @@
+# Values nested under the DEPENDENCY NAME, per ADR-0010. Anything at the top level here is
+# silently ignored by the subchart, which is the single most common way to spend an hour
+# wondering why a value had no effect.
+vault:
+  # The Vault Agent injector is a mutating webhook that adds a sidecar to annotated pods. It is
+  # ON by default in this chart - the default is the string "-", which is a SENTINEL meaning
+  # "decide automatically", not a value and not false.
+  #
+  # Off here because ADR-0018 chose External Secrets instead. Running both would mean two
+  # mechanisms for the same job, one of them unused and both of them in the request path of
+  # every pod creation in the cluster.
+  injector:
+    enabled: false
+
+  # Same reasoning: the CSI provider is a third way to get a secret into a pod.
+  csi:
+    enabled: false
+
+  # The Service for the web UI. The UI HANDLER is on regardless, because the chart's default
+  # standalone config contains `ui = true` - this only decides whether it is reachable by a
+  # Service. Port-forward is enough for a lab and leaves one less thing listening.
+  ui:
+    enabled: false
+
+  server:
+    # `server.standalone.enabled` also defaults to the "-" sentinel. Set explicitly so the mode
+    # is readable rather than inferred from ha.enabled being false.
+    standalone:
+      enabled: true
+      # config is NOT overridden on purpose. The chart's default already contains exactly what
+      # ADR-0018 asks for:
+      #
+      #     storage "file" { path = "/vault/data" }
+      #     listener "tcp" { tls_disable = 1, address = "[::]:8200" }
+      #
+      # Rewriting the stanza to add one setting is how the storage block gets lost, and losing it
+      # means Vault silently falls back to in-memory storage - which looks like it works and
+      # loses everything on restart. Left alone until there is a reason, and then changed whole.
+
+    ha:
+      enabled: false
+
+    dataStorage:
+      enabled: true
+      # 2Gi, not the chart's 10Gi. Vault's file backend holds a handful of secrets measured in
+      # kilobytes. On local-path the request is not enforced anyway - the volume is a directory -
+      # so the number is a statement of intent rather than a reservation, and 10Gi would overstate
+      # it on a 35Gi worker disk.
+      size: 2Gi
+      # storageClass is deliberately NOT set, so the PVC takes the cluster default
+      # (platform-local, ADR-0015). A chart that names a class bakes the platform's
+      # implementation into itself.
+      #
+      # ADR-0015's warning applies harder here than anywhere: this volume is NODE-LOCAL, and
+      # losing that node loses Vault's storage - which means losing the ability to DECRYPT, not
+      # just data.
+      mountPath: /vault/data
+      accessMode: ReadWriteOnce
+
+    # The chart ships no limits at all. Vault standalone with a file backend is modest, but
+    # unbounded is how one component takes a node down - and this node also runs the tenant.
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+    # Vault locks its memory so keys cannot be written to swap, which needs IPC_LOCK. Vault 2.x's
+    # image REQUIRES the capability or must run as root; without it the container crash-loops
+    # with a message about mlock that does not mention capabilities. The chart sets this by
+    # default; it is written out here so that anyone tempted to tighten the security context
+    # knows what they would break.
+    #
+    # The alternative is `disable_mlock = true` in the config, which trades the swap guarantee
+    # away - acceptable on a node with no swap, and this cluster has swap off (preflight asserts
+    # it). Not taken, because relying on "swap is off elsewhere" is how a guarantee quietly
+    # becomes an assumption.
+    extraArgs: ""

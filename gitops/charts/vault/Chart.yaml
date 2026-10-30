@@ -1,0 +1,15 @@
+apiVersion: v2
+name: vault
+description: >-
+  HashiCorp Vault, standalone with file storage, as the on-prem secret backend behind External
+  Secrets (ADR-0018).
+type: application
+version: 0.1.0
+
+dependencies:
+  # 0.34.1 carries Vault 2.0.4. Both the chart and the app version are pinned and
+  # `make gitops-check-pins` asserts the app version separately, the way it does for Argo CD -
+  # a chart patch release can carry a different Vault.
+  - name: vault
+    version: 0.34.1
+    repository: https://helm.releases.hashicorp.com

@@ -1,0 +1,59 @@
+# Vault: the on-prem secret backend behind External Secrets (ADR-0018).
+#
+# Layer 3, owned by Argo CD - but note what Argo CD does and does not own here. It owns Vault's
+# DEPLOYMENT: the StatefulSet, the Service, the PVC. It does not and cannot own Vault's internal
+# state - the auth methods, policies and roles - which is a fifth kind of state this project had
+# not needed a name for until now (ADR-0018 Decision 4). That belongs to `make vault-bootstrap`.
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: vault
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    # Wave -4: AFTER local-path (-5), because Vault's data lives on a PVC and a
+    # WaitForFirstConsumer claim with no StorageClass leaves the pod unschedulable rather than
+    # failing visibly. Before the tenant's secrets need it.
+    argocd.argoproj.io/sync-wave: "-4"
+spec:
+  project: platform
+
+  sources:
+    - repoURL: https://github.com/Shaggydesai/platform-engineering-lab.git
+      targetRevision: main
+      path: gitops/charts/vault
+      helm:
+        valueFiles:
+          - values.yaml
+          - $values/gitops/environments/onprem/vault.yaml
+
+    - repoURL: https://github.com/Shaggydesai/platform-engineering-lab.git
+      targetRevision: main
+      ref: values
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: vault
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 5m
+
+  # A freshly synced Vault is SEALED and reports itself unhealthy, which is correct: it cannot
+  # serve anything until someone unseals it. Argo CD will show this Application as Progressing
+  # or Degraded until `make vault-unseal` runs, and that is the honest state rather than
+  # something to annotate away.
+  #
+  # ignoreDifferences is deliberately absent. If a diff ever appears on Vault's StatefulSet it is
+  # a real one.

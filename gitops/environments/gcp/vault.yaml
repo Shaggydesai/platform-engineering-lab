@@ -1,0 +1,15 @@
+# Vault, gcp — not deployed.
+#
+# ADR-0018's deciding argument was that the ExternalSecret manifest stays identical across
+# substrates while only the ClusterSecretStore changes. This file is that argument made concrete:
+# on GKE the backend is **GCP Secret Manager**, reached with Workload Identity, so there is no Vault to run
+# and no unseal problem to solve.
+#
+# Which is worth sitting with: the hardest part of the on-prem design - an unseal key that cannot
+# be in Git, held by a human, re-entered after every restart - simply does not exist here. The
+# cloud provider's KMS holds it instead. That is not Vault being badly designed; it is the one
+# genuinely irreducible secret being moved into something that already had a hardware root of
+# trust, which is a thing a laptop does not have.
+vault:
+  server:
+    enabled: false
