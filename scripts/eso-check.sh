@@ -66,24 +66,26 @@ KV_MOUNT=$(q '.spec.provider.vault.path')
 ESO_SA=$(q '.spec.provider.vault.auth.kubernetes.serviceAccountRef.name')
 ESO_NS=$(q '.spec.provider.vault.auth.kubernetes.serviceAccountRef.namespace')
 
-# The store's own Ready condition is ESO's verdict on whether it can reach and authenticate to
-# Vault, which is worth reading BEFORE the probe: a NotReady store makes the ExternalSecret below
-# fail for a reason that has nothing to do with the ExternalSecret.
+# The store's Ready condition is ESO's own verdict on whether it can reach and authenticate to
+# Vault. It is READ here and JUDGED further down, after the diagnostics - which is a correction,
+# not a style choice.
+#
+# The first version died right here on a NotReady store, which meant the next step - the one that
+# compares the NetworkPolicy's allowed pod label against the controller's real labels, and the
+# one that checks whether ESO can even mint its own token - never ran. The most informative
+# checks were gated behind the symptom they explain, so the script reported the failure and
+# withheld the diagnosis. On the first real run that cost exactly what it sounds like it cost.
 ready=$(printf '%s' "$store" | jq -r '.status.conditions[]? | select(.type=="Ready") | .status' | head -1)
 rmsg=$(printf '%s' "$store" | jq -r '.status.conditions[]? | select(.type=="Ready") | .message' | head -1)
 case "$ready" in
-  True)  ok "ClusterSecretStore/$STORE_NAME is Ready" ;;
-  "")    warn "ClusterSecretStore/$STORE_NAME has no Ready condition yet - the operator may not have looked at it" ;;
-  *)     bad "ClusterSecretStore/$STORE_NAME Ready=$ready: $rmsg"
-         die "The store cannot reach or authenticate to Vault, so nothing below would mean
-anything. In order of likelihood:
-  make vault-bootstrap                            Vault's role and policy may not exist yet
-  make vault-unseal                               a sealed Vault refuses every request
-  kubectl -n $ESO_NS logs deploy/external-secrets --tail=40" ;;
+  True) ok "ClusterSecretStore/$STORE_NAME is Ready" ;;
+  "")   warn "ClusterSecretStore/$STORE_NAME has no Ready condition yet - the operator may not have looked at it" ;;
+  *)    bad "ClusterSecretStore/$STORE_NAME Ready=$ready: $rmsg"
+        same 'continuing to the diagnostics below, which exist for exactly this case' ;;
 esac
 
-# ---------------------------------------------------------------- 1  the policy vs the pod
-step 'the Vault NetworkPolicy permits the pod that actually talks to Vault'
+# ---------------------------------------------------------------- 1  the Kubernetes side
+step 'the Kubernetes side: can ESO get a token, and can it reach Vault'
 # This step exists because of a specific indistinguishable pair: a wrong pod label in the
 # NetworkPolicy and a wrong Vault role produce the same symptom - a store that never becomes
 # Ready - and the network one is silent, because a dropped packet produces no error (ADR-0017).
@@ -97,6 +99,31 @@ step 'the Vault NetworkPolicy permits the pod that actually talks to Vault'
 # happened, so the closing summary does not claim a policy was verified when none exists. A
 # summary that over-claims is how a report becomes evidence for something it never checked.
 POLICY_VERIFIED=no
+FINDINGS=()
+
+# Can ESO obtain the token it presents to Vault at all?
+#
+# This is a DIFFERENT question from the one `make vault-bootstrap` answers, and the distinction is
+# the whole reason this check is here. Bootstrap ends by logging in to Vault with a token minted
+# by `kubectl create token`, i.e. as the cluster admin. That proves Vault's role, policy and
+# TokenReview path are correct. It proves nothing about whether ESO - a service account with
+# ordinary RBAC - can get a token of its own to present.
+#
+# With a ClusterSecretStore naming a serviceAccountRef, ESO calls the TokenRequest API for that
+# service account. No permission, no token, no Vault client - and the store's condition says
+# "unable to create client", which names neither RBAC nor Kubernetes.
+if kubectl auth can-i create serviceaccounts/token -n "$ESO_NS" \
+     --as="system:serviceaccount:$ESO_NS:$ESO_SA" >/dev/null 2>&1; then
+  ok "$ESO_NS/$ESO_SA can mint a token for itself (TokenRequest)"
+else
+  bad "$ESO_NS/$ESO_SA CANNOT create serviceaccounts/token"
+  FINDINGS+=("ESO cannot mint its own service account token, so it cannot build a Vault client.
+      The store names serviceAccountRef $ESO_NS/$ESO_SA, which requires the TokenRequest API.
+      What is actually granted:
+        kubectl get clusterrole -o json | jq -r '.items[]
+          | select(.rules[]?.resources[]? == \"serviceaccounts/token\") | .metadata.name'")
+fi
+
 ctrl=$(kubectl -n "$ESO_NS" get pods -o json 2>/dev/null \
        | jq -r --arg sa "$ESO_SA" '.items[]
            | select(.spec.serviceAccountName == $sa)
@@ -117,16 +144,35 @@ else
       POLICY_VERIFIED=yes
     else
       bad "NetworkPolicy vault-api permits [$(printf '%s' "$permitted" | tr '\n' ' ')] and the controller is $ctrl_label"
-      die "The controller cannot open a socket to Vault, and a dropped packet produces no error -
-so the only symptom is a store that never becomes Ready, which looks exactly like a broken
-Vault role. Fix the client name in gitops/environments/onprem/vault.yaml:
-
-    networkPolicy.clients[].name: $ctrl_label
-
-Then: git commit, make gitops-refresh. To watch the drops meanwhile:
-  kubectl -n kube-system exec ds/cilium -- hubble observe --to-namespace $VAULT_NS --verdict DROPPED --last 20"
+      FINDINGS+=("The NetworkPolicy does not permit the controller, so it cannot open a socket to
+      Vault - and a dropped packet produces no error, so the only symptom is a store that never
+      becomes Ready. Fix the client name in gitops/environments/onprem/vault.yaml:
+        networkPolicy.clients[].name: $ctrl_label
+      Then commit and: make gitops-refresh. To watch the drops meanwhile:
+        kubectl -n kube-system exec ds/cilium -- hubble observe --to-namespace $VAULT_NS --verdict DROPPED --last 20")
     fi
   fi
+fi
+
+# ---------------------------------------------------------------- 1b  now judge the store
+# The probe below cannot mean anything against a store ESO has rejected, so this is where the run
+# stops - AFTER the diagnostics rather than before them.
+if [[ "$ready" != "True" ]]; then
+  echo
+  bad "ClusterSecretStore/$STORE_NAME is not Ready, so the probe would prove nothing."
+  if (( ${#FINDINGS[@]} )); then
+    printf '\n%s  %d finding(s) above that would cause exactly this:%s\n\n' "$c_err" "${#FINDINGS[@]}" "$c_off"
+    for f in "${FINDINGS[@]}"; do printf '    - %s\n\n' "$f"; done
+  else
+    printf '\n%s  Nothing in the checks above explains it%s, which narrows it usefully: the identity\n' "$c_warn" "$c_off"
+    printf '  can mint a token and the network permits the pod, so the remaining candidates are\n'
+    printf '  inside Vault or inside the operator.\n\n'
+    printf '    make vault-bootstrap     re-runs clean and says what was missing\n'
+    printf '    make vault-status        a sealed Vault refuses every request\n\n'
+  fi
+  die "ESO's own logs name the reason it could not build a client:
+  kubectl -n $ESO_NS logs deploy/external-secrets --tail=40
+  kubectl get clustersecretstore $STORE_NAME -o jsonpath='{.status}' | jq ."
 fi
 
 # ---------------------------------------------------------------- 2  a fresh value, into Vault
