@@ -219,6 +219,13 @@ vault-seed-shopverse: ## Copy ShopVerse's EXISTING six credentials into Vault (n
 # against a database that still expects the old one, with MongoDB Running and Ready throughout.
 	@bash scripts/vault-seed-shopverse.sh
 
+.PHONY: secrets-audit
+secrets-audit: ## Is any LIVE credential findable in this repo's working tree or history?
+# The roadmap's bar is "git grep finds no credential". That is a claim about this repository, so
+# the repository answers it - against the values that are actually live in the cluster and in
+# .cache/vault-init.json, rather than against a list someone thought to check.
+	@bash scripts/secrets-audit.sh
+
 .PHONY: netpol-check
 netpol-check: ## Prove the tenant network policy denies something (two pods, one label apart)
 	@bash scripts/netpol-check.sh

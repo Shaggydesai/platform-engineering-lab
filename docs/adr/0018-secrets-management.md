@@ -157,3 +157,101 @@ is the only way to know it is on.
   before Vault does, and because the fresh-clone path needs it.
 - Nothing here is verified at the time of writing. This is a plan, in four stages, and at least one
   section above will turn out to be wrong.
+
+---
+
+## Verified, 2026-10-30 — stages 1 to 3
+
+```
+externalsecret shopverse-secrets   SecretSynced   True
+secret/shopverse-credentials  Opaque  6  27h      (kept, for rollback)
+secret/shopverse-secrets      Opaque  6  48m      (ESO, from Vault)
+
+make shopverse-check  7/7
+  5/7  order SV660435213332 placed, total 439
+  6/7  delete shopverse-mongodb-0 -> back Ready, same PV pvc-3a7105d5…
+  7/7  GET /api/orders/SV660435213332 -> 200
+```
+
+A real order was placed and survived the database restart, with every service authenticating
+against MongoDB using a password that now comes out of Vault. **That is Decision 5 verified in
+the only way that counts** — the root user on that volume was created from the pre-migration
+value, and it still accepts the post-migration one, because `make vault-seed-shopverse` copied
+the bytes and checked each one by hash rather than trusting that it had.
+
+Three corrections and one non-finding.
+
+### Decision 6 was right about the mechanism and wrong about the scope
+
+It said the flip is a rollout, and it is. It implied a rollout of all seven services, and that is
+wrong: **six of eight pods were replaced, and `shopverse-frontend` and `shopverse-api-gateway`
+were not** — 6h9m old against 48m for everything else.
+
+The reason is in the chart. The six `secretKeyRef` env vars are gated on `$svc.mongoDatabase`, so
+only services with a database get them, so only those pod templates changed.
+
+Which makes the set of pods that rolled exactly: the five services Hubble observed connecting to
+MongoDB in ADR-0017, plus MongoDB itself. **Two independent questions — "who talks to the
+database" and "whose pod template contains the credential" — landed on the same five services**,
+because both are really the question "who holds database credentials". The network policy and the
+blast radius of a secret change are the same boundary, arrived at from opposite directions.
+
+The general form, worth carrying into the cloud modules: the blast radius of a secret change is
+the set of pods that *read* it, which is narrower than the release and is discoverable from the
+chart before the change rather than from pod ages afterwards.
+
+### The ~9 second 502 window did not appear
+
+Step 7 returned `200` on the first attempt. The 2026-10-29 run needed three retries at
+three-second intervals, which ADR-0016 recorded as "~9 seconds".
+
+So that number is **variable, not a property**. Same cluster, same deliberate deletion, same
+check — three retries once and none the next time. ADR-0016's measurement stands as something
+that happened; it does not stand as a constant, and the retry count in `make shopverse-check` is
+the measurement rather than a threshold. Recorded here so nobody later treats 9 seconds as a
+budget.
+
+### The roadmap's rotation bar is not met, and the bar encoded an assumption
+
+The bar: *"rotating one secret takes one commit."* With Vault and ESO it takes **zero** commits,
+because the value is not in Git. The bar quietly assumed the secret lives in the repository —
+which is exactly what SOPS or Sealed Secrets would have given, and is a real argument for them
+that this ADR's options section did not make.
+
+What rotation actually costs, now in `docs/runbooks/07-secrets.md` with commands: a Vault
+`kv patch` (not `put` — `put` replaces the whole secret and would drop the other five keys), a
+forced ESO refresh because `refreshInterval` is 1h, and **a rollout** — because all six values are
+`secretKeyRef` env vars, which are resolved once at pod creation. ESO updating the Secret changes
+nothing about a running pod. A mounted Secret volume would update in place; an env var never does.
+
+And one of the six cannot be rotated at all: `mongo-password` initialised the root user on first
+boot, so changing it means deleting the volume and every order with it. That is MongoDB's
+behaviour, not a property of any secrets mechanism, and it is the kind of thing that should be
+written down before an incident rather than discovered during one.
+
+### `make secrets-audit` answers the other bar with evidence
+
+The *"git grep finds no credential"* bar is a claim about this repository, so the repository now
+answers it: `scripts/secrets-audit.sh` reads the live values out of the cluster and out of
+`.cache/vault-init.json` and searches every commit on every ref for each one. Patterns go through
+a mode-600 file rather than argv, and a finding reports the key name and `rev:path` — never the
+value, because `git grep` without `--name-only` prints the matching line into a scrollback buffer.
+
+Result: no credential in the working tree, none in 97 commits. Verified by planting a live value
+in a commit and watching it fail.
+
+It also caught a false positive in itself, which is the more useful part. The first version
+reported *"a live credential is in this repository — treat it as disclosed"*, pointing at the
+`Makefile` across 97 commits — for `admin@shopverse.local`, which `make shopverse-secret` sets as
+a literal. An email address. **A check that cries leak over a username is one nobody reads after
+the second time, which makes the next alert worse than useless.** `admin-email` and
+`mongo-username` are now classified as identifiers: still searched for, still reported, reported
+as what they are.
+
+### Still not verified
+
+- **Rotation.** The commands in the runbook are written and have never been run. The `force-sync`
+  annotation in particular is the documented ESO pattern and is untested here.
+- **Stage 4**, etcd encryption at rest, is outstanding.
+- Vault's API is still plaintext HTTP, mitigated by a NetworkPolicy and nothing else; ESO still
+  runs its own CA for its own webhook. Both in `docs/parking-lot.md`, both Module 08.
