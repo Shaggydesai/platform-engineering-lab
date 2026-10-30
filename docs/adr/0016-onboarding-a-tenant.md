@@ -119,14 +119,23 @@ platform's implementation baked into it.
 5Gi of a 35Gi worker disk, node-local. ADR-0015's warning applies in full and should stay
 uncomfortable: lose that node and the orders are gone.
 
-## Outstanding
+## Outstanding — resolved 2026-10-30
 
-**`global.imageTag: latest`.** This repository pins everything else — the Gateway API bundle by
-SHA-256, Cilium and Argo CD by chart version, local-path by tag plus recorded commit, this chart
-by commit — and then points at a moving tag for the application's own images. It is `latest` only
-because `ghcr.io` could not be reached from where this file was written, so the available tags
-could not be listed. Parked with the command to list them, and it should be pinned in the same
-session it is first confirmed working.
+**`global.imageTag` was `latest`.** Now `sha-6fd8524`, identified by digest rather than by
+choosing a plausible-looking tag, and confirmed across all seven services against what their pods
+were actually running. The details are in
+`gitops/environments/onprem/shopverse.yaml`, where whoever changes it next will read them.
+
+Two things learned in the doing, both recorded in `scripts/gitops-check-pins.sh`:
+
+**The pin was a runtime no-op**, and that is the property to aim for. It names the bytes already
+running and already gate-tested, so no pod restarted. A pin that requires a rollout to take
+effect is a pin *plus* an upgrade, and those should not arrive in the same change.
+
+**An empty digest is never a match.** A first attempt at the comparison had no guard against
+failed lookups and reported all eight candidate tags as identical to `latest` — when in fact
+every request had failed and it was comparing `""` to `""`. Eight matches that meant "both sides
+were empty". The guard now in `check-pins` exists because of that, not in anticipation of it.
 
 ## Consequences
 

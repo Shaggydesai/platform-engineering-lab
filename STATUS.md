@@ -5,7 +5,7 @@
 > not stall like the last one.
 
 **Last updated:** 2026-10-27
-**Current module:** 06 — ShopVerse runs (serving and gated; browser + image pin remain)
+**Current module:** 06 — ShopVerse runs (serving, gated and pinned; the browser half remains)
 **Overall progress:** Modules 00–05 complete — 6 / 13
 
 ---
@@ -31,6 +31,7 @@
 | **Internal CA** | `platform-ca` ClusterIssuer, Ready. Root valid to **2036-10-21**, key in `cert-manager/platform-ca-tls` |
 | **ShopVerse running** | **yes** — `https://shopverse.platform.local`, 8 pods, 20 seeded products, MongoDB on a 5Gi `platform-local` volume |
 | **ShopVerse gate** | `make shopverse-check` passes: register → cart → checkout → delete MongoDB → order survives, same PV |
+| **Everything pinned** | **yes** — images `sha-6fd8524` (all 7 verified by digest against what is running), app chart by commit, Gateway API by SHA-256, charts by version. No moving references left |
 | **Monthly spend** | ₹0 |
 
 To bring the nodes back after a reboot or a `wsl --shutdown`:

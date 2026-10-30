@@ -2,13 +2,35 @@
 # of them has a reason in this cluster rather than a preference (ADR-0016).
 
 global:
-  # TODO PIN THIS. `latest` is a moving reference and this repository pins everything else by
-  # version or digest - the Gateway API bundle by SHA-256, Cilium and Argo CD by chart version,
-  # local-path by tag plus recorded commit, the chart above by commit.
+  # Pinned 2026-10-30, and the evidence is worth keeping because the method generalises.
   #
-  # It is `latest` only because the available tags in ghcr.io/shaggydesai/microservice-app could
-  # not be listed from where this file was written. Parked with the command to list them.
-  imageTag: latest
+  # CI tags every image with sha-<short commit>. `sha-6fd8524` was identified not by reading the
+  # tag list and picking a plausible one, but by DIGEST: `latest` resolved to
+  # sha256:25c271ce… for the frontend, and sha-6fd8524 is the only one of the eight sha-* tags
+  # with that digest. The other seven were ruled out one at a time.
+  #
+  # Then confirmed for all SEVEN services, not just the one. Each service's sha-6fd8524 digest
+  # was compared against the digest its pod was ACTUALLY RUNNING
+  # (.status.containerStatuses[].imageID), and all seven matched:
+  #
+  #     frontend         25c271ce      cart-service     06895516
+  #     api-gateway      6e2affa4      order-service    16ffd2a3
+  #     user-service     70ae9f27      payment-service  015aa767
+  #     product-service  b5db7d1d
+  #
+  # So this pin names exactly the bytes that `make shopverse-check` passed against, and applying
+  # it changes nothing at runtime - no pod needs to restart, because every one is already on
+  # these digests. A pin that requires a rollout to take effect is a pin plus an upgrade, and
+  # the two should not arrive together.
+  #
+  # `make gitops-check-pins` now reports PINNED, REGISTRY and RUNNING per service, so the next
+  # time these disagree it is a line of output rather than an investigation.
+  #
+  # NOT a digest, though a digest would be stronger: the chart's image helper builds
+  # `printf "%s/%s:%s"` - a colon - so imageTag can only be a tag. And each service has its own
+  # digest while global.imageTag is one value for all seven, so digest pinning would mean seven
+  # per-service overrides that rot on every rebuild.
+  imageTag: sha-6fd8524
 
 # ---------------------------------------------------------------- ingress
 #
