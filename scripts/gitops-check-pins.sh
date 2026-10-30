@@ -187,6 +187,129 @@ elif [[ "$moved" != 0 ]]; then
 EOT
 fi
 
+# ---------------------------------------------------------------- container images
+#
+# The chart pins are about CHARTS. This section is about the images those charts run, and it asks
+# a second question the chart pins cannot: is each pod running the bytes Git asked for?
+#
+# That distinction is the lesson of ADR-0012's postscript transplanted to images. A tag in a
+# values file is a REQUEST. `imagePullPolicy: IfNotPresent` means a pod keeps whatever it pulled
+# when it first started, so a tag can be re-pointed, or edited in Git, and every pod goes on
+# running the old bytes while the manifest claims otherwise. The running digest is the answer.
+#
+# Three columns, and the third is the one worth reading:
+#   PINNED    - the tag the overlay asks for
+#   REGISTRY  - what that tag resolves to in the registry, right now
+#   RUNNING   - what the pod is actually executing
+#
+# REGISTRY != RUNNING means a restart would change the application. PINNED being a moving tag
+# like `latest` means that can happen without any commit at all.
+
+printf '\n%s%-18s %-14s %-11s %-11s %s%s\n' \
+  "$c_hdr" "IMAGE" "PINNED" "REGISTRY" "RUNNING" "" "$c_off"
+
+img_ns=$(yq -r '.spec.destination.namespace // ""' \
+         "$REPO_ROOT/gitops/clusters/onprem/apps/shopverse.yaml" 2>/dev/null || echo '')
+img_want=$(yq -r '.global.imageTag // ""' \
+           "$REPO_ROOT/gitops/environments/onprem/shopverse.yaml" 2>/dev/null || echo '')
+
+img_found=0; img_drift=0; img_unknown=0; img_moving=0
+
+if [[ -z "$img_ns" || -z "$img_want" ]]; then
+  printf '%s  (no tenant overlay to check)%s\n' "$c_dim" "$c_off"
+elif ! kubectl get namespace "$img_ns" >/dev/null 2>&1; then
+  printf '%s  (%s not present - nothing running to compare against)%s\n' "$c_dim" "$img_ns" "$c_off"
+else
+  while read -r image running; do
+    [[ -z "${image:-}" ]] && continue
+    repo="${image%:*}"
+    # The running value is "repo@sha256:...". Everything before the @ is the repo as the KUBELET
+    # resolved it, which is not always how the manifest spelled it.
+    run_digest="${running#*@}"
+
+    if [[ "$repo" != ghcr.io/* ]]; then
+      # mongo:7.0 and anything else from another registry. Not unpinned - `7.0` is a real
+      # version - and looking it up needs a different auth dance, so it is reported and skipped.
+      printf '%s%-18s %-14s %-11s %-11s external registry, skipped%s\n' \
+        "$c_dim" "${repo##*/}" "${image##*:}" "-" "${run_digest:7:9}" "$c_off"
+      continue
+    fi
+
+    path="${repo#ghcr.io/}"
+    svc="${path##*/}"
+    img_found=$((img_found + 1))
+
+    tk=$(curl -sS --max-time 15 \
+         "https://ghcr.io/token?scope=repository:${path}:pull&service=ghcr.io" 2>/dev/null \
+         | jq -r '.token // empty' 2>/dev/null || true)
+    reg_digest=""
+    if [[ -n "$tk" ]]; then
+      reg_digest=$(curl -sS --max-time 15 -H "Authorization: Bearer $tk" \
+        -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json' \
+        -o /dev/null -w '%header{docker-content-digest}' \
+        "https://ghcr.io/v2/${path}/manifests/${img_want}" 2>/dev/null || true)
+    fi
+
+    # AN EMPTY DIGEST IS NEVER A MATCH. This guard exists because a lookup written without it
+    # reported eight tags as identical to `latest` when in fact every single request had failed
+    # and it was comparing "" to "" - a check that agreed with whoever ran it, eight times.
+    if [[ -z "$reg_digest" ]]; then
+      printf '%s%-18s %-14s %-11s %-11s LOOKUP FAILED - no comparison made%s\n' \
+        "$c_warn" "$svc" "$img_want" "?" "${run_digest:7:9}" "$c_off"
+      img_unknown=$((img_unknown + 1))
+      continue
+    fi
+
+    note=""; colour="$c_ok"
+    if [[ "$reg_digest" != "$run_digest" ]]; then
+      colour="$c_warn"; note="DRIFT - a restart would change this pod"
+      img_drift=$((img_drift + 1))
+    fi
+    case "$img_want" in
+      latest|main|master|stable|edge)
+        colour="$c_warn"
+        note="${note:+$note; }moving tag - can change with no commit"
+        img_moving=$((img_moving + 1)) ;;
+    esac
+
+    printf '%s%-18s %-14s %-11s %-11s %s%s\n' \
+      "$colour" "$svc" "$img_want" "${reg_digest:7:9}" "${run_digest:7:9}" "$note" "$c_off"
+  done < <(kubectl -n "$img_ns" get pods \
+            -o jsonpath='{range .items[*]}{.spec.containers[0].image}{" "}{.status.containerStatuses[0].imageID}{"\n"}{end}' \
+            2>/dev/null | sort -u)
+
+  if [[ "$img_unknown" != 0 ]]; then
+    printf '\n  %s lookup(s) failed. That is not "no drift" - it is no answer. Check network\n' "$img_unknown"
+    printf '  access to ghcr.io before reading anything above as reassurance.\n'
+  fi
+  if [[ "$img_moving" != 0 ]]; then
+    cat <<'EOT'
+
+  A MOVING TAG. Everything else here is pinned by version, digest or commit; an image tag like
+  `latest` means the cluster can change what it runs with no commit anywhere. The REGISTRY column
+  above is what a new pod would get today. To pin it, find the immutable tag with that digest:
+
+    s=frontend   # or any service above
+    tk=$(curl -s "https://ghcr.io/token?scope=repository:shaggydesai/microservice-app/$s:pull&service=ghcr.io" | jq -r .token)
+    curl -s -H "Authorization: Bearer $tk" https://ghcr.io/v2/shaggydesai/microservice-app/$s/tags/list | jq -r '.tags[]'
+
+  then compare digests tag by tag and set global.imageTag in
+  gitops/environments/onprem/shopverse.yaml to the sha-* one that matches.
+EOT
+  fi
+  if [[ "$img_drift" != 0 ]]; then
+    cat <<'EOT'
+
+  DRIFT between the registry and a running pod. The pod is executing bytes the manifest no longer
+  resolves to, which is invisible until something restarts it and then surprising. Either the tag
+  moved under you, or the pin changed in Git and nothing has restarted since.
+
+    kubectl -n <ns> rollout restart deployment --all
+
+EOT
+  fi
+fi
+
 # Deliberately exit 0 even when pins are behind. This is information, not a failure: `make lint`
 # should not break because an upstream project published a release this morning.
 exit 0
