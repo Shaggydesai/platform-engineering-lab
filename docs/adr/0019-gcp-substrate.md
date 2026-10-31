@@ -78,30 +78,36 @@ state. The one manual step is recorded in `clusters/gcp/cluster.json`, and
 `make gcp-guardrails` refuses to run while `project_id` is empty rather than defaulting to
 whatever `gcloud config` happens to point at. That refusal is the control.
 
-### 1c. Two APIs are enabled by gcloud before Terraform runs
+### 1c. Four APIs are enabled by gcloud, and they cannot be Terraform resources
 
-A brand-new project has almost nothing enabled, and Terraform cannot enable the API it needs in
-order to enable APIs. `google_project_service` is managed through the Cloud Resource Manager
-API — and because the provider sets `billing_project` (Decision 6's `X-Goog-User-Project` fix),
-the request is attributed to that same new project. So:
+Not a convenience and not an ordering problem. **An API that must exist before Terraform can
+refresh its own state cannot be managed by that Terraform.**
 
-```
-Error 403: Cloud Resource Manager API has not been used in project
-platform-eng-lab-261031 before or it is disabled
-  ... while reading  shopverse-lab/billingbudgets.googleapis.com
-```
+The guardrail state holds one `google_billing_budget`. Terraform refreshes existing state before
+it plans, refreshing that budget calls the Cloud Billing Budget API, and because the provider
+sets `billing_project` (Decision 6) the call is attributed to this project. So the refresh needs
+the API enabled — and the `google_project_service` resource that would enable it has not been
+applied, because the plan it belongs to has not been produced. Refresh always precedes apply, so
+it never can be.
 
-Note the shape, because it is the second time today an error has pointed somewhere other than
-its cause: the resource being read belongs to the **old** project, the API that is missing is on
-the **new** one, and nothing in the message connects the two. The link is the quota header.
+Declaring it creates a state that cannot be read without the thing the state creates. Two such
+resources lived in `main.tf` and have been removed; `make gcp-guardrails` enables all four with
+`gcloud services enable` first:
 
-So `make gcp-guardrails` runs `gcloud services enable cloudresourcemanager.googleapis.com
-serviceusage.googleapis.com` first. It is idempotent, costs a second, and means a fresh clone
-against a fresh project works with no manual step that only exists in somebody's memory.
+| | |
+|:--|:--|
+| `cloudresourcemanager`, `serviceusage` | without these the provider cannot manage services at all |
+| `cloudbilling`, `billingbudgets` | without these the one resource in this state cannot be read |
 
-This was found the only way it could be — by pointing the guardrail at a project created five
-minutes earlier. It would not have appeared on `shopverse-lab`, where years of use had already
-enabled everything.
+It is idempotent, so it costs a second per run rather than being a one-off nobody wrote down.
+
+**It took two failed applies to see, and only because the guardrail was pointed at a project
+created minutes earlier.** The error named the missing API but not that the request had been
+attributed to a project other than the one being changed — the link is the quota header, which
+appears nowhere in the message. Against `shopverse-lab`, years old with everything long since
+enabled, the original version applied first time and looked correct. The old project was hiding
+the bug by being well-worn, which is the same reason this project destroys and rebuilds the
+on-prem cluster rather than trusting a machine that has been fixed.
 
 ### 2. Zonal, spot, two e2-medium nodes
 

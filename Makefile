@@ -266,7 +266,7 @@ cost-check: ## ADR-0003 Decision 5 - is anything billable still running, in ANY 
 
 .PHONY: gcp-guardrails
 gcp-guardrails: _no-stray-flags ## ADR-0003 gate - the ₹400 budget alert, BEFORE any cloud resource
-# TWO APIS ARE ENABLED BY GCLOUD BEFORE TERRAFORM RUNS, and that is not laziness.
+# FOUR APIS ARE ENABLED BY GCLOUD BEFORE TERRAFORM RUNS, and they CANNOT be Terraform resources.
 #
 # A brand-new GCP project has almost nothing enabled. Terraform needs the Cloud Resource Manager
 # API to manage `google_project_service` at all - and because the provider sets `billing_project`
@@ -310,8 +310,9 @@ gcp-guardrails: _no-stray-flags ## ADR-0003 gate - the ₹400 budget alert, BEFO
 	  printf '  gcloud config set project %s\n' "$$proj"; \
 	  exit 1; \
 	fi; \
-	printf 'enabling the two bootstrap APIs (no-op if already on)\n'; \
+	printf 'enabling the four bootstrap APIs (no-op if already on)\n'; \
 	gcloud services enable cloudresourcemanager.googleapis.com serviceusage.googleapis.com \
+	  cloudbilling.googleapis.com billingbudgets.googleapis.com \
 	  --project="$$proj" --quiet || { \
 	  printf '\033[31mcould not enable the bootstrap APIs on %s\033[0m\n' "$$proj"; \
 	  printf 'Terraform cannot manage google_project_service without them, and it cannot enable\n'; \

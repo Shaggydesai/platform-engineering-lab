@@ -7,34 +7,35 @@
 #
 # So this state holds one resource, is applied once, and is never destroyed by `make down`.
 
-# Enabling an API creates nothing billable, which is why this is allowed to come before the
-# budget it is a prerequisite for. The chicken-and-egg is real but harmless: the Budget API must
-# be on before a budget can be created, and turning it on costs nothing and nothing can run on it.
-resource "google_project_service" "billingbudgets" {
-  project = local.cfg.project_id
-  service = "billingbudgets.googleapis.com"
-
-  # Leave the API enabled when this state is destroyed. Disabling a service is slow, occasionally
-  # fails, and can break things in the project that have nothing to do with this state - and the
-  # thing being protected here is the ability to notice spending, which is not something to switch
-  # off as a side effect of tidying up.
-  disable_on_destroy = false
-}
-
-resource "google_project_service" "cloudbilling" {
-  project            = local.cfg.project_id
-  service            = "cloudbilling.googleapis.com"
-  disable_on_destroy = false
-}
+# THERE ARE NO google_project_service RESOURCES HERE, and that is a correction rather than an
+# omission. Two of them lived here until 2026-10-31 and could never have worked.
+#
+# Terraform REFRESHES existing state before it plans. Refreshing `google_billing_budget` calls
+# the Cloud Billing Budget API, and because the provider sets `billing_project`, that call is
+# attributed to this project. So the refresh needs the API enabled - and the resource that would
+# enable it has not been applied yet, because the plan it belongs to has not been produced yet.
+# Refresh always precedes apply, so it never can be.
+#
+#     Error 403: Cloud Billing Budget API has not been used in project
+#     platform-eng-lab-261031 before or it is disabled
+#       ... while reading the budget that already exists
+#
+# The general rule, which is worth more than this instance: AN API THAT MUST EXIST BEFORE
+# TERRAFORM CAN REFRESH ITS OWN STATE CANNOT BE MANAGED BY THAT TERRAFORM. Not "is awkward to" -
+# cannot. Declaring it creates a state that cannot be read without the thing the state creates.
+#
+# So `make gcp-guardrails` enables all four with gcloud first: cloudresourcemanager and
+# serviceusage (without which the provider cannot manage services at all), cloudbilling and
+# billingbudgets (without which this file's one resource cannot be read). `gcloud services
+# enable` is idempotent, so it is a second per run rather than a one-off someone must remember.
+#
+# It cost two failed applies to find, and only because the guardrail was pointed at a project
+# created minutes earlier. Against shopverse-lab - years old, everything long since enabled -
+# the original version applied first time and looked correct.
 
 resource "google_billing_budget" "guardrail" {
   billing_account = var.billing_account
   display_name    = "platform-engineering-lab guardrail (${local.budget.currency} ${local.budget.amount_inr})"
-
-  depends_on = [
-    google_project_service.billingbudgets,
-    google_project_service.cloudbilling,
-  ]
 
   # NO budget_filter, and that is the decision rather than an omission.
   #
