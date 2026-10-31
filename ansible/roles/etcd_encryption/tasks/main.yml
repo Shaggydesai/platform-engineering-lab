@@ -24,8 +24,38 @@
   become: true
   register: enc_admin_conf
 
+- name: Does the EncryptionConfiguration exist?
+  # Both a check-mode fix and a real safety gate, and the second is the reason it is here.
+  #
+  # The check-mode half: under --check the control_plane role does not actually create
+  # /etc/kubernetes/enc, so the backup copy below failed with "Destination directory does not
+  # exist". That is the SECOND role to break this way - the first fix, one commit ago, repaired
+  # the instance and not the class, which is its own lesson.
+  #
+  # The safety half matters more. Everything below points the API server at this file. If it is
+  # absent - because the control_plane role was skipped by a narrower tag, or someone ran this
+  # role alone - the API server would be told to read a file that does not exist and would refuse
+  # to start. The automatic rollback would recover it, and a control plane that goes down and
+  # comes back is still a control plane that went down. Not starting is better than recovering.
+  ansible.builtin.stat:
+    path: /etc/kubernetes/enc/encryption-config.yaml
+  become: true
+  register: enc_config
+
+- name: Nothing to wire, and why
+  when: not (enc_admin_conf.stat.exists and enc_config.stat.exists)
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'This node is not initialised, so there is no running API server to reconfigure.'
+         if not enc_admin_conf.stat.exists else
+         '/etc/kubernetes/enc/encryption-config.yaml does not exist, so there is nothing to point
+          the API server at - and pointing it at a missing file would stop it from starting.' }}
+      {{ 'Under --check that is expected: the task that writes it did not run.'
+         if ansible_check_mode else
+         'Run the control_plane role first - `make onprem-up TAGS=etcd-encryption` includes it.' }}
+
 - name: Wire encryption into the running control plane
-  when: enc_admin_conf.stat.exists
+  when: enc_admin_conf.stat.exists and enc_config.stat.exists
   become: true
   block:
 
@@ -190,10 +220,11 @@
         cmd: kubeadm init phase upload-config kubeadm --config /etc/kubernetes/kubeadm/init.yaml
       changed_when: false
 
-- name: Nothing to wire yet
-  when: not enc_admin_conf.stat.exists
+- name: The fresh-cluster case, stated once
+  when: not enc_admin_conf.stat.exists and enc_config.stat.exists
   ansible.builtin.debug:
     msg: >-
-      This node is not initialised, so there is no running API server to reconfigure. The key and
-      the EncryptionConfiguration exist, and the kubeadm config carries the flag - so the control
-      plane will be encrypted from its first write and no re-encryption will be needed.
+      Not initialised, and the EncryptionConfiguration is already in place - so `kubeadm init`
+      will build a control plane that encrypts from its first write. There is no running API
+      server to reconfigure and nothing to re-encrypt, which is the cheapest path through this
+      whole module and the one a rebuild always takes.
