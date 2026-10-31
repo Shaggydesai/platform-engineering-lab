@@ -13,8 +13,8 @@
   ],
   "project_id": "platform-eng-lab-261031",
   "_project_comment": [
-    "EMPTY until you create a project for THIS lab. `make gcp-guardrails` refuses to run",
-    "without it rather than defaulting to whatever gcloud happens to be pointed at.",
+    "The project for THIS lab, created 2026-10-31. `make gcp-guardrails` refuses to run while",
+    "this is empty rather than defaulting to whatever gcloud happens to be pointed at.",
     "",
     "It was briefly set to `shopverse-lab`, which was wrong: that project belongs to an",
     "earlier, abandoned attempt and I took it from `gcloud projects list` without asking",
