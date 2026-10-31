@@ -1,0 +1,26 @@
+---
+# Which cipher the API server uses to encrypt Secrets before writing them to etcd.
+#
+# A role default rather than a value in clusters/onprem/nodes.json, because unlike the CIDRs and
+# addresses there, this cannot disagree with anything: nothing else in the repository has an
+# opinion about it, and there is no second copy to drift from.
+#
+# `aescbc` because it is the provider every version of the Kubernetes documentation uses in its
+# own example, and the one most certain to exist in any release this cluster might run. The
+# alternatives, and why not:
+#
+#   secretbox  XSalsa20-Poly1305. Faster, and authenticated encryption rather than CBC. A
+#              reasonable swap and a one-word edit here.
+#   aesgcm     Must have its key rotated roughly every 200,000 writes - nonce reuse under a
+#              long-lived key is a real weakness, not a formality. Wrong for a cluster whose
+#              key is generated once and never rotated, which is this one.
+#   kms        The production answer: the key lives in a KMS and the API server never holds it.
+#              That is what the cloud modules get, and it is the honest end state - here the key
+#              sits in a file on the control-plane node, which is a trust model, not an absence
+#              of one.
+#
+# Changing this value re-renders the EncryptionConfiguration with the SAME key under a different
+# cipher. Secrets already written with the old provider stay readable only if that provider is
+# still listed, and the template lists exactly one - so a change here needs `make etcd-reencrypt`
+# straight afterwards, or Secrets written before the change become unreadable.
+etcd_encryption_provider: aescbc

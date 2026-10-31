@@ -6,6 +6,85 @@
 # cluster on every run. So the whole role is gated on one file: /etc/kubernetes/admin.conf exists
 # if and only if this node has been initialised.
 
+# ---------------------------------------------------------------- etcd encryption at rest
+#
+# These four tasks run BEFORE kubeadm init, and the ordering is load-bearing: the rendered
+# kubeadm config tells the API server to read /etc/kubernetes/enc/encryption-config.yaml, and an
+# API server pointed at a file that does not exist does not warn - it refuses to start. On a
+# fresh node that means `kubeadm init` itself times out waiting for a control plane that will
+# never come up, with the real reason three layers down in the kubelet's logs.
+#
+# Doing it here also means a FRESH cluster is encrypted from its first write, so there is nothing
+# to re-encrypt. Only an already-running cluster needs `make etcd-reencrypt`.
+
+- name: Make sure the encryption key directory exists
+  ansible.builtin.file:
+    path: /etc/kubernetes/enc
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  become: true
+  tags: [config, etcd-encryption]
+
+- name: Generate the etcd encryption key, once and only once
+  # `creates:` is the whole safety property of this task. Regenerating this key would leave every
+  # Secret already in etcd encrypted under a key nobody has - unreadable, permanently, and the
+  # symptom is the API server returning errors for Secrets that plainly exist.
+  #
+  # 32 bytes because that is what aescbc, aesgcm and secretbox all require. A key of any other
+  # length is rejected by the API server at startup, which is the one failure here that is loud.
+  ansible.builtin.shell:
+    cmd: set -o pipefail && head -c 32 /dev/urandom | base64 -w0 > /etc/kubernetes/enc/key1.b64
+    executable: /bin/bash
+    creates: /etc/kubernetes/enc/key1.b64
+  become: true
+  tags: [config, etcd-encryption]
+
+- name: Read the key back and check its length
+  # Read rather than remembered. A truncated or hand-edited key file produces an API server that
+  # will not start, and finding that out here - with a number - beats finding it out from a
+  # control plane that is down.
+  ansible.builtin.slurp:
+    src: /etc/kubernetes/enc/key1.b64
+  become: true
+  register: cp_enc_key
+  no_log: true
+  tags: [config, etcd-encryption]
+
+- name: The encryption key must be exactly 32 bytes
+  # Checked as 44 base64 CHARACTERS rather than by decoding to 32 bytes, deliberately:
+  # Ansible's b64decode returns a str and decodes as UTF-8, so running it over 32 random bytes
+  # raises a UnicodeDecodeError roughly 99.9% of the time. The assertion would then fail on a
+  # perfectly good key, which is a worse outcome than not checking - it would send someone
+  # deleting the one file they must not delete.
+  #
+  # 32 bytes is always exactly 44 base64 characters including the single '=' pad.
+  ansible.builtin.assert:
+    that:
+      - (cp_enc_key.content | b64decode | trim | length) == 44
+    fail_msg: >-
+      /etc/kubernetes/enc/key1.b64 does not decode to 32 bytes. The API server will refuse to
+      start with this key. If this file was hand-edited, and NO Secret has been written since,
+      it is safe to delete it and re-run. If Secrets have been written, deleting it makes them
+      unreadable - restore the original first.
+    success_msg: "encryption key is 32 bytes"
+  tags: [config, etcd-encryption]
+
+- name: Render the EncryptionConfiguration
+  ansible.builtin.template:
+    src: encryption-config.yaml.j2
+    dest: /etc/kubernetes/enc/encryption-config.yaml
+    owner: root
+    group: root
+    mode: "0600"
+  vars:
+    etcd_encryption_key: "{{ cp_enc_key.content | b64decode | trim }}"
+  become: true
+  # The key is interpolated into this file, so a verbose run would otherwise print it.
+  no_log: true
+  tags: [config, etcd-encryption]
+
 - name: Make sure the kubeadm config directory exists
   # `template` does not create parent directories, and /etc/kubernetes/kubeadm is ours - the
   # kubeadm packages create /etc/kubernetes and /etc/kubernetes/manifests, not this.

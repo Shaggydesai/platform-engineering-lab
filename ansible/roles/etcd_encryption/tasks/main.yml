@@ -1,0 +1,194 @@
+---
+# etcd_encryption: make a RUNNING API server start using the EncryptionConfiguration.
+#
+# The control_plane role generated the key, rendered the EncryptionConfiguration, and put the
+# flag and the volume into the kubeadm config. On a FRESH cluster that is the whole job - kubeadm
+# init builds a control plane that is encrypted from its first write, and this role finds nothing
+# to do.
+#
+# On an ALREADY RUNNING cluster none of it has taken effect, because the kubeadm config is only
+# read at init and upgrade. The live API server is a static pod manifest at
+# /etc/kubernetes/manifests/kube-apiserver.yaml, and that file is what has to change.
+#
+# THIS IS THE MOST DANGEROUS THING IN THIS REPOSITORY. An API server that will not start takes
+# kubectl with it, so the usual way of finding out what went wrong is also gone. Hence the shape
+# of this role: back up the working manifest, make the change, and if the API server does not
+# come back WITH THE FLAG ACTUALLY IN IT, put the backup back automatically.
+#
+# That turns "a wrong flag bricks the cluster until someone SSHes in" into "a wrong flag costs
+# ninety seconds and prints the reason". It is the only reason this role is acceptable at all.
+
+- name: Is this node initialised?
+  ansible.builtin.stat:
+    path: /etc/kubernetes/admin.conf
+  become: true
+  register: enc_admin_conf
+
+- name: Wire encryption into the running control plane
+  when: enc_admin_conf.stat.exists
+  become: true
+  block:
+
+    - name: What does the API server manifest look like now?
+      ansible.builtin.stat:
+        path: /etc/kubernetes/manifests/kube-apiserver.yaml
+        checksum_algorithm: sha256
+      register: enc_before
+
+    - name: Keep a copy of the last manifest known to work
+      # Written once and then left alone. `force: false` is the point: on a later run the
+      # current manifest is the ENCRYPTED one, and copying that over the backup would replace
+      # the known-good pre-encryption manifest with one that may be the thing that is broken.
+      # A backup that gets overwritten by the change it protects against is not a backup.
+      ansible.builtin.copy:
+        src: /etc/kubernetes/manifests/kube-apiserver.yaml
+        dest: /etc/kubernetes/enc/kube-apiserver.yaml.pre-encryption
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0600"
+        force: false
+
+    - name: Regenerate the API server manifest from the kubeadm config
+      # kubeadm's own phase, not a regex over the manifest. Editing a static pod manifest in
+      # place with lineinfile means owning the indentation of a volumes list, and getting it
+      # wrong produces a manifest the kubelet silently refuses to parse - no pod, no event, no
+      # error anywhere a human looks.
+      #
+      # This regenerates the file deterministically from /etc/kubernetes/kubeadm/init.yaml,
+      # which the control_plane role re-renders from nodes.json on every run. So the config file
+      # is the source of truth and the manifest is derived from it - the same direction as
+      # everything else here.
+      ansible.builtin.command:
+        cmd: kubeadm init phase control-plane apiserver --config /etc/kubernetes/kubeadm/init.yaml
+      changed_when: false
+      register: enc_regen
+
+    - name: Did the manifest actually change?
+      ansible.builtin.stat:
+        path: /etc/kubernetes/manifests/kube-apiserver.yaml
+        checksum_algorithm: sha256
+      register: enc_after
+
+    - name: Report that nothing moved
+      when: enc_before.stat.checksum == enc_after.stat.checksum
+      ansible.builtin.debug:
+        msg: >-
+          kube-apiserver.yaml is unchanged - encryption was already wired in, or this cluster was
+          initialised with it. Nothing restarted. `make etcd-encryption-check` is what says
+          whether every Secret is actually encrypted; this task only says the config is in place.
+
+    - name: The manifest changed, so the API server is restarting
+      when: enc_before.stat.checksum != enc_after.stat.checksum
+      block:
+
+        - name: Give the kubelet time to notice the new manifest
+          # The kubelet polls /etc/kubernetes/manifests. Nothing happens the instant the file is
+          # written, and polling the API server immediately would get an answer from the OLD
+          # process - a pass that means the opposite of what it looks like.
+          ansible.builtin.pause:
+            seconds: 20
+
+        - name: Wait for an API server that is answering AND has the flag
+          # Two conditions, and the second is the one that matters. "The API server answers" is
+          # satisfied by the old pod that has not been killed yet; it was the first version of
+          # this check and it would have passed instantly, every time, whatever happened next.
+          #
+          # Reading the flag out of the RUNNING pod's spec is the difference between confirming
+          # the request was recorded and confirming it took effect - the single failure shape
+          # this repository has now collected eight times.
+          ansible.builtin.shell:
+            cmd: |
+              set -o pipefail
+              kubectl --kubeconfig /etc/kubernetes/admin.conf -n kube-system \
+                get pod kube-apiserver-{{ inventory_hostname }} \
+                -o jsonpath='{.spec.containers[0].command}' 2>/dev/null \
+                | grep -q 'encryption-provider-config'
+            executable: /bin/bash
+          register: enc_running
+          until: enc_running.rc == 0
+          retries: 24
+          delay: 5
+          changed_when: false
+          failed_when: false
+
+        - name: Put the working manifest back if the API server did not come up
+          when: enc_running.rc != 0
+          block:
+            - name: Restore the pre-encryption manifest
+              ansible.builtin.copy:
+                src: /etc/kubernetes/enc/kube-apiserver.yaml.pre-encryption
+                dest: /etc/kubernetes/manifests/kube-apiserver.yaml
+                remote_src: true
+                owner: root
+                group: root
+                mode: "0600"
+
+            - name: Wait for the control plane to recover
+              ansible.builtin.shell:
+                cmd: kubectl --kubeconfig /etc/kubernetes/admin.conf get --raw /readyz
+                executable: /bin/bash
+              register: enc_recovered
+              until: enc_recovered.rc == 0
+              retries: 24
+              delay: 5
+              changed_when: false
+              failed_when: false
+
+            - name: Say what happened and stop
+              ansible.builtin.fail:
+                msg: |-
+                  The API server did not come back with --encryption-provider-config, so the
+                  previous manifest has been restored and the cluster is {{ 'running again'
+                  if enc_recovered.rc == 0 else 'STILL DOWN - see below' }}.
+
+                  Encryption is NOT enabled. Nothing was lost: no Secret was ever written under
+                  a key, so there is nothing undecryptable.
+
+                  The reason is in the kubelet's journal on {{ inventory_hostname }}, because a
+                  static pod that fails to start never reaches the API server to produce an
+                  event:
+
+                    ssh {{ inventory_hostname }} 'sudo journalctl -u kubelet -n 50 --no-pager'
+                    ssh {{ inventory_hostname }} 'sudo crictl ps -a | grep apiserver'
+                    ssh {{ inventory_hostname }} 'sudo crictl logs $(sudo crictl ps -a -q \
+                      --name kube-apiserver | head -1)'
+
+                  The two likely causes, in order:
+                    1. an argument in the kubeadm config's apiServer.extraArgs that this
+                       Kubernetes release does not have - `kubeadm config validate` checks the
+                       kubeadm schema, not the API server's flags
+                    2. the EncryptionConfiguration being rejected - a provider name this release
+                       does not support, or a key that is not 32 bytes
+
+                  {{ 'If the cluster is still down, the manifest on disk is now the pre-encryption
+                  one and the kubelet should start it within 20 seconds. If it does not, that is a
+                  separate problem from this change.' if enc_recovered.rc != 0 else '' }}
+
+        - name: Encryption is now live
+          when: enc_running.rc == 0
+          ansible.builtin.debug:
+            msg: >-
+              The API server restarted with --encryption-provider-config and is serving. NEW
+              Secrets are now encrypted in etcd. Secrets written BEFORE this moment are still
+              plaintext - enabling encryption does not reach back - and `make etcd-reencrypt`
+              is what rewrites them. `make etcd-encryption-check` counts how many are left.
+
+    - name: Store the kubeadm config in the cluster so upgrades keep the flag
+      # Without this, the ConfigMap in kube-system still describes an API server with no
+      # encryption - so the next `kubeadm upgrade` regenerates the manifest from the OLD config
+      # and silently removes the flag. The cluster would keep working, keep reporting healthy,
+      # and quietly stop encrypting, with every Secret written after that point in plaintext.
+      #
+      # A slow, silent regression months later is exactly the kind of thing worth one task now.
+      ansible.builtin.command:
+        cmd: kubeadm init phase upload-config kubeadm --config /etc/kubernetes/kubeadm/init.yaml
+      changed_when: false
+
+- name: Nothing to wire yet
+  when: not enc_admin_conf.stat.exists
+  ansible.builtin.debug:
+    msg: >-
+      This node is not initialised, so there is no running API server to reconfigure. The key and
+      the EncryptionConfiguration exist, and the kubeadm config carries the flag - so the control
+      plane will be encrypted from its first write and no re-encryption will be needed.

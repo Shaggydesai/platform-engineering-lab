@@ -213,3 +213,61 @@ kubectl -n shopverse-prod delete pvc -l app.kubernetes.io/component=mongodb
 One of the six credentials is effectively immutable without data loss. That is a property of
 MongoDB's initialisation, not of Vault or ESO, and no secrets mechanism would change it — which is
 precisely why it is written down here rather than discovered during an incident.
+
+## Encryption at rest
+
+```bash
+make onprem-up TAGS=etcd-encryption     # key, config, and the API server restart
+make etcd-encryption-check              # reads etcd; expect "older ones still plaintext"
+make etcd-reencrypt                     # the step everyone skips
+make etcd-encryption-check              # now expect clean
+```
+
+**The API server restarts during the first run**, which is about twenty seconds with no
+kubectl. The role backs up the working static pod manifest first and **restores it
+automatically** if the API server does not come back carrying the flag — so a config the API
+server rejects costs ninety seconds rather than the cluster. If it does roll back, nothing is
+lost: no Secret was ever written under a key, so there is nothing undecryptable.
+
+If the control plane is down and Ansible is not what is telling you so, the manifest is on the
+node and the reason is in the kubelet's journal — a static pod that fails to start never reaches
+the API server to produce an event:
+
+```bash
+ssh k8s-cp01 'sudo journalctl -u kubelet -n 50 --no-pager'
+ssh k8s-cp01 'sudo cp /etc/kubernetes/enc/kube-apiserver.yaml.pre-encryption \
+                      /etc/kubernetes/manifests/kube-apiserver.yaml'
+```
+
+### Why `make etcd-reencrypt` is not optional
+
+Turning encryption on does not reach backwards. A Secret becomes encrypted when it is next
+**written**, and nothing rewrites them on its own — so every Secret that existed beforehand stays
+readable to anyone who can read etcd's files, which is the entire threat this was enabled for.
+
+`kubectl get secrets -A -o json | kubectl replace -f -` rewrites each Secret with its own
+content. No value changes; every value gets re-encoded through the provider. It bumps every
+`resourceVersion`, so anything watching Secrets sees an update — ESO may resync, Argo CD may
+re-read — and pods are **not** restarted, because a `secretKeyRef` env var is resolved at pod
+creation.
+
+### What it protects against, precisely
+
+| | |
+|:--|:--|
+| someone reading etcd's files on the control-plane node | **yes** |
+| an etcd backup that leaks | **yes** |
+| anyone with `get secret` RBAC | no |
+| a compromised pod with the Secret mounted | no |
+| root on any node | no |
+
+The API server decrypts for all three of the bottom rows. **Encryption at rest is not access
+control**, and the only reason to write that out is that it is routinely ticked off as though it
+were.
+
+### And the key is now load-bearing
+
+`/etc/kubernetes/enc/key1.b64` on the control-plane node, generated once, never rotated. It is a
+**second** irreducible secret alongside `.cache/vault-init.json`, and it is deliberately not
+copied to the workstation — see `docs/parking-lot.md` for why, and for the obligation it puts on
+whoever adds etcd backups.

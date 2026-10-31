@@ -82,6 +82,43 @@ apiServer:
     - {{ control_plane_address }}
     - 127.0.0.1
 
+  # Encryption at rest for Secrets (ADR-0018 Decision 7). Two halves, and neither works
+  # alone: the flag tells the API server which file to read, the volume is what makes that
+  # file visible inside the static pod's container.
+  #
+  # Omit the volume and the flag points at a path that exists on the host and not in the
+  # container - so the API server refuses to start, and on a fresh node `kubeadm init` hangs
+  # waiting for a control plane that never arrives. The reason is in the kubelet's journal,
+  # several layers below where anyone looks first.
+  #
+  # v1beta4 shape, which changed from v1beta3: extraArgs is a LIST of {name, value} objects,
+  # not a map. The same change that bites kubeletExtraArgs, noted at the top of this file.
+  extraArgs:
+    - name: encryption-provider-config
+      value: /etc/kubernetes/enc/encryption-config.yaml
+    # ONE flag, and that is a decision. `--encryption-provider-config-automatic-reload=true`
+    # would let the API server re-read this file on change instead of needing a restart, and it
+    # was the obvious second line to write.
+    #
+    # Left out because `kubeadm config validate` checks the kubeadm schema, not the API server's
+    # flag set - so an argument that does not exist in this release is accepted here and then
+    # rejected by the API server at startup, which is the one failure mode that takes the whole
+    # cluster with it. The reload buys nothing for a key that is generated once and never
+    # rotated. Every extra flag here is another way for the control plane not to come back.
+
+  extraVolumes:
+    - name: etcd-encryption
+      hostPath: /etc/kubernetes/enc
+      mountPath: /etc/kubernetes/enc
+      # The API server only reads it. Mounting it writable would let a compromised API server
+      # rewrite its own encryption config, which is a small thing that costs nothing to refuse.
+      readOnly: true
+      # DirectoryOrCreate rather than Directory: the kubelet creates the path if it is absent
+      # instead of leaving the pod stuck in ContainerCreating. The directory is created by the
+      # control_plane role before init, so this is a belt-and-braces default - but the failure
+      # it avoids is a pod that never starts and never says why.
+      pathType: DirectoryOrCreate
+
 etcd:
   local:
     dataDir: /var/lib/etcd

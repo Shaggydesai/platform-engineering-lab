@@ -219,6 +219,42 @@ vault-seed-shopverse: ## Copy ShopVerse's EXISTING six credentials into Vault (n
 # against a database that still expects the old one, with MongoDB Running and Ready throughout.
 	@bash scripts/vault-seed-shopverse.sh
 
+.PHONY: etcd-encryption-check
+etcd-encryption-check: ## Read etcd directly: are Secrets ciphertext or plaintext?
+	@bash scripts/etcd-encryption-check.sh
+
+.PHONY: etcd-reencrypt
+etcd-reencrypt: ## Rewrite every Secret so the ones predating encryption get encrypted
+# The step everyone skips. Turning encryption on does not reach backwards: a Secret is encrypted
+# when it is next WRITTEN, and nothing rewrites them on its own. `kubectl replace` with the same
+# content is the rewrite - no value changes, every value gets re-encoded through the new provider.
+	@set -eu; \
+	if ! kubectl -n kube-system get pod -l component=kube-apiserver \
+	     -o jsonpath='{.items[0].spec.containers[0].command}' | grep -q encryption-provider-config; then \
+	  printf 'The running API server has no --encryption-provider-config.\n\n'; \
+	  printf 'Rewriting every Secret now would re-encode them all as plaintext, which is a lot of\n'; \
+	  printf 'churn for no gain. Enable encryption first:\n'; \
+	  printf '  make onprem-up TAGS=etcd-encryption\n'; \
+	  exit 1; \
+	fi; \
+	n=$$(kubectl get secrets -A --no-headers 2>/dev/null | wc -l | tr -d ' '); \
+	printf 'This rewrites all %s Secrets in every namespace, in place.\n\n' "$$n"; \
+	printf 'No VALUE changes - each Secret is replaced with its own content, which is what makes\n'; \
+	printf 'the API server re-encode it through the encryption provider. What does change is every\n'; \
+	printf 'resourceVersion, so anything watching Secrets sees an update: External Secrets may\n'; \
+	printf 'resync and Argo CD may re-read. Pods are NOT restarted - a secretKeyRef env var is\n'; \
+	printf 'resolved at pod creation and is unaffected.\n\n'; \
+	printf 'continue? [y/N] '; \
+	read -r ans; \
+	case "$$ans" in [yY]*) ;; *) echo "nothing done."; exit 0 ;; esac; \
+	printf '\n'; \
+	kubectl get secrets -A -o json \
+	  | kubectl replace -f - 2>&1 \
+	  | sed 's/^/    /' \
+	  | tail -5; \
+	printf '\nNow check it, against etcd rather than against this output:\n'; \
+	printf '  make etcd-encryption-check\n'
+
 .PHONY: secrets-audit
 secrets-audit: ## Is any LIVE credential findable in this repo's working tree or history?
 # The roadmap's bar is "git grep finds no credential". That is a claim about this repository, so

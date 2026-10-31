@@ -50,6 +50,22 @@
     - control_plane
   tags: [control-plane, config]
 
+- name: Turn on encryption at rest for Secrets
+  # Immediately after the control plane and before anything else uses the API server, because
+  # this is the one play that deliberately RESTARTS it. Running it later would mean Cilium, Argo
+  # CD or the tenant watching an API server that disappears for twenty seconds mid-playbook -
+  # survivable, and pointless to find out about.
+  #
+  # On a fresh cluster it does nothing: kubeadm init already built an encrypted control plane
+  # from the config the previous play rendered. On an existing one it rewrites the static pod
+  # manifest, waits for an API server that has the flag, and restores the previous manifest if
+  # one does not arrive.
+  hosts: control_plane
+  gather_facts: false
+  roles:
+    - etcd_encryption
+  tags: [etcd-encryption, control-plane]
+
 - name: Install the Gateway API CRDs
   # Before Cilium, not after. Cilium's gatewayAPI.enabled does nothing at all unless these
   # resource types already exist, and an operator that starts without them comes up cleanly with

@@ -1,0 +1,48 @@
+# EncryptionConfiguration - how the API server encrypts Secrets before writing them to etcd.
+#
+#   RENDERED BY ANSIBLE to /etc/kubernetes/enc/encryption-config.yaml, mode 0600, root-owned.
+#   NEVER copy this file anywhere. The key below is the only thing standing between a stolen
+#   etcd file and every Secret in this cluster.
+#
+# The key itself comes from /etc/kubernetes/enc/key1.b64, generated once from /dev/urandom and
+# never regenerated, because regenerating it makes every already-encrypted Secret unreadable.
+#
+# ---------------------------------------------------------------------------
+# WHAT THIS PROTECTS AGAINST, precisely, because it is routinely overstated:
+#
+#   someone who reads etcd's files on this node          -> yes
+#   an etcd backup that leaks                            -> yes
+#   anyone with `get secret` RBAC                        -> NO
+#   a compromised pod with the Secret mounted            -> NO
+#   root on any node                                     -> NO
+#
+# The API server decrypts for all three of those. Encryption at rest is not access control, and
+# treating it as one is how it gets ticked off as solved (ADR-0018 Decision 7).
+# ---------------------------------------------------------------------------
+apiVersion: apiserver.config.k8s.io/v1
+kind: EncryptionConfiguration
+resources:
+  - resources:
+      # Secrets only, not ConfigMaps. ConfigMaps are not secret - that is the entire reason
+      # Secrets exist as a separate type - and encrypting them puts a cipher on a hot read path
+      # for no gain. Adding more resource types here is a deliberate edit, not a default.
+      - secrets
+    providers:
+      # ORDER IS THE WHOLE SEMANTICS and it is easy to get backwards:
+      #
+      #   the FIRST provider is used for WRITING
+      #   EVERY provider is tried, in order, for READING
+      #
+      # So {{ etcd_encryption_provider }} first means new writes are encrypted, and `identity`
+      # last means Secrets already in etcd as plaintext can still be read. Putting `identity`
+      # first would leave the cluster working perfectly and encrypting nothing - a config that
+      # looks enabled and is not, which is the failure shape this whole repository keeps finding.
+      #
+      # It also means removing `identity` is NOT safe until every Secret has been rewritten
+      # (`make etcd-reencrypt`), and `make etcd-encryption-check` is what says whether that is
+      # true yet.
+      - {{ etcd_encryption_provider }}:
+          keys:
+            - name: key1
+              secret: {{ etcd_encryption_key }}
+      - identity: {}
