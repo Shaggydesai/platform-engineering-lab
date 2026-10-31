@@ -249,6 +249,81 @@ vault-seed-shopverse: ## Copy ShopVerse's EXISTING six credentials into Vault (n
 # against a database that still expects the old one, with MongoDB Running and Ready throughout.
 	@bash scripts/vault-seed-shopverse.sh
 
+# ---------------------------------------------------------------- gcp
+
+GCP_GUARDRAILS := terraform/gcp/guardrails
+
+.PHONY: gcp-guardrails
+gcp-guardrails: _no-stray-flags ## ADR-0003 gate - the ₹400 budget alert, BEFORE any cloud resource
+# A separate state and a separate target from the cluster, on purpose. `terraform apply` creates
+# in dependency order and nothing would make a budget come first, so a cluster could exist for
+# the length of a failed apply with no alert watching it. A guardrail applied alongside the thing
+# it guards is not a guardrail (ADR-0003 Decision 3).
+	@set -eu; \
+	proj=$$(jq -r '.project_id' clusters/gcp/cluster.json); \
+	if [ -z "$$proj" ] || [ "$$proj" = "null" ]; then \
+	  printf '\033[31mproject_id is empty in clusters/gcp/cluster.json\033[0m\n\n'; \
+	  printf 'Set it to the project this lab uses:\n'; \
+	  printf '  gcloud projects list\n'; \
+	  printf '  then edit clusters/gcp/cluster.json\n'; \
+	  exit 1; \
+	fi; \
+	if [ -z "$${TF_VAR_billing_account:-}" ]; then \
+	  printf '\033[31mTF_VAR_billing_account is not set\033[0m\n\n'; \
+	  printf 'It is kept OUT of Git because this repository is public and a billing account ID\n'; \
+	  printf 'identifies a payment instrument (clusters/gcp/cluster.json explains). Set it with:\n\n'; \
+	  printf '  export TF_VAR_billing_account="$$(gcloud billing accounts list \\\n'; \
+	  printf "    --format='value(name)' | head -1 | cut -d/ -f2)\"\n\n"; \
+	  printf '  echo "$$TF_VAR_billing_account"      # expect NNNNNN-NNNNNN-NNNNNN\n'; \
+	  exit 1; \
+	fi; \
+	if ! gcloud auth application-default print-access-token >/dev/null 2>&1; then \
+	  printf '\033[31mno Application Default Credentials\033[0m\n\n'; \
+	  printf 'Terraform authenticates with ADC, not a key file - there is no service-account JSON\n'; \
+	  printf 'in this repository and there will not be (a downloaded key is a long-lived\n'; \
+	  printf 'credential on a laptop, which ADR-0018 spent a module removing). Run:\n\n'; \
+	  printf '  gcloud auth application-default login\n'; \
+	  printf '  gcloud config set project %s\n' "$$proj"; \
+	  exit 1; \
+	fi; \
+	printf 'project        %s\n' "$$proj"; \
+	printf 'billing acct   %s\n' "$$TF_VAR_billing_account"; \
+	printf 'budget         %s %s, thresholds %s\n\n' \
+	  "$$(jq -r '.budget.currency' clusters/gcp/cluster.json)" \
+	  "$$(jq -r '.budget.amount_inr' clusters/gcp/cluster.json)" \
+	  "$$(jq -rc '.budget.thresholds' clusters/gcp/cluster.json)"; \
+	cd $(GCP_GUARDRAILS) && terraform init -input=false && terraform apply
+	@printf '\nNow confirm it against the API rather than against Terraform:\n'
+	@printf '  make gcp-guardrails-verify\n'
+
+.PHONY: gcp-guardrails-verify
+gcp-guardrails-verify: ## Read the budget back from the API, not from Terraform state
+# Terraform succeeding means the API accepted a request. This asks the API what it actually has -
+# the same distinction that has been wrong nine times in this project, and the reason every check
+# here reads the answer instead of the request.
+	@set -eu; \
+	if [ -z "$${TF_VAR_billing_account:-}" ]; then \
+	  echo "TF_VAR_billing_account is not set - see: make gcp-guardrails"; exit 1; fi; \
+	out=$$(gcloud billing budgets list --billing-account="$$TF_VAR_billing_account" \
+	        --format='value(displayName,amount.specifiedAmount.units,amount.specifiedAmount.currencyCode)' 2>&1) \
+	  || { printf '\033[33mcould not list budgets - verification UNKNOWN, not failed\033[0m\n'; \
+	       printf '  %s\n\n' "$$(printf '%s' "$$out" | head -1)"; \
+	       printf 'If the command does not exist, this gcloud is too old for `billing budgets`.\n'; \
+	       printf 'Check it in the console instead, which is the authority either way:\n'; \
+	       printf '  https://console.cloud.google.com/billing/%s/budgets\n' "$$TF_VAR_billing_account"; \
+	       exit 0; }; \
+	if [ -z "$$out" ]; then \
+	  printf '\033[31mNO BUDGET on billing account %s\033[0m\n\n' "$$TF_VAR_billing_account"; \
+	  printf 'Nothing is watching this account. Do not create a cloud resource until there is\n'; \
+	  printf '(ADR-0003 Decision 3):\n  make gcp-guardrails\n'; \
+	  exit 1; \
+	fi; \
+	printf '\033[32mbudget(s) on the billing account, as the API reports them:\033[0m\n'; \
+	printf '%s\n' "$$out" | sed 's/^/    /'; \
+	printf '\nThe amount and thresholds above came from the API. What Terraform cannot tell you is\n'; \
+	printf 'whether the email arrives - that needs one look at the console, once:\n'; \
+	printf '  https://console.cloud.google.com/billing/%s/budgets\n' "$$TF_VAR_billing_account"
+
 .PHONY: etcd-encryption-check
 etcd-encryption-check: ## Read etcd directly: are Secrets ciphertext or plaintext?
 	@bash scripts/etcd-encryption-check.sh

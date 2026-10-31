@@ -1,0 +1,73 @@
+{
+  "_comment": [
+    "The GCP environment's single source of truth, the same role clusters/onprem/nodes.json plays",
+    "for the on-prem substrate (ADR-0008): every value that could disagree with reality comes from",
+    "here, so it cannot disagree.",
+    "",
+    "WHAT IS DELIBERATELY NOT IN THIS FILE: the billing account ID. It is not a credential -",
+    "knowing one grants nothing - but this repository is public, and a billing account ID is the",
+    "one value here that identifies a payment instrument. It is passed as TF_VAR_billing_account",
+    "instead, and `make gcp-guardrails` says so. The cost is that a fresh clone needs one",
+    "environment variable before the guardrail can be applied, which is the same honest shape as",
+    ".cache/vault-init.json: reproducible given one thing a human holds."
+  ],
+  "project_id": "",
+  "zone": "asia-south1-a",
+  "region": "asia-south1",
+  "_zone_comment": [
+    "ZONAL, never regional. ADR-0003: GKE's free tier covers the cluster management fee for ONE",
+    "zonal cluster per billing account per month and does not cover a regional one, where the fee",
+    "is charged per cluster. A regional cluster also triples the control plane and the node count.",
+    "",
+    "asia-south1-a (Mumbai) because it is nearest, so kubectl and the storefront are responsive.",
+    "The trade against us-central1 is spot capacity: if a spot pool cannot be filled here, the",
+    "answer is to change this value and re-apply, not to drop spot."
+  ],
+  "budget": {
+    "amount_inr": 400,
+    "currency": "INR",
+    "thresholds": [
+      0.5,
+      0.9,
+      1.0
+    ]
+  },
+  "_budget_comment": [
+    "ADR-0003 Decision 3: this must exist BEFORE the first cloud resource, which is why it is a",
+    "separate Terraform state in terraform/gcp/guardrails and a separate `make gcp-guardrails`.",
+    "A guardrail applied in the same run as the thing it guards is not a guardrail.",
+    "",
+    "Scoped to the whole BILLING ACCOUNT rather than to one project, deliberately: a budget that",
+    "only watches the project you remembered to filter on is silent about the one you forgot."
+  ],
+  "nodes": {
+    "machine_type": "e2-medium",
+    "count": 2,
+    "spot": true,
+    "disk_size_gb": 32,
+    "disk_type": "pd-standard",
+    "external_ip": true
+  },
+  "_nodes_comment": [
+    "EXTERNAL IPs ON THE NODES, and this is the decision with a real cost attached - recorded",
+    "here rather than discovered on a bill.",
+    "",
+    "ShopVerse's seven images are on ghcr.io. ADR-0003 forbids NAT gateways, and a GKE node with",
+    "no external IP and no Cloud NAT cannot reach ghcr.io at all: Private Google Access covers",
+    "Google's own services and nothing else. So the options were external IPs, Cloud NAT",
+    "(forbidden, and the expensive one), or mirroring the images into Artifact Registry.",
+    "",
+    "External IPs chosen for the first build because it needs no change to the tenant's chart.",
+    "GCP bills external IPv4 at roughly $0.005 per address per hour, so two nodes for a",
+    "three-hour session is about 3 rupees - not zero, and the reason ADR-0003's target is '₹0",
+    "steady-state' rather than '₹0 ever'. `make down` ends the charge.",
+    "",
+    "Mirroring into Artifact Registry is genuinely ₹0 within the 0.5 GB free tier and is the",
+    "better end state; it costs a mirroring step and a global.imageRegistry override in the gcp",
+    "overlay, which is exactly what the overlay mechanism exists for. Parked, not rejected.",
+    "",
+    "pd-standard rather than pd-balanced: the free tier includes 30 GB-months of pd-standard.",
+    "32 GB x 2 nodes exceeds that, so the disks are the other small non-zero line - visible here",
+    "on purpose."
+  ]
+}
