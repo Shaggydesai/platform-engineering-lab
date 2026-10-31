@@ -253,6 +253,17 @@ vault-seed-shopverse: ## Copy ShopVerse's EXISTING six credentials into Vault (n
 
 GCP_GUARDRAILS := terraform/gcp/guardrails
 
+.PHONY: cost-check
+cost-check: ## ADR-0003 Decision 5 - is anything billable still running, in ANY project?
+# This target did not exist until 2026-10-31, which is worse than it sounds: ADR-0003 says a
+# session cannot end without it, the roadmap lists it as a Module 08 deliverable, and ADR-0019,
+# docs/parking-lot.md and clusters/gcp/cluster.json all cite `make cost-check` by name. The
+# script had been there since Module 00. Nothing invoked it, and every document that referred to
+# it was describing something that would have printed "No rule to make target".
+#
+# A guardrail nobody can run is a guardrail in prose.
+	@bash scripts/cost-check.sh
+
 .PHONY: gcp-guardrails
 gcp-guardrails: _no-stray-flags ## ADR-0003 gate - the ₹400 budget alert, BEFORE any cloud resource
 # A separate state and a separate target from the cluster, on purpose. `terraform apply` creates
