@@ -24,7 +24,9 @@
 | **Ingress failover** | **measured: ~15s** on a hard node power-off, bounded by the L2 lease duration (ADR-0013) |
 | **Storage** | **working** — local-path-provisioner v0.0.37, default class `platform-local` (ADR-0015). Node-local: a dead node takes its data with it |
 | **Certificates expire** | **2027-10-22** — `sudo kubeadm certs renew all` before then, or nothing works |
-| **GCP cluster** | not built — account verified empty, ₹0 running |
+| **GCP cluster** | not built. Guardrail IS applied: ₹400 budget `ad4e1d32`, thresholds 50/90/100%, verified against the API by `make gcp-guardrails-verify` |
+| **GCP account** | project `shopverse-lab`, billing `01662D-…-2D203C` linked. **Free trial: ₹28,257 of ₹28,797 left, ends 2027-01-02** (63 days as of 31 Oct). Console shows an unactioned **"administrator must verify this account"** banner |
+| **GCP spend so far** | ₹591 this month, fully covered — so something HAS run. Two pre-existing ₹2500 budgets exist that nothing in this repo manages, one named "(terraform)". Run `make cost-check` before building |
 | **AWS cluster** | not built |
 | **Argo CD** | **running** — chart 10.11.0 / Argo CD v3.5.5, root app Synced, self-heal verified |
 | **Platform components** | metrics-server 3.14.0, cert-manager v1.21.3 + internal PKI — both Synced/Healthy |

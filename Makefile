@@ -297,32 +297,12 @@ gcp-guardrails: _no-stray-flags ## ADR-0003 gate - the ₹400 budget alert, BEFO
 	@printf '  make gcp-guardrails-verify\n'
 
 .PHONY: gcp-guardrails-verify
-gcp-guardrails-verify: ## Read the budget back from the API, not from Terraform state
-# Terraform succeeding means the API accepted a request. This asks the API what it actually has -
-# the same distinction that has been wrong nine times in this project, and the reason every check
-# here reads the answer instead of the request.
-	@set -eu; \
-	if [ -z "$${TF_VAR_billing_account:-}" ]; then \
-	  echo "TF_VAR_billing_account is not set - see: make gcp-guardrails"; exit 1; fi; \
-	out=$$(gcloud billing budgets list --billing-account="$$TF_VAR_billing_account" \
-	        --format='value(displayName,amount.specifiedAmount.units,amount.specifiedAmount.currencyCode)' 2>&1) \
-	  || { printf '\033[33mcould not list budgets - verification UNKNOWN, not failed\033[0m\n'; \
-	       printf '  %s\n\n' "$$(printf '%s' "$$out" | head -1)"; \
-	       printf 'If the command does not exist, this gcloud is too old for `billing budgets`.\n'; \
-	       printf 'Check it in the console instead, which is the authority either way:\n'; \
-	       printf '  https://console.cloud.google.com/billing/%s/budgets\n' "$$TF_VAR_billing_account"; \
-	       exit 0; }; \
-	if [ -z "$$out" ]; then \
-	  printf '\033[31mNO BUDGET on billing account %s\033[0m\n\n' "$$TF_VAR_billing_account"; \
-	  printf 'Nothing is watching this account. Do not create a cloud resource until there is\n'; \
-	  printf '(ADR-0003 Decision 3):\n  make gcp-guardrails\n'; \
-	  exit 1; \
-	fi; \
-	printf '\033[32mbudget(s) on the billing account, as the API reports them:\033[0m\n'; \
-	printf '%s\n' "$$out" | sed 's/^/    /'; \
-	printf '\nThe amount and thresholds above came from the API. What Terraform cannot tell you is\n'; \
-	printf 'whether the email arrives - that needs one look at the console, once:\n'; \
-	printf '  https://console.cloud.google.com/billing/%s/budgets\n' "$$TF_VAR_billing_account"
+gcp-guardrails-verify: ## Read the budget back from the API and check it MATCHES cluster.json
+# Terraform succeeding means the API accepted a request. This asks the API what it has, and then
+# checks that what it has is what this repository asked for - amount AND thresholds. The first
+# version only listed the budgets that existed and passed if there were any, which against a real
+# account with two pre-existing ₹2500 budgets would have passed with ours missing entirely.
+	@bash scripts/gcp-guardrails-verify.sh
 
 .PHONY: etcd-encryption-check
 etcd-encryption-check: ## Read etcd directly: are Secrets ciphertext or plaintext?
