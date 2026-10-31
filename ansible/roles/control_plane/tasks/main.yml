@@ -34,17 +34,75 @@
   #
   # 32 bytes because that is what aescbc, aesgcm and secretbox all require. A key of any other
   # length is rejected by the API server at startup, which is the one failure here that is loud.
+  # `umask 077` before the redirect, because the shell creates the file and `shell:` has no mode
+  # parameter - so without it the key lands at whatever the login umask gives, which on this
+  # image is 0644. The key that decrypts every Secret in etcd, world-readable.
+  #
+  # Found by running these tasks for real against a temp directory rather than by reading them:
+  # the check-mode failure that prompted the fix above never created a file, so it could not have
+  # shown this. Two bugs in the same five lines, and only one of them was visible from the output
+  # of the run that failed.
   ansible.builtin.shell:
-    cmd: set -o pipefail && head -c 32 /dev/urandom | base64 -w0 > /etc/kubernetes/enc/key1.b64
+    cmd: set -o pipefail && umask 077 && head -c 32 /dev/urandom | base64 -w0 > /etc/kubernetes/enc/key1.b64
     executable: /bin/bash
     creates: /etc/kubernetes/enc/key1.b64
   become: true
+  tags: [config, etcd-encryption]
+
+- name: Enforce the key file's permissions
+  # Separate from the creation, and not redundant. The umask above protects the file at the moment
+  # it is written; this protects it on every run afterwards, including a file created by an
+  # earlier version of this role, restored from somewhere, or touched by hand.
+  #
+  # The directory is already 0700 root-owned, so a 0644 key is not actually readable by anyone -
+  # but that is the directory's doing, not the file's. A key whose protection depends on its
+  # parent's mode is one `chmod 755` away from being readable, and nothing would report it.
+  ansible.builtin.file:
+    path: /etc/kubernetes/enc/key1.b64
+    owner: root
+    group: root
+    mode: "0600"
+    state: file
+  become: true
+  # Under --check the file may not exist yet, and `file: state=file` fails on a missing path -
+  # which would reintroduce exactly the check-mode breakage the next task exists to prevent.
+  when: not ansible_check_mode
+  tags: [config, etcd-encryption]
+
+- name: Does the key file exist yet?
+  # This stat exists because `make onprem-check` failed on the first attempt, and what it caught
+  # was this role rather than the cluster.
+  #
+  # Under --check the two tasks above report "changed" and change nothing - that is what check
+  # mode IS - so the directory and the key do not appear, and the slurp below then failed on a
+  # file that would have existed in a real run. A preview tool that fails tells you nothing about
+  # the real run, and worse, it looks like the real run would fail too.
+  #
+  # Gating on the file's ACTUAL state rather than on ansible_check_mode handles both cases with
+  # one condition: in a real run the key has just been created and everything below proceeds; in
+  # check mode on a cluster that has no key yet, there is genuinely nothing to read back and the
+  # chain skips. On any later check run the key exists, so the validation and the template diff
+  # are fully previewed.
+  ansible.builtin.stat:
+    path: /etc/kubernetes/enc/key1.b64
+  become: true
+  register: cp_enc_key_stat
+  tags: [config, etcd-encryption]
+
+- name: Say why the encryption tasks are being skipped
+  when: not cp_enc_key_stat.stat.exists
+  ansible.builtin.debug:
+    msg: >-
+      /etc/kubernetes/enc/key1.b64 does not exist yet, so the key cannot be read back, validated
+      or rendered into an EncryptionConfiguration. Under --check that is expected: the task that
+      creates it did not run. A real `make onprem-up` creates it and then does all three.
   tags: [config, etcd-encryption]
 
 - name: Read the key back and check its length
   # Read rather than remembered. A truncated or hand-edited key file produces an API server that
   # will not start, and finding that out here - with a number - beats finding it out from a
   # control plane that is down.
+  when: cp_enc_key_stat.stat.exists
   ansible.builtin.slurp:
     src: /etc/kubernetes/enc/key1.b64
   become: true
@@ -60,6 +118,7 @@
   # deleting the one file they must not delete.
   #
   # 32 bytes is always exactly 44 base64 characters including the single '=' pad.
+  when: cp_enc_key_stat.stat.exists
   ansible.builtin.assert:
     that:
       - (cp_enc_key.content | b64decode | trim | length) == 44
@@ -72,6 +131,7 @@
   tags: [config, etcd-encryption]
 
 - name: Render the EncryptionConfiguration
+  when: cp_enc_key_stat.stat.exists
   ansible.builtin.template:
     src: encryption-config.yaml.j2
     dest: /etc/kubernetes/enc/encryption-config.yaml

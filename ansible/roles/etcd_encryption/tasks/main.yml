@@ -74,9 +74,14 @@
       when: enc_before.stat.checksum == enc_after.stat.checksum
       ansible.builtin.debug:
         msg: >-
-          kube-apiserver.yaml is unchanged - encryption was already wired in, or this cluster was
-          initialised with it. Nothing restarted. `make etcd-encryption-check` is what says
-          whether every Secret is actually encrypted; this task only says the config is in place.
+          {{ 'CHECK MODE: the regeneration command did not run, so of course the manifest is
+          unchanged - this says nothing about what a real run would do. The useful part of a
+          --check run here is the kubeadm config diff in the previous play.'
+          if ansible_check_mode else
+          'kube-apiserver.yaml is unchanged - encryption was already wired in, or this cluster
+          was initialised with it. Nothing restarted. `make etcd-encryption-check` is what says
+          whether every Secret is actually encrypted; this task only says the config is in
+          place.' }}
 
     - name: The manifest changed, so the API server is restarting
       when: enc_before.stat.checksum != enc_after.stat.checksum
