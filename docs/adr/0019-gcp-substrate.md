@@ -40,6 +40,44 @@ Thresholds use `CURRENT_SPEND`, not `FORECASTED_SPEND`. A forecast alert against
 spiky lab — a cluster up for three hours, then nothing for a week — fires constantly and teaches
 you to ignore it.
 
+### 1b. One project per lab, and project deletion is the teardown of last resort
+
+Added 2026-10-31, after getting it wrong. `clusters/gcp/cluster.json` briefly named
+`shopverse-lab` — a project belonging to an **earlier, abandoned attempt** — because I read
+`gcloud projects list`, saw a plausible name, and wrote it down without asking which of the two
+projects was this lab's. The first guardrail apply therefore enabled two APIs on somebody else's
+project. Nothing was damaged and the lesson is the familiar one in a new place: having the data
+is not the same as having checked.
+
+The correction is worth more than the mistake. **This lab gets its own project, and deleting that
+project is the teardown that cannot miss anything.** Removing a GCP project removes everything
+inside it — buckets, KMS keyrings, clusters, addresses, disks, and whatever nobody thought to
+look for — in one action, with 30 days to undo.
+
+That matters because the alternative has already failed twice today. `make cost-check` reported
+"nothing billable" against an account holding a Terraform state bucket, a Vault storage bucket
+and a KMS keyring, because it only listed compute and GKE. **A sweep is exactly as wide as the
+list of resource types someone remembered to write, and that list is the part nobody revisits.**
+Project deletion has no list.
+
+So there are two teardowns, and they are not redundant:
+
+| | |
+|:--|:--|
+| `make gcp-down` | the normal one, per session, destroys what Terraform created |
+| `gcloud projects delete <id>` | the one that cannot be incomplete, when the lab is finished |
+
+The budget guardrail survives both, because it is attached to the billing account rather than to
+a project (Decision 1). That was chosen so a budget could not be silent about a project someone
+forgot; it turns out to be the same property that lets the project be deleted without losing the
+alert.
+
+**The project is created by hand, once, and that is not an ADR-0002 violation worth agonising
+over** — it is the container the Terraform state lives inside, so it cannot be created by that
+state. The one manual step is recorded in `clusters/gcp/cluster.json`, and
+`make gcp-guardrails` refuses to run while `project_id` is empty rather than defaulting to
+whatever `gcloud config` happens to point at. That refusal is the control.
+
 ### 2. Zonal, spot, two e2-medium nodes
 
 Zonal because the GKE free tier covers the control-plane management fee for **one zonal cluster
