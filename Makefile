@@ -17,6 +17,9 @@ ENV ?= onprem
 #
 # This is a prerequisite rather than the first line of each recipe because prerequisites are
 # built before the recipe runs, which is the whole point.
+# Every variable this Makefile understands on the command line. Anything else is a typo.
+KNOWN_VARS := TAGS ARGS CHART ENV STORE_NAME PROBE_NS VAULT_NS VAULT_POD VAULT_KEYS
+
 .PHONY: _no-stray-flags
 _no-stray-flags:
 	@for g in $(MAKECMDGOALS); do case "$$g" in -*) \
@@ -26,6 +29,33 @@ _no-stray-flags:
 	  printf '    make onprem-up ARGS="--check --diff"\n'; \
 	  printf '  Stopping before anything runs.\n'; \
 	  exit 1;; esac; done
+# A MISSPELLED VARIABLE NAME IS SILENT, and that is the whole reason for this second guard.
+#
+# `make onprem-up TAggS=etcd-encryption` is a perfectly valid invocation: make accepts any
+# NAME=value, binds it to a variable nothing reads, and runs the goal with TAGS empty - which
+# means the ENTIRE playbook, on every node, instead of the four tasks that were asked for. It ran
+# here on 2026-10-31, from a typo in an instruction, and it was harmless only because the
+# playbook happens to be idempotent. The next such typo might be on a target that is not.
+#
+# This is the same shape as the flag guard above - `make onprem-up -- --tags X` silently building
+# every word as a target - and the same fix: refuse what was not understood rather than proceed
+# with a default nobody asked for.
+#
+# $(origin) distinguishes a variable set on the command line from one defined in this file, so
+# the check applies only to what the caller typed.
+	@bad=''; \
+	for v in $(foreach v,$(.VARIABLES),$(if $(filter command line,$(origin $(v))),$(v))); do \
+	  case " $(KNOWN_VARS) " in *" $$v "*) ;; *) bad="$$bad $$v";; esac; \
+	done; \
+	if [ -n "$$bad" ]; then \
+	  printf '\033[31m%s\033[0m\n' "unknown variable(s) on the command line:$$bad"; \
+	  printf '  make accepts any NAME=value, so a misspelled variable is SILENT - the goal runs\n'; \
+	  printf '  with the real variable empty. For TAGS that means the whole playbook instead of\n'; \
+	  printf '  the tags you asked for.\n\n'; \
+	  printf '  understood here: $(KNOWN_VARS)\n'; \
+	  printf '  Stopping before anything runs.\n'; \
+	  exit 1; \
+	fi
 
 .PHONY: help
 help: ## Show this help
