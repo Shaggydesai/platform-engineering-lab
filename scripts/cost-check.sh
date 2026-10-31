@@ -66,11 +66,28 @@ if command -v gcloud >/dev/null 2>&1 \
   fi
 
   P=""
+  # stdout and stderr go to DIFFERENT places, and the first version merged them with 2>&1.
+  # That produced a false alarm on the first real run: gcloud writes
+  #
+  #     WARNING: The following filter keys were not present in any resource : users
+  #
+  # to stderr, with exit code 0, when a --filter names a key no resource has - which is exactly
+  # what happens when there are NO disks. The warning landed in the output, a non-empty output
+  # means a finding, and an empty account reported "Billable resources are still running".
+  #
+  # A false alarm is the better direction to fail in than the false all-clear this script started
+  # with, and it is still wrong in the way that matters most for a check nobody is forced to
+  # read: it teaches you to ignore the output.
+  ERRF=$(mktemp)
+  trap 'rm -f "$ERRF"' EXIT
+
   probe() { # $1 = label, rest = gcloud arguments. Sets the globals found / unknown.
     label=$1; shift
-    out=$(timeout 45 gcloud "$@" --project="$P" 2>&1); rc=$?
+    : > "$ERRF"
+    out=$(timeout 45 gcloud "$@" --project="$P" 2>"$ERRF"); rc=$?
+    err=$(cat "$ERRF")
     if [ "$rc" -ne 0 ]; then
-      case "$out" in
+      case "$err" in
         # An API that was never enabled cannot have resources of that kind. That is a genuine
         # CLEAN answer for this listing, not an inability to check, and reporting it as unknown
         # would make every untouched project produce five scary lines.
@@ -83,10 +100,12 @@ if command -v gcloud >/dev/null 2>&1 \
       # Anything else - a permission denial, a timeout, a network failure - is NOT clean. An
       # empty result from a failed call used to be indistinguishable from an empty account.
       printf '      %s%s: COULD NOT CHECK%s\n' "$c_warn" "$label" "$c_off"
-      printf '%s\n' "$out" | head -2 | sed 's/^/          /'
+      printf '%s\n' "$err" | head -2 | sed 's/^/          /'
       unknown=1
       return 0
     fi
+    # rc is 0 here, so stderr holds warnings and nothing else. Only stdout - the resource list -
+    # decides whether something was found.
     [ -n "$out" ] || return 0
     printf '      %s:\n' "$label"
     printf '%s\n' "$out" | sed 's/^/        /'
