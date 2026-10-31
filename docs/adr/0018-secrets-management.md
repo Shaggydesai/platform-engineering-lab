@@ -255,3 +255,83 @@ as what they are.
 - **Stage 4**, etcd encryption at rest, is outstanding.
 - Vault's API is still plaintext HTTP, mitigated by a NetworkPolicy and nothing else; ESO still
   runs its own CA for its own webhook. Both in `docs/parking-lot.md`, both Module 08.
+
+---
+
+## Verified, 2026-10-31 — stage 4, and the module closes
+
+```
+make etcd-encryption-check          (before)
+    17 Secret(s) in etcd
+    1 encrypted
+    16 still PLAINTEXT
+    both kinds present, so this check distinguishes them rather than always agreeing
+
+make etcd-reencrypt                 17 Secrets rewritten in place
+
+make etcd-encryption-check          (after)
+    17 encrypted, 0 plaintext
+    a Secret created right now -> written encrypted
+
+make onprem-up TAGS=etcd-encryption     changed=0
+make shopverse-check                    7/7
+```
+
+Decision 7 is done, and the part it insisted on is the part that mattered: **1 of 17 Secrets was
+encrypted before the rewrite, and 16 were not.** Turning encryption on reaches forward only. That
+one was a Secret written in the minutes between the API server restarting and the check running —
+the mechanism working, not an anomaly — and the fifteen-minute window in which the cluster
+reported encryption "enabled" while 94% of its Secrets sat in etcd as plaintext is exactly the
+state that gets ticked off as solved.
+
+It also means the check had a mixed population to read, which is the only condition under which
+it can demonstrate that it tells ciphertext from plaintext. After the rewrite that contrast is
+gone for good, and the freshly-created probe Secret is what carries the positive control from
+here on.
+
+### What the cluster confirmed that no amount of reading could
+
+Two things were written from inference because the documentation could not be fetched, and both
+are now settled by the only authority that counts:
+
+- **the v1beta4 `apiServer.extraArgs` / `extraVolumes` shape** — accepted by
+  `kubeadm config validate` and then rendered into a static pod manifest the kubelet ran
+- **`aescbc` and the EncryptionConfiguration schema** — the API server started with them and
+  served, and `k8s:enc:aescbc:v1:key1` appears in etcd
+
+The automatic rollback never fired, which is the correct outcome and not evidence that it works —
+that evidence came from making it fire against a stub, where the restored manifest hashed
+identically to the pre-change one.
+
+### The wait condition earned its design
+
+The API server took about forty seconds to come back: a twenty-second pause for the kubelet to
+notice the manifest, then four failed polls at five-second intervals. Every one of those four
+polls would have *passed* a check that asked only "is the API server answering" — the old process
+was serving the whole time. What the four retries measure is the new process appearing with
+`--encryption-provider-config` in its running command.
+
+### The ~9 second 502 window is absent for the second consecutive run
+
+`shopverse-check` step 7 returned `200` first try again. Two runs clean against one run with three
+retries (2026-10-29). ADR-0016's "~9 seconds" is confirmed as **a thing that happened once**, not
+a property of this platform, and the retry count in the script remains the measurement rather
+than a budget.
+
+### What is now true of this platform's secrets
+
+- no credential in the working tree or in any of 98 commits, checked against the live values
+- the tenant's six credentials come out of Vault through an ExternalSecret that names no substrate
+- every Secret in etcd is ciphertext, proven by reading etcd
+- two irreducible secrets, both outside Git: `.cache/vault-init.json` on the workstation and
+  `/etc/kubernetes/enc/key1.b64` on the control-plane node
+
+### What is still not verified, stated plainly
+
+- **Rotation of anything.** The runbook's commands for rotating a Vault secret are written and
+  have never been run. Neither has a rotation of the etcd encryption key, which this design has
+  no mechanism for at all.
+- **Changing the encryption provider**, which the parking lot records as a three-commit sequence
+  that makes Secrets unreadable if done in one.
+- **etcd backup and restore**, which is where the encryption key stops being a formality and
+  becomes the difference between a restorable backup and an archive of ciphertext.

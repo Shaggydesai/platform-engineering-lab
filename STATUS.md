@@ -4,9 +4,9 @@
 > before you close the laptop. It takes thirty seconds and it is the reason this project will
 > not stall like the last one.
 
-**Last updated:** 2026-10-27
-**Current module:** 07 — Secrets properly (ADR-0018 decided: Vault + External Secrets; stage 1 of 4 not yet built)
-**Overall progress:** Modules 00–05 complete — 6 / 13
+**Last updated:** 2026-10-31
+**Current module:** 08 — not started. Modules 06 and 07 are closed.
+**Overall progress:** Modules 00–07 complete — 8 / 13
 
 ---
 
@@ -33,6 +33,11 @@
 | **Tenant isolation** | **enforced** — only 5 named services may reach MongoDB (ADR-0017). `make netpol-check` proves it: two pods one label apart, one connects, one does not |
 | **ShopVerse gate** | `make shopverse-check` passes: register → cart → checkout → delete MongoDB → order survives, same PV |
 | **Everything pinned** | **yes** — images `sha-6fd8524` (all 7 verified by digest against what is running), app chart by commit, Gateway API by SHA-256, charts by version. No moving references left |
+| **Secret backend** | **Vault 2.0.4** (chart 0.34.1), standalone, file storage on a 2Gi `platform-local` PVC. **Sealed after every cluster restart** — `make vault-unseal` |
+| **Secrets reach pods** | **External Secrets 2.14.0.** `ClusterSecretStore/vault-backend` Ready; ShopVerse's six credentials arrive via an ExternalSecret that names no substrate (ADR-0018) |
+| **Secrets in Git** | **none.** `make secrets-audit` searches every commit on every ref for the live values — the tenant's and Vault's root token and unseal keys |
+| **etcd encryption** | **on, and all 17 Secrets rewritten** — `k8s:enc:aescbc:v1:key1` in etcd, verified by reading etcd. `make etcd-encryption-check` |
+| **Irreducible secrets** | **two, both outside Git.** `.cache/vault-init.json` (workstation) and `/etc/kubernetes/enc/key1.b64` (control plane). Losing either is unrecoverable — see ADR-0018 and the parking lot |
 | **Monthly spend** | ₹0 |
 
 To bring the nodes back after a reboot or a `wsl --shutdown`:
@@ -59,26 +64,87 @@ re-apply is gone.
 
 ## The next action
 
-**Module 06 — ShopVerse runs.** The platform gets its tenant, and the roadmap's bar is a
-behavioural one rather than a status one: open the storefront over HTTPS with a certificate the
-browser trusts, add an item to the cart, complete a checkout, and have the order survive a pod
-restart.
+**Module 08.** Modules 06 and 07 are closed; nothing is half-built and there is no cliffhanger.
 
-Everything it needs now exists. A name on the Gateway is an HTTPRoute plus an `/etc/hosts` line
-(ADR-0014). A PVC with no storageClassName gets `platform-local` (ADR-0015). TLS comes from
-`platform-ca` — and "a certificate the browser trusts" is the one part that needs a decision,
-because trusting it means importing the CA into the OS store, which is a change to a machine
-rather than to this repository.
+Before picking up anything new, two small debts are worth clearing because both are cheap and
+both are already scoped:
 
-Two things to settle first:
+1. **Module 06's browser half.** `make shopverse-check` passes with a CA that `curl` verifies,
+   but the roadmap's bar says a *browser* trusting it. That means importing `platform-ca` into
+   the Windows trust store — a change to a machine, not to this repository — and it is untested
+   whether Windows can even reach `192.168.100.*` from WSL2. `docs/runbooks/06-shopverse.md` has
+   the steps.
+2. **Module 08's own opening move is already written down.** Two things in
+   `docs/parking-lot.md` belong to it and were deferred *to* it: Vault's API is plaintext HTTP
+   (`tls_disable = 1`, mitigated by a NetworkPolicy and nothing else), and External Secrets runs
+   its own CA for its own webhook. cert-manager and the `platform-ca` ClusterIssuer already
+   exist, so both are a Certificate plus a values change — and together they make "everything in
+   this cluster that presents a certificate got it from `platform-ca`" true, which is currently
+   false in three places counting metrics-server.
 
-1. **The `tenants` AppProject has never been used.** It restricts destinations to `shopverse-*`
-   and blacklists cluster-scoped resources entirely. ShopVerse is the first thing to test
-   whether those limits are right or merely strict — and the first Application to go into a
-   different project than `platform`.
-2. **Secrets.** MongoDB needs credentials and Module 07 is where secrets get solved properly.
-   Doing Module 06 first means a credential exists somewhere for a module's length; the honest
-   options are to generate it in-cluster and never put it in Git, or to reorder the modules.
+**Before any cloud module:** the AWS $5 and GCP ₹400 budget alarms, which ADR-0003 requires to
+exist *before* the first cloud resource. That is not a suggestion in the roadmap, it is the thing
+standing between this project and a bill.
+
+## Module 07 closed, 2026-10-31
+
+Four stages, all verified, and ADR-0018 carries the evidence for each.
+
+**Vault + External Secrets** (ADR-0018). The deciding argument was portability and it held: the
+ExternalSecret manifest names a store and a key and nothing else, so the same object works on
+GKE and EKS with twelve lines of provider changing in an overlay. `gcp` and `aws` overlays are
+written and deliberately still call the store `vault-backend`, because the name is the contract a
+tenant writes against rather than a description of the implementation.
+
+**The six credentials were copied, never regenerated.** `mongo-password` initialised MongoDB's
+root user on first boot only, so a fresh value would have left seven services authenticating
+against a database that still expected the old one — presenting as a Running, Ready MongoDB
+refusing every connection. `make vault-seed-shopverse` copies from the cluster, verifies each
+value by a hash computed inside the Vault pod, and proves ESO can read them back through a
+throwaway ExternalSecret *before* anything is flipped.
+
+**Both of the roadmap's bars got an honest answer, and only one is met.**
+
+- *"git grep finds no credential"* — **met**, and `make secrets-audit` is the standing proof.
+  Verified by planting a live credential in a commit and watching it fail.
+- *"rotating one secret takes one commit"* — **not met, and the bar was wrong.** With Vault and
+  ESO rotation takes zero commits, because the value is not in Git. It takes a Vault write, a
+  forced refresh, and a rollout — the last because all six values are `secretKeyRef` env vars,
+  resolved once at pod creation, so ESO updating the Secret changes nothing about a running pod.
+  And `mongo-password` cannot be rotated at all without deleting the volume.
+
+**The blast radius of a secret change is narrower than the release.** Flipping
+`externalSecret.enabled` replaced six of eight pods; `shopverse-frontend` and
+`shopverse-api-gateway` kept running, because the chart gates the credential env vars on
+`$svc.mongoDatabase`. That set is exactly the five services Hubble saw reaching MongoDB in
+ADR-0017 plus MongoDB itself — two questions asked independently, one boundary.
+
+**etcd encryption, with the step everyone skips.** 1 of 17 Secrets was encrypted before
+`make etcd-reencrypt` and 16 were not: enabling encryption reaches forward only. Now 17 of 17,
+confirmed by reading ciphertext out of etcd rather than by reading a flag.
+
+### What this module cost in mistakes, because the pattern is the point
+
+Nine instances now of one failure shape — **a check that confirms a request was recorded rather
+than that it took effect.** This module added four: a `kubernetes_host` read back and printed
+without being asserted (it said `https://:`); `kubectl auth can-i create serviceaccounts/token`,
+which asks whether you may create a ServiceAccount *named* token and answered no about a
+permission that was present; a NotReady ClusterSecretStore read once during ESO's exponential
+backoff and called broken; and an API-server wait that would have passed on the old process still
+answering.
+
+Two new shapes joined the collection:
+
+- **a check whose "no" does not mean no.** The `auth can-i` false negative became the leading
+  hypothesis for an unrelated failure and cost an hour. Every such check now has three outcomes —
+  yes, no, and NOT KNOWN — because a check that cannot get an answer must not report a denial.
+- **a fix applied to the instance, leaving the class.** `--check` broke `control_plane`; I fixed
+  it there and the identical bug was waiting one role away in `etcd_encryption`.
+
+And one bug that no failing run would have shown: running the encryption tasks for real against a
+temp directory produced `key1.b64` at **mode 0644** — the key to every Secret in etcd,
+world-readable. The check-mode failure that prompted the fix never created a file, so it could not
+have surfaced it. Two bugs in the same five lines; the failure reported exactly one.
 
 ## Verified on 2026-10-27
 

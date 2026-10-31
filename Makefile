@@ -278,12 +278,25 @@ etcd-reencrypt: ## Rewrite every Secret so the ones predating encryption get enc
 	read -r ans; \
 	case "$$ans" in [yY]*) ;; *) echo "nothing done."; exit 0 ;; esac; \
 	printf '\n'; \
-	kubectl get secrets -A -o json \
-	  | kubectl replace -f - 2>&1 \
-	  | sed 's/^/    /' \
-	  | tail -5; \
+	out=$$(kubectl get secrets -A -o json | kubectl replace -f - 2>&1); \
+	done=$$(printf '%s\n' "$$out" | grep -c ' replaced$$' || true); \
+	fail=$$(printf '%s\n' "$$out" | grep -vc ' replaced$$' || true); \
+	printf '%s\n' "$$out" | tail -4 | sed 's/^/    /'; \
+	printf '    ...\n'; \
+	printf '    %s of %s replaced' "$$done" "$$n"; \
+	if [ "$$fail" -gt 0 ]; then printf ', %s line(s) that were not a replacement:\n' "$$fail"; \
+	  printf '%s\n' "$$out" | grep -v ' replaced$$' | head -5 | sed 's/^/      /'; \
+	else printf '\n'; fi; \
 	printf '\nNow check it, against etcd rather than against this output:\n'; \
 	printf '  make etcd-encryption-check\n'
+# The count is here because the first version piped the output through `tail -5` and nothing else,
+# so a run that replaced seventeen Secrets printed five lines and read as though five had been
+# done. A truncated list presented as a result is a small lie, and this target's whole job is to
+# touch every Secret in the cluster - "how many" is the only number that matters.
+#
+# `grep -vc ' replaced$$'` also surfaces the case that matters more: a Secret kubectl REFUSED to
+# replace. Those lines were previously indistinguishable from the successes they were buried
+# among, and a Secret that was not rewritten stays plaintext in etcd for good.
 
 .PHONY: secrets-audit
 secrets-audit: ## Is any LIVE credential findable in this repo's working tree or history?
