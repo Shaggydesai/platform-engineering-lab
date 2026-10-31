@@ -32,13 +32,10 @@ output "next" {
          ${local.budget.currency} ${local.budget.amount_inr}, and the email recipient is an address you read.
          Terraform can only tell you the API accepted it.
 
-      2. Pin the provider. `terraform init` has just written .terraform.lock.hcl with the exact
-         google provider version and its hashes. Commit that file, then move the version into
-         versions.tf as an exact pin, taken from the lock file:
+      2. Commit .terraform.lock.hcl if it is not already in Git. It carries the provider's
+         hashes, which makes it a stronger pin than the version in versions.tf: a re-published
+         6.50.0 would fail verification rather than install quietly.
 
-           grep -A2 'provider "registry.terraform.io/hashicorp/google"' .terraform.lock.hcl
-
-         The loose range in versions.tf exists only because the authoring environment could not
-         reach the registry. Leaving it loose is how a provider upgrade arrives unannounced.
+           git add -f terraform/gcp/guardrails/.terraform.lock.hcl
   EOT
 }
