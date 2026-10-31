@@ -78,6 +78,31 @@ state. The one manual step is recorded in `clusters/gcp/cluster.json`, and
 `make gcp-guardrails` refuses to run while `project_id` is empty rather than defaulting to
 whatever `gcloud config` happens to point at. That refusal is the control.
 
+### 1c. Two APIs are enabled by gcloud before Terraform runs
+
+A brand-new project has almost nothing enabled, and Terraform cannot enable the API it needs in
+order to enable APIs. `google_project_service` is managed through the Cloud Resource Manager
+API — and because the provider sets `billing_project` (Decision 6's `X-Goog-User-Project` fix),
+the request is attributed to that same new project. So:
+
+```
+Error 403: Cloud Resource Manager API has not been used in project
+platform-eng-lab-261031 before or it is disabled
+  ... while reading  shopverse-lab/billingbudgets.googleapis.com
+```
+
+Note the shape, because it is the second time today an error has pointed somewhere other than
+its cause: the resource being read belongs to the **old** project, the API that is missing is on
+the **new** one, and nothing in the message connects the two. The link is the quota header.
+
+So `make gcp-guardrails` runs `gcloud services enable cloudresourcemanager.googleapis.com
+serviceusage.googleapis.com` first. It is idempotent, costs a second, and means a fresh clone
+against a fresh project works with no manual step that only exists in somebody's memory.
+
+This was found the only way it could be — by pointing the guardrail at a project created five
+minutes earlier. It would not have appeared on `shopverse-lab`, where years of use had already
+enabled everything.
+
 ### 2. Zonal, spot, two e2-medium nodes
 
 Zonal because the GKE free tier covers the control-plane management fee for **one zonal cluster

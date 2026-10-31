@@ -266,6 +266,19 @@ cost-check: ## ADR-0003 Decision 5 - is anything billable still running, in ANY 
 
 .PHONY: gcp-guardrails
 gcp-guardrails: _no-stray-flags ## ADR-0003 gate - the ₹400 budget alert, BEFORE any cloud resource
+# TWO APIS ARE ENABLED BY GCLOUD BEFORE TERRAFORM RUNS, and that is not laziness.
+#
+# A brand-new GCP project has almost nothing enabled. Terraform needs the Cloud Resource Manager
+# API to manage `google_project_service` at all - and because the provider sets `billing_project`
+# (ADR-0019, the X-Goog-User-Project fix), requests are attributed to that same new project. So
+# Terraform needs the API enabled on the project in order to enable APIs on the project. It
+# cannot bootstrap itself out of that, and the error it gives names the missing API without
+# mentioning that the request was attributed to a project that is not the one being changed.
+#
+# `gcloud services enable` is idempotent, so this costs a second on every run and makes a fresh
+# clone against a fresh project work without a manual step nobody wrote down. It was found the
+# only way it could be: by pointing the guardrail at a project created five minutes earlier.
+#
 # A separate state and a separate target from the cluster, on purpose. `terraform apply` creates
 # in dependency order and nothing would make a budget come first, so a cluster could exist for
 # the length of a failed apply with no alert watching it. A guardrail applied alongside the thing
@@ -297,6 +310,14 @@ gcp-guardrails: _no-stray-flags ## ADR-0003 gate - the ₹400 budget alert, BEFO
 	  printf '  gcloud config set project %s\n' "$$proj"; \
 	  exit 1; \
 	fi; \
+	printf 'enabling the two bootstrap APIs (no-op if already on)\n'; \
+	gcloud services enable cloudresourcemanager.googleapis.com serviceusage.googleapis.com \
+	  --project="$$proj" --quiet || { \
+	  printf '\033[31mcould not enable the bootstrap APIs on %s\033[0m\n' "$$proj"; \
+	  printf 'Terraform cannot manage google_project_service without them, and it cannot enable\n'; \
+	  printf 'them itself - that is the chicken-and-egg this step exists to break.\n'; \
+	  exit 1; \
+	}; \
 	printf 'project        %s\n' "$$proj"; \
 	printf 'billing acct   %s\n' "$$TF_VAR_billing_account"; \
 	printf 'budget         %s %s, thresholds %s\n\n' \
