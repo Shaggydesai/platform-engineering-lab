@@ -10,6 +10,10 @@ found=0
 # give the same one for both.
 checked=0
 skipped=""
+# A listing that FAILED is not a listing that found nothing. Tracked separately so the verdict
+# can say "I could not see everything" instead of "clean".
+unknown=0
+c_dim=$'\033[2m'; c_warn=$'\033[33m'; c_off=$'\033[0m'
 
 if command -v aws >/dev/null 2>&1 && aws sts get-caller-identity >/dev/null 2>&1; then
   echo "AWS"
@@ -44,40 +48,70 @@ fi
 # two budgets nobody here created, one named "(terraform)". Resources from an earlier state can
 # be in a project nobody has run `gcloud config set project` for since - and a cost check that
 # only looks where you are standing is a cost check that agrees with you.
-#
-# The budget guardrail is scoped to the whole billing account for the same reason (ADR-0019).
 if command -v gcloud >/dev/null 2>&1 \
    && gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null | grep -q .; then
   echo "GCP"
-  projects=$(gcloud projects list --format='value(projectId)' 2>/dev/null)
+
+  # NEVER PROMPT. The first run of the multi-project version hung with no output after "GCP":
+  # `gcloud compute instances list` against a project whose Compute API is disabled asks
+  # "Would you like to enable and retry? (y/N)" - and stderr was being sent to /dev/null, so
+  # gcloud sat waiting on stdin with the question invisible. A check that hangs silently is
+  # worse than one that fails, because the only signal is that nothing is happening.
+  export CLOUDSDK_CORE_DISABLE_PROMPTS=1
+
+  projects=$(timeout 60 gcloud projects list --format='value(projectId)' 2>/dev/null)
   if [ -z "$projects" ]; then
     echo "  no projects visible to this account"
+    skipped="$skipped GCP-projects"
   fi
+
+  P=""
+  probe() { # $1 = label, rest = gcloud arguments. Sets the globals found / unknown.
+    label=$1; shift
+    out=$(timeout 45 gcloud "$@" --project="$P" 2>&1); rc=$?
+    if [ "$rc" -ne 0 ]; then
+      case "$out" in
+        # An API that was never enabled cannot have resources of that kind. That is a genuine
+        # CLEAN answer for this listing, not an inability to check, and reporting it as unknown
+        # would make every untouched project produce five scary lines.
+        *"SERVICE_DISABLED"*|*"not enabled on project"*|*"has not been used in project"*)
+          # Counted, not printed per listing: an untouched project disables five of these and
+          # five dim lines apiece is noise that buries the one line that matters.
+          api_off=$((api_off + 1))
+          return 0 ;;
+      esac
+      # Anything else - a permission denial, a timeout, a network failure - is NOT clean. An
+      # empty result from a failed call used to be indistinguishable from an empty account.
+      printf '      %s%s: COULD NOT CHECK%s\n' "$c_warn" "$label" "$c_off"
+      printf '%s\n' "$out" | head -2 | sed 's/^/          /'
+      unknown=1
+      return 0
+    fi
+    [ -n "$out" ] || return 0
+    printf '      %s:\n' "$label"
+    printf '%s\n' "$out" | sed 's/^/        /'
+    found=1
+  }
+
   for P in $projects; do
-    HDR=""
-    report() { # $1 label, $2 value. Sets the globals HDR and found - never call it in $( ).
-      [ -n "$2" ] || return 0
-      if [ -z "$HDR" ]; then echo "  [$P]"; HDR=1; fi
-      echo "    $1:"; printf '%s\n' "$2" | sed 's/^/      /'
-      found=1
-    }
-    report "clusters" \
-      "$(gcloud container clusters list --project="$P" --format='value(name,location)' 2>/dev/null)"
-    report "instances" \
-      "$(gcloud compute instances list --project="$P" --format='value(name,zone,status)' 2>/dev/null)"
-    report "unattached disks" \
-      "$(gcloud compute disks list --project="$P" --filter='-users:*' --format='value(name,zone,sizeGb)' 2>/dev/null)"
-    report "forwarding rules (load balancers)" \
-      "$(gcloud compute forwarding-rules list --project="$P" --format='value(name,region)' 2>/dev/null)"
-    # A RESERVED address that is not attached to anything is billed and is invisible in every
-    # other listing here - the classic orphan, and more likely now that ADR-0019 puts external
-    # IPs on the nodes deliberately.
-    report "reserved addresses not in use" \
-      "$(gcloud compute addresses list --project="$P" --filter='status!=IN_USE' --format='value(name,region,status)' 2>/dev/null)"
-    report "snapshots" \
-      "$(gcloud compute snapshots list --project="$P" --format='value(name,diskSizeGb)' 2>/dev/null)"
+    # Printed BEFORE probing, not lazily on the first finding: it is progress output for a step
+    # that takes a few seconds per project, and it also records which projects were examined -
+    # which is part of the answer, not decoration.
+    echo "  [$P]"
+    before_found=$found
+    api_off=0
+    probe "clusters"                           container clusters list --format='value(name,location)'
+    probe "instances"                          compute instances list --format='value(name,zone,status)'
+    probe "unattached disks"                   compute disks list --filter='-users:*' --format='value(name,zone,sizeGb)'
+    probe "forwarding rules (load balancers)"  compute forwarding-rules list --format='value(name,region)'
+    # A RESERVED address not attached to anything is billed and appears in no other listing
+    # here - the classic orphan, and likelier now that ADR-0019 puts external IPs on the nodes.
+    probe "reserved addresses not in use"      compute addresses list --filter='status!=IN_USE' --format='value(name,region,status)'
+    probe "snapshots"                          compute snapshots list --format='value(name,diskSizeGb)'
+    [ "$api_off" -gt 0 ] && printf '      %s%s listing(s) skipped: that API is not enabled here, so nothing of the kind exists%s\n' \
+      "$c_dim" "$api_off" "$c_off"
+    [ "$found" -eq "$before_found" ] && printf '      %snothing billable%s\n' "$c_dim" "$c_off"
   done
-  [ "$found" -eq 0 ] && echo "  clean across $(printf '%s\n' "$projects" | grep -c .) project(s)"
   checked=$((checked + 1))
 else
   echo "GCP: gcloud not configured, skipped"
@@ -85,6 +119,15 @@ else
 fi
 
 echo
+# The verdict, in strict order of severity. The order IS the logic: an earlier version put the
+# "some providers were skipped" branch before the "some listings failed" one, so a permission
+# denial printed its warning and then exited 0 - a pass, from a run that could not see part of
+# the account.
+#
+#   1  something billable was found
+#   2  nothing was found AND something could not be read   (UNKNOWN - not a pass)
+#   0  nothing was found and everything asked was readable
+
 if [ "$found" -ne 0 ]; then
   echo "Billable resources are still running. Run 'make down ENV=...' or delete them by hand."
   exit 1
@@ -97,14 +140,20 @@ if [ "$checked" -eq 0 ]; then
   echo "have expired here, resources could be running and this script cannot see them."
   echo "  gcloud auth login && gcloud config set project <id>"
   echo "  aws configure"
-  # 2, not 0 and not 1: UNKNOWN is neither a clean bill nor a detection, the same distinction
-  # make gcp-guardrails-verify draws.
+  exit 2
+fi
+
+if [ "$unknown" -ne 0 ]; then
+  echo "Nothing billable FOUND - but a listing could not be read (marked COULD NOT CHECK above)."
+  echo "That is not the same as clean: a failed listing and an empty one look identical here."
+  echo "Fix the access and re-run before relying on this."
   exit 2
 fi
 
 if [ -n "$skipped" ]; then
   echo "Nothing billable in the provider(s) checked. NOT checked:$skipped"
-  echo "That is a partial answer - say so out loud rather than reading it as all clear."
+  echo "A partial answer, said out loud rather than read as all clear."
   exit 0
 fi
+
 echo "Nothing billable is running, in any project of either provider."
