@@ -11,7 +11,7 @@
     "environment variable before the guardrail can be applied, which is the same honest shape as",
     ".cache/vault-init.json: reproducible given one thing a human holds."
   ],
-  "project_id": "",
+  "project_id": "platform-eng-lab-261031",
   "_project_comment": [
     "EMPTY until you create a project for THIS lab. `make gcp-guardrails` refuses to run",
     "without it rather than defaulting to whatever gcloud happens to be pointed at.",
