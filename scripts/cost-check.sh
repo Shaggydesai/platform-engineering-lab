@@ -14,6 +14,15 @@ skipped=""
 # can say "I could not see everything" instead of "clean".
 unknown=0
 bucket_warn=0
+# Secret Manager versions, summed across EVERY project rather than per project, because the free
+# allowance is a quota on the billing account and not on a project. Six versions in one project
+# and four in another is ten against a six-version allowance, and a per-project check would call
+# both of them clean. Reported after the loop; the per-project lines above it are the detail.
+#
+# Said as an assumption rather than a fact: Google documents six free versions without being
+# crisp about the scope in the place most people read. Summing is the conservative reading - it
+# can warn early, which is the direction to be wrong in.
+sm_grand=0
 c_dim=$'\033[2m'; c_warn=$'\033[33m'; c_off=$'\033[0m'
 
 if command -v aws >/dev/null 2>&1 && aws sts get-caller-identity >/dev/null 2>&1; then
@@ -180,10 +189,78 @@ if command -v gcloud >/dev/null 2>&1 \
       probe "KMS keyrings in $L" "destroy its key VERSIONS - the keyring itself cannot be deleted and is free" \
         kms keyrings list --location="$L" --format='value(name)'
     done
+
+    # SECRET MANAGER, and this one cannot use `probe` - which is the interesting part.
+    #
+    # `probe` reports anything it finds as billable. A Secret Manager secret is NOT billable at
+    # six enabled versions or fewer: that is the monthly free allowance, and ADR-0018's GCP
+    # amendment deliberately put all six of ShopVerse's credentials in ONE secret as JSON so the
+    # steady state is ONE version. Reporting it as a finding would be a false alarm, which this
+    # script has produced before - it once counted two gcloud WARNING lines on stderr as
+    # findings and declared a clean account billable.
+    #
+    # But leaving it out entirely is the OTHER failure this script has produced twice: it is
+    # exactly as wide as the resource types someone remembered, and it reported "nothing
+    # billable" with two buckets and a KMS keyring sitting there. The secret backend is the first
+    # GCP resource in this repository that deliberately SURVIVES `make gcp-down`, so it is
+    # precisely the kind of thing a session-end check must be able to see.
+    #
+    # So: COUNT, and report the count every time. Free today, visible always, a finding at seven.
+    : > "$ERRF"
+    sm_out=$(timeout 45 gcloud secrets list --project="$P" --format='value(name)' 2>"$ERRF"); sm_rc=$?
+    sm_err=$(cat "$ERRF")
+    if [ "$sm_rc" -ne 0 ]; then
+      case "$sm_err" in
+        *"SERVICE_DISABLED"*|*"not enabled on project"*|*"has not been used in project"*)
+          api_off=$((api_off + 1)) ;;
+        *)
+          printf '      %ssecret manager: COULD NOT CHECK%s\n' "$c_warn" "$c_off"
+          printf '%s\n' "$sm_err" | head -2 | sed 's/^/          /'
+          unknown=1 ;;
+      esac
+    elif [ -n "$sm_out" ]; then
+      # Strip any leading resource path. `gcloud secrets list --format='value(name)'` prints the
+      # bare ID on some versions and projects/P/secrets/ID on others, and a wrong name here
+      # would make every version count come back 0 - a zero that looks like good news.
+      sm_total=0
+      sm_detail=''
+      for s in $(printf '%s\n' "$sm_out" | sed 's#.*/##'); do
+        # grep -c . rather than wc -l: command substitution strips the trailing newline, so wc
+        # counts N-1 and a two-version secret reports as one. That exact off-by-one appeared in
+        # gcp-smoke.sh the same week and read like a real cluster symptom.
+        n=$(timeout 45 gcloud secrets versions list "$s" --project="$P" \
+              --filter='state:ENABLED' --format='value(name)' 2>/dev/null | grep -c . || true)
+        sm_total=$((sm_total + n))
+        sm_detail="$sm_detail $s=$n"
+        sm_grand=$((sm_grand + n))
+      done
+      if [ "$sm_total" -gt 6 ]; then
+        printf '      secret manager versions (%s enabled, SIX are free):\n' "$sm_total"
+        printf '       %s\n' "$sm_detail"
+        printf '        %sremove: gcloud secrets versions destroy N --secret=NAME --project=%s%s\n' \
+          "$c_dim" "$P" "$c_off"
+        printf '        %sDISABLING IS NOT ENOUGH - a disabled version still counts as active%s\n' \
+          "$c_dim" "$c_off"
+        found=1
+      else
+        printf '      %ssecret manager: %s of 6 free versions in use -%s%s\n' \
+          "$c_dim" "$sm_total" "$sm_detail" "$c_off"
+      fi
+    fi
     [ "$api_off" -gt 0 ] && printf '      %s%s listing(s) skipped: that API is not enabled here, so nothing of the kind exists%s\n' \
       "$c_dim" "$api_off" "$c_off"
     [ "$found" -eq "$before_found" ] && printf '      %snothing billable%s\n' "$c_dim" "$c_off"
   done
+
+  # The account-wide total, because the per-project lines cannot see it. Each project can be
+  # within the allowance while the account is not.
+  if [ "$sm_grand" -gt 6 ]; then
+    printf '  %s%s Secret Manager versions across all projects, and SIX are free%s\n' \
+      "$c_warn" "$sm_grand" "$c_off"
+    printf '    The per-project lines above may each look fine - the allowance is a quota on the\n'
+    printf '    BILLING ACCOUNT, so they add up. Destroy the versions you no longer need.\n'
+    found=1
+  fi
   checked=$((checked + 1))
 else
   echo "GCP: gcloud not configured, skipped"
