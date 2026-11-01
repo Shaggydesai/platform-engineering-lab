@@ -65,6 +65,7 @@
     "only watches the project you remembered to filter on is silent about the one you forgot."
   ],
   "nodes": {
+    "pool_name": "workers",
     "machine_type": "e2-medium",
     "count": 2,
     "spot": true,
@@ -73,6 +74,19 @@
     "external_ip": true
   },
   "_nodes_comment": [
+    "NODE NAMES ARE NOT SETTABLE ON GKE, and that is worth stating because the obvious wish is to",
+    "match the on-prem k8s-cp01 / k8s-w01 / k8s-w02. The VM names come from the managed instance",
+    "group as gke-<cluster>-<pool>-<hash>-<random>, and neither the hash nor the suffix has a",
+    "field. What IS controllable is the prefix, which is why the pool is called `workers` and not",
+    "`platform-spot`: inside a cluster already named `platform`, that produced",
+    "gke-platform-platform-spot-f96b9da4-3wj9, with the word platform twice.",
+    "",
+    "There is also NO CONTROL-PLANE NODE to name. GKE manages it and it never appears in",
+    "`kubectl get nodes`, so on-prem's three nodes become two here. That asymmetry is a real",
+    "difference between the substrates rather than a cosmetic one - it is why `make smoke`'s",
+    "node-count assertions cannot be shared, and it belongs in Module 09's list.",
+    "",
+    "Readability comes from LABELS instead, which are settable: `kubectl get nodes -L substrate,pool`.",
     "EXTERNAL IPs ON THE NODES, and this is the decision with a real cost attached - recorded",
     "here rather than discovered on a bill.",
     "",

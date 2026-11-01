@@ -108,7 +108,14 @@ resource "google_container_cluster" "platform" {
 
 # ---------------------------------------------------------------------------- nodes
 resource "google_container_node_pool" "spot" {
-  name     = "${local.name}-spot"
+  # `workers`, not `platform-spot`. The pool name is the only part of a GKE node's name this
+  # repository controls - VMs are named gke-<cluster>-<pool>-<hash>-<random> by the managed
+  # instance group, and the last two have no field. Naming the pool `platform-spot` inside a
+  # cluster named `platform` produced `gke-platform-platform-spot-f96b9da4-3wj9`.
+  #
+  # It does NOT get the names anywhere near on-prem's k8s-w01, and nothing can. See
+  # clusters/gcp/cluster.json for why that is a substrate difference rather than a defect.
+  name     = local.nodes.pool_name
   project  = local.cfg.project_id
   location = local.cfg.zone
   cluster  = google_container_cluster.platform.name

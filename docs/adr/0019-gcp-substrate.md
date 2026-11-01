@@ -239,7 +239,25 @@ instead, and it is now the first concrete entry in the list Module 09's "done wh
 six real differences between the substrates. This is one, it was measured rather than predicted,
 and it will shape what the GCP overlays have to do.
 
-**What the gap is likely to cost**, in rough order of when it will be felt:
+### Difference 2: the nodes cannot be named, and one of them does not exist
+
+The on-prem substrate has `k8s-cp01`, `k8s-w01`, `k8s-w02` — names chosen in `nodes.json` and
+honoured all the way down. GKE offers neither half of that.
+
+**The names are generated.** A node's VM name is `gke-<cluster>-<pool>-<hash>-<random>` from the
+managed instance group, and the hash and suffix have no field to set them. The only controllable
+part is the prefix, which is why the pool is now `workers` rather than `platform-spot` — inside a
+cluster already called `platform`, the latter produced `gke-platform-platform-spot-f96b9da4-3wj9`.
+
+**And there is no control-plane node.** GKE manages it and it never appears in
+`kubectl get nodes`, so three nodes on-prem become two here. That is not cosmetic: it means
+`make smoke`'s node-count assertions cannot be shared between substrates, and it is the clearest
+single illustration of what "managed" buys and costs.
+
+Labels are the portable answer to readability, and they are settable: the pool carries
+`substrate=gcp` and `pool=spot`, so `kubectl get nodes -L substrate,pool` reads sensibly on both.
+
+**What the version gap is likely to cost**, in rough order of when it will be felt:
 
 - **The ingress mechanism does not transfer at all**, and that is the larger finding. On-prem
   serves Gateway API through Cilium with LB-IPAM and L2 announcements over ARP (ADR-0013). GKE
