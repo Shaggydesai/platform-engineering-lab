@@ -139,10 +139,12 @@ than written here.**
 | `make up ENV=gcp` / `make down ENV=gcp` | **done as `make gcp-up` / `make gcp-down`.** Named targets rather than an `ENV` switch, because a mistyped `ENV` would have silently defaulted to on-prem — the same class of bug as `make onprem-up TAggS=…` running the whole playbook. `ENV` survives for `make gitops-render` |
 | the GCP overlay | **decided, not all deployed.** All seven overlays now hold real decisions; two have Applications (canary, cert-manager). The other five are absent *on purpose* and ADR-0020 §5 says why each |
 | `make cost-check` | **done**, and widened twice after it twice reported a clean account it had not read |
-| Layer 2 on GKE | **written, not yet run on a cluster** — the same `argocd` role as on-prem (ADR-0020) |
+| Layer 2 on GKE | **done and verified on a live cluster, 2026-11-01** — the same `argocd` role as on-prem (ADR-0020), 27 ok / 0 failed, root app and both components Synced/Healthy |
 
 **Not met yet, and both need the same prerequisite:** the storefront is not on GKE, so it is not
-reachable through a cloud load balancer. ShopVerse needs its six credentials, which on this
+reachable through a cloud load balancer. Everything *under* it now is: the same Git repository
+renders the same platform definitions onto both substrates, which is the half of this module's
+"done when" that Layer 2 and the overlays were for. ShopVerse needs its six credentials, which on this
 substrate means External Secrets against GCP Secret Manager with Workload Identity — the overlay
 is written and needs three Terraform outputs, a Google service account and an IAM binding.
 

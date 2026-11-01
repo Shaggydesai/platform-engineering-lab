@@ -493,7 +493,11 @@
   #
   # So the role keeps it. The file is the thing to read when this recurs; the printed form is
   # for whoever is watching the run.
-  when: item.rc == 1
+  #
+  # NOT on a first creation. `kubectl diff` exits 1 whether the object differs or does not exist,
+  # and the first install on GKE therefore saved an evidence file per seam file, each one a diff
+  # against nothing (`@@ -0,0 +1,24 @@`). See argocd_seam_is_creation in this role's vars/.
+  when: item.rc == 1 and not (argocd_seam_is_creation | bool)
   ansible.builtin.copy:
     dest: "{{ repo_root }}/.cache/seam-diff-{{ item.item }}-{{ seam_stamp }}.diff"
     mode: "0644"
@@ -510,8 +514,20 @@
   become: false
   changed_when: false
 
+- name: Say which seam objects are simply not there yet
+  # One line each, rather than the full diff. On a new cluster this is every seam file and the
+  # diff is a creation against nothing - which is worth SAYING, because "the seam is being
+  # created" and "the seam has drifted" are the same exit code and want very different reactions.
+  when: item.rc == 1 and (argocd_seam_is_creation | bool)
+  ansible.builtin.debug:
+    msg: "{{ item.item }}: not in the cluster yet - this apply creates it, nothing has drifted"
+  loop: "{{ argocd_seam_diff.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  run_once: true
+
 - name: Show the difference while it is still visible
-  when: item.rc == 1
+  when: item.rc == 1 and not (argocd_seam_is_creation | bool)
   ansible.builtin.debug:
     msg: |
       {{ item.item }} differs from the live object. Saved to

@@ -278,12 +278,55 @@ a fact**, and this copy was wrong within a minute of being written.
 
 ## Verified
 
-The role has now been **run end to end against a live GKE cluster through the install task**, and
-all of Decisions 2–4 held on the first attempt: the guards passed, the context was found, helm
-reached the cluster, and the only failure was the network one amended above.
+**On a live GKE cluster, 2026-11-01. `make gcp-argocd`: 27 ok, 3 changed, 0 failed. `make
+gcp-smoke`: every check passed.** Every claim this ADR made and could not settle is now settled:
 
-The rest was verified against stubbed `helm` and `kubectl`, which exercises the role's logic and
-nothing about Kubernetes:
+| claim | result |
+|:--|:--|
+| the same role installs Argo CD on GKE | chart 10.11.0 → Argo CD **v3.5.5**, the version `clusters/platform.json` pins for every substrate, read back off the running deployment |
+| the seam applies | `projects.yaml` + `root-gcp.yaml`, both created server-side |
+| `platform-gcp` reaches Synced/Healthy | yes, after one retry while the controller started |
+| the canary appears | `generation=2`, matching Git — rendered from the directory on-prem renders, with no overlay |
+| cert-manager's CRDs apply with `ServerSideApply` on this datapath | **Synced/Healthy** |
+| GKE serves `kubectl top` without us installing one | yes, and the negative check passed: no `metrics-server` Application here |
+| `datapath_provider` | **`ADVANCED_DATAPATH`** — NetworkPolicy will actually be enforced |
+| the pool name is the only controllable part of a node name | `gke-platform-workers-c328afe6-3qlb`, with `platform` appearing once |
+
+Decisions 2–4 held on the first attempt, which is the part worth noting: the guards passed, the
+context was found in `/home/sagar/.kube/config`, and **the only thing that failed on first contact
+with a real cluster was the network, not the design** (amended above).
+
+### Two bugs in the checking, found by reading output that had already passed
+
+Both are the shape this project keeps finding, and both were in checks written the same day.
+
+**`make gcp-smoke` reported "returns data for 1 node(s)" against a two-node cluster.** The count
+came from `printf '%s' "$top" | wc -l`: command substitution strips the trailing newline, so N
+lines carry N−1 newlines. An off-by-one in a shell pipeline — and the wrong number reads exactly
+like a real, documented failure mode, since the on-prem parking-lot entry about kubelet serving
+certificates *is* "metrics-server cannot scrape some nodes". The check passed anyway, because
+**the number was printed and never compared to anything.** A number with nothing to compare it
+against looks like evidence and carries none: no value of it would have failed anything. It is now
+compared against the node count, and a shortfall is a warning that says to re-run before
+concluding — because "not scraped yet" and "cannot be scraped" look identical in one read, which
+is the same lesson as the External Secrets store read during its backoff.
+
+**The first install wrote a `.cache/seam-diff-*.diff` for every seam file.** `kubectl diff` exits 1
+whether the object differs or does not exist, so a diff against nothing (`@@ -0,0 +1,24 @@`) was
+recorded as drift. Those files exist for one purpose — evidence for the unexplained seam re-applies
+in `docs/parking-lot.md`, where a saved diff is what finally showed the cause was a line of ours —
+and an evidence directory that also fills up on every clean install is one somebody has to sort
+before they can use it, which is most of the way to not using it. A diff whose every hunk starts
+at `-0,0` is now reported as a creation in one line and not saved. Classification verified against
+five diff shapes, including the two that matter: a file where one object is created and another
+has drifted, and `rc=1` with no output at all. Both resolve to *difference*, so ambiguity records
+evidence rather than discarding it.
+
+### Everything the cluster could not show
+
+These were verified against stubbed `helm` and `kubectl`, which exercises the role's logic and
+nothing about Kubernetes. They are the *failure* paths — the branches a working cluster never
+reaches, and therefore the ones to exercise deliberately:
 
 - the full happy path, 24 tasks, `failed=0`, installing from the local tarball with
   `--kube-context` and no `--version`;
@@ -291,9 +334,11 @@ nothing about Kubernetes:
   fault and names the path to drop a file into;
 - the download truncated: the version read out of the archive catches it and says which file to
   delete, instead of helm failing on it on every future run;
-- the chart already on disk *with the download deliberately broken*: succeeds, fetch skipped.
+- the chart already on disk *with the download deliberately broken*: succeeds, fetch skipped;
+- a seam that is being created vs one that has drifted: one line each vs a saved diff, with the
+  mixed and empty-output cases both erring toward saving evidence.
 
-The remaining items were verified without a cluster at all, which bounds what they claim:
+And these without a cluster at all:
 
 - `clusters/platform.json` parses; both inventories render and emit the same `argocd_*` key set
   with substrate-correct values — `kubernetes-admin@onprem` vs `gcp-platform`, three seam files vs
@@ -307,9 +352,21 @@ The remaining items were verified without a cluster at all, which bounds what th
 - `make lint` clean, including the new render matrix — which resolves to exactly the previous
   seven `onprem` pairs plus `cert-manager (gcp)`.
 
-**Still not verified, and these are the claims a cluster has to settle:** that Argo CD comes up on
-GKE; that the seam applies; that `platform-gcp` reaches `Synced/Healthy`; that the canary
-ConfigMap appears; that cert-manager's CRDs apply with `ServerSideApply` on this datapath; and
-that GKE's own metrics-server serves `kubectl top` without us installing one. `make gcp-smoke`
-asserts every one of those, including the negative — that no `metrics-server` Application exists
-here — because "GKE provides one" was a sentence in a comment until something checked it.
+### What is still not established
+
+**That NetworkPolicy blocks a packet on this cluster.** `make gcp-smoke` reads
+`datapath_provider` out of the control plane, which is one step better than reading our own
+manifest and one step worse than a probe. `make netpol-check` is the probe and has no GCP
+counterpart, because there is no tenant here to write policies about — so the cluster that was
+*fixed* to enforce NetworkPolicy has not yet been shown to enforce one. That belongs with
+ShopVerse on GKE.
+
+**That the budget alert email arrives.** Unchanged from ADR-0019, and the one thing in the cost
+guardrail that no amount of API reading can settle.
+
+**That `make gcp-argocd` reports `changed=0` on a second run.** The idempotency gate every other
+module had to pass has not been run here: the first install necessarily reported `changed=3` (the
+chart repo, the fetch, the install), and nobody has yet run it twice against the same cluster. The
+pieces are in place — the values-drift check, the chart-version check, the creation-vs-difference
+split above — but "in place" is not "observed", which is the distinction this whole document is
+about. **Next GCP session, run it twice.**

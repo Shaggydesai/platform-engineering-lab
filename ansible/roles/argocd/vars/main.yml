@@ -15,3 +15,25 @@
 # reuse the old chart - the stat misses, the fetch runs, and the old file stays behind harmlessly
 # in a gitignored directory.
 argocd_chart_tgz: "{{ repo_root }}/.cache/argo-cd-{{ argocd_chart_version }}.tgz"
+
+# Is this seam file's `kubectl diff` a CREATION or a real DIFFERENCE?
+#
+# `kubectl diff` exits 1 for both, and conflating them made the first install on a new cluster
+# write a .cache/seam-diff-*.diff for every seam file - with hunk headers like `@@ -0,0 +1,24 @@`,
+# meaning the live side was empty and nothing differed because nothing was there.
+#
+# Those files exist for ONE purpose: evidence for the unexplained seam re-applies in
+# docs/parking-lot.md, where a saved diff is what finally showed the cause was a line of ours.
+# An evidence directory that also fills up on every clean install is an evidence directory
+# somebody has to sort before they can use it, which is most of the way to not using it.
+#
+# So: a diff whose every hunk starts at `-0,0` added lines to an empty file. That is a creation.
+# Anything else is a difference and gets recorded.
+#
+# References `item`, so it is only meaningful inside the seam loop - Ansible resolves it lazily at
+# use, which is what lets one definition serve both the save and the report task. Defining it
+# twice is how those two come to disagree about what they are reporting.
+argocd_seam_is_creation: >-
+  {{ (item.stdout_lines | default([]) | select('match', '^@@ ') | list | length > 0)
+     and (item.stdout_lines | select('match', '^@@ ')
+           | reject('match', '^@@ -0,0 ') | list | length == 0) }}

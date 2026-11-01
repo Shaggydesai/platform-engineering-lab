@@ -165,11 +165,33 @@ else
 fi
 
 if top=$($K top nodes --no-headers 2>&1); then
-  ok "\`kubectl top nodes\` returns data for $(printf '%s' "$top" | wc -l | tr -d ' ') node(s)"
-  note 'and nothing in this repository installed it - GKE provides it (ADR-0020)'
+  # `grep -c .`, NOT `printf '%s' "$top" | wc -l`, and the difference is not pedantry.
+  #
+  # Command substitution strips the trailing newline, so `printf '%s'` emits N lines separated by
+  # N-1 newlines and wc counts N-1. The first run of this script against a real two-node cluster
+  # therefore printed "returns data for 1 node(s)" - a number that is wrong, that nobody would
+  # question, and that reads exactly like a real and known failure mode: the on-prem parking-lot
+  # entry about kubelet serving certificates is precisely "metrics-server cannot scrape some
+  # nodes". An off-by-one in a shell pipeline presented as a cluster symptom.
+  #
+  # So the count is now COMPARED rather than printed. A number with nothing to compare it against
+  # is the shape this project keeps finding in its own checks - it looks like evidence and
+  # carries none, because no value of it would have failed anything.
+  metric_nodes=$(printf '%s\n' "$top" | grep -c . || true)
+  if [[ "$metric_nodes" == "$total" ]]; then
+    ok "\`kubectl top nodes\` returns data for all $metric_nodes node(s)"
+    note 'and nothing in this repository installed it - GKE provides it (ADR-0020)'
+  else
+    # A shortfall rather than a failure, because the honest reading is ambiguous on a young
+    # cluster: GKE's metrics-server needs a scrape or two per node, and "not scraped yet" and
+    # "cannot be scraped" look identical in one read. Same lesson as the External Secrets store
+    # read during its backoff - a transient state read once is not a verdict.
+    warn "metrics for $metric_nodes of $total nodes"
+    note 'if this persists across two runs a minute apart it is not warm-up, and the question is'
+    note 'why that node cannot be scraped - which on-prem was kubelet serving certificates'
+  fi
 else
-  # Not a hard failure on a cluster minutes old: the managed metrics-server needs a scrape or
-  # two before it has anything to report, and "no metrics yet" reads identically to "broken".
+  # Not a hard failure on a cluster minutes old, for the same reason.
   warn "\`kubectl top nodes\` has no data yet: $(printf '%s' "$top" | head -1)"
   note 'normal for the first minute or two after the cluster comes up; re-run before worrying'
 fi
