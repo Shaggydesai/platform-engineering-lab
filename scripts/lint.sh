@@ -205,6 +205,55 @@ else
   skip 'jq or python3 missing, skipped'
 fi
 
+step 'Every seam file an inventory names actually exists'
+# The argocd role applies whatever `argocd_seam_files` lists, per substrate (ADR-0020). A name in
+# that list with no file behind it fails inside the playbook at `kubectl diff`, against a cluster,
+# after Argo CD has already been installed - which is a slow and expensive way to find a typo.
+#
+# It also catches the reverse mistake, which is the one that would actually happen: adding a root
+# Application to gitops/bootstrap/ and forgetting to add it to the inventory. The file then sits
+# in Git looking deployed and nothing ever applies it, which is silent.
+if command -v python3 >/dev/null 2>&1; then
+  if python3 - <<'PYCHECK'
+import json, os, subprocess, sys
+bad = []
+named = set()
+for inv in ('ansible/inventory/nodes.py', 'ansible/inventory/gcp.py'):
+    out = subprocess.run([sys.executable, inv, '--list'], capture_output=True, text=True)
+    if out.returncode != 0:
+        print('    %s --list failed: %s' % (inv, out.stderr.strip().splitlines()[-1:]))
+        bad.append(inv); continue
+    files = json.loads(out.stdout)['all']['vars'].get('argocd_seam_files', [])
+    if not files:
+        print('    %s names no seam files at all' % inv)
+        bad.append(inv); continue
+    # projects.yaml first, always: an Application referencing a missing AppProject is rejected,
+    # and the role applies this list in order.
+    if files[0] != 'projects.yaml':
+        print('    %s lists %s first - projects.yaml must be first, or the roots are rejected'
+              % (inv, files[0]))
+        bad.append(inv)
+    for f in files:
+        named.add(f)
+        if not os.path.isfile(os.path.join('gitops/bootstrap', f)):
+            print('    %s names gitops/bootstrap/%s, which does not exist' % (inv, f))
+            bad.append(f)
+
+# And the other direction: a root Application committed but named by no inventory.
+for f in sorted(os.listdir('gitops/bootstrap')):
+    if f.endswith('.yaml') and f not in named:
+        print('    gitops/bootstrap/%s is in Git but no inventory applies it' % f)
+        bad.append(f)
+
+sys.exit(1 if bad else 0)
+PYCHECK
+  then ok 'both inventories name files that exist, and nothing in bootstrap is orphaned'
+  else bad 'fix the mismatch above - ansible/inventory/*.py and gitops/bootstrap/ must agree'
+  fi
+else
+  skip 'python3 missing, skipped'
+fi
+
 step 'Every Terraform state has its provider lock file committed'
 # THE LOCK FILE IS THE REAL PIN, and this repository says so in a comment and then did not check
 # it. terraform/gcp/guardrails/versions.tf states the rule at length: versions.tf pins 6.50.0,

@@ -209,3 +209,86 @@ than the platform's, so nothing here changes. But the number is now measured rat
 imagined, and it belongs next to ADR-0013's ~15 seconds of ingress failover: losing a node costs
 about 15 seconds of ingress, and losing the database pod costs about nine seconds of 502s. Both
 were invisible until something deliberately broke them.
+
+## Amendment, 2026-11-01 — the same tenant on GKE
+
+ADR-0016 onboarded ShopVerse onto the laptop and claimed the arrangement would port. This is what
+porting it actually cost: **one Application, one overlay, one seam file, and one line in an
+inventory.** Nothing in the tenant's own chart changed, and nothing in the `tenants` AppProject
+changed.
+
+### Four values differ, and two of them are the same text
+
+Read `gitops/environments/gcp/shopverse.yaml` beside the on-prem one. The structure is identical
+and four values differ — but only two differ *visibly*:
+
+| | on-prem | gcp | why |
+|:--|:--|:--|:--|
+| `externalSecret.remoteKey` | `shopverse/prod` | `shopverse-prod` | Secret Manager IDs forbid the slash |
+| `secrets.existingSecret` | `shopverse-credentials` | *empty* | nothing to roll back to here |
+| `ingress.enabled` | `false` | `false` | **same value, opposite reason** |
+| `mongodb.storageClass` | `""` | `""` | **same value, different meaning** |
+
+**Those last two are the argument for writing overlays as values with reasons rather than as
+diffs.** Half the differences between these substrates would not appear in a diff at all.
+
+### Ingress off: the same line is a no-op on one substrate and a standing charge on the other
+
+On-prem, `ingress.enabled: false` is there because an Ingress object would do **nothing** — that
+cluster has no Ingress controller, ingress is Gateway API served by Cilium (ADR-0013/0014), and
+the object would be created, accepted, and silently serve no traffic.
+
+On GKE it is there because an Ingress object **would work**. GKE has a built-in ingress
+controller, and an Ingress here provisions a Google HTTP(S) load balancer billed by the hour from
+the moment it exists, whether anyone visits the storefront or not.
+
+**A failure that works is harder to catch than one that does not.** `enabled: true` on this
+substrate would succeed: Argo CD reports Synced and Healthy, the storefront serves, and the bill
+arrives monthly. ADR-0003 forbids *leaving* a load balancer running, not creating one — so a
+cloud LB raised for a session and destroyed with `make gcp-down` is entirely within the rules.
+That is a deliberate next step, not a prohibition.
+
+### Storage: the identical value, and the clearest thing the cloud buys
+
+`storageClass: ""` means "use the cluster's default" on both, and letting the default apply is
+the principle both follow — a chart that names a class has the platform's implementation baked
+into it. What the default *is* differs entirely:
+
+- **on-prem** `platform-local`, a directory on one worker's disk. Lose that node and the data is
+  gone (ADR-0015), a warning that is supposed to stay uncomfortable.
+- **gcp** `standard-rwo`, a Persistent Disk. A *network* device: it detaches from a failed node
+  and reattaches elsewhere, and the pod moves with its data.
+
+That single property is most of what people mean by "cloud native storage", and it is the
+clearest thing this substrate buys that the laptop cannot have at any price. It is also why
+`gitops/environments/gcp/local-path.yaml` deploys nothing — the component whose entire job is
+dynamic provisioning has no counterpart where the provider ships one.
+
+### What did not need touching, which is the quiet result
+
+The `tenants` AppProject travelled unedited. Its destinations name `shopverse-*` and
+`https://kubernetes.default.svc` — the address a cluster uses for *itself* — so cluster-scoped
+resources stay forbidden, and `ResourceQuota`, `LimitRange` and `NetworkPolicy` stay forbidden
+even inside the tenant's own namespace. A boundary written about Argo CD rather than about a
+laptop turns out to be portable.
+
+### Three things this does not establish, and one of them is uncomfortable
+
+**It has never run.** The tenant is deployed by a seam that rests on an External Secrets
+arrangement no cluster has exercised (ADR-0018's amendment lists its four unknowns). If the
+overlay's `serviceAccount.annotations` path does not reach the subchart, Workload Identity is
+simply off, the Secret is never written, and every tenant pod stays Pending — so **a single
+unproven link invalidates this whole amendment, not part of it.** `make gcp-smoke` checks the
+store and the Secret *before* it looks at pods, so the output distinguishes the two.
+
+**The storefront is not known to serve.** `make shopverse-check` — register, cart, checkout,
+delete MongoDB, confirm the order survived — runs over HTTPS through the on-prem Gateway with the
+platform CA. There is no Gateway here and no ingress, so that check has no GCP counterpart and
+the tenant is reached by port-forward. Proving the order lifecycle on GKE is part of the ingress
+decision, not separate from it.
+
+**Capacity is an estimate.** Two e2-medium spot nodes give roughly 3.8 allocatable vCPU and
+5.6 GiB across the pair, carrying Argo CD, cert-manager, External Secrets, GKE's system pods and
+Dataplane V2's agent, and then eight tenant pods. The arithmetic says it fits. An estimate is not
+a measurement, and `Pending` is what a wrong one looks like — which is also what a missing Secret
+looks like, hence the ordering above.

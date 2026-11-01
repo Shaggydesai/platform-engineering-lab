@@ -319,6 +319,85 @@ else
   esac
 fi
 
+# ---------------------------------------------------------------- 6. the tenant
+step "the tenant: did the credentials arrive, and did anything schedule?"
+TNS=shopverse-prod
+if ! $K get ns "$TNS" >/dev/null 2>&1; then
+  warn "no $TNS namespace - ShopVerse is not deployed on this cluster yet"
+  note 'it arrives via Argo CD from gitops/clusters/gcp/apps/shopverse.yaml'
+else
+  # THE SECRET ESO WROTE, which is the end of the whole chain this substrate was built for:
+  # Workload Identity -> Secret Manager -> ExternalSecret -> Secret -> secretKeyRef -> pod.
+  # Six keys present means every link held.
+  want_keys='admin-email admin-password internal-token jwt-secret mongo-password mongo-username'
+  got_keys=$($K -n "$TNS" get secret shopverse-secrets -o json 2>/dev/null \
+             | jq -r '.data | keys | sort | join(" ")' || true)
+  if [[ "$got_keys" == "$(printf '%s\n' $want_keys | sort | paste -sd' ')" ]]; then
+    ok 'shopverse-secrets holds exactly the six keys, written by External Secrets'
+    note 'so the full chain held: Workload Identity, Secret Manager, ExternalSecret, Secret'
+  elif [[ -z "$got_keys" ]]; then
+    bad 'no shopverse-secrets - the ExternalSecret has not produced one'
+    es=$($K -n "$TNS" get externalsecret shopverse-secrets \
+         -o jsonpath='{.status.conditions[?(@.type=="Ready")].message}' 2>/dev/null || true)
+    note "ExternalSecret says: ${es:-(no ExternalSecret object at all)}"
+    note 'make gcp-secrets-verify  - and check the store above is Ready'
+  else
+    bad "shopverse-secrets has [$got_keys]"
+    note "the chart's ExternalSecret asks for [$want_keys]"
+  fi
+
+  # PENDING IS THE SIGNAL ON THIS SUBSTRATE, and it is worth saying why rather than just
+  # checking it. Two e2-medium spot nodes is about 3.8 allocatable vCPU and 5.6 GiB across the
+  # pair, carrying Argo CD, cert-manager, External Secrets, GKE's own system pods and Dataplane
+  # V2's agent - and then eight tenant pods. The estimate said it fits; an estimate is not a
+  # measurement, and Pending is what a wrong one looks like.
+  #
+  # It is also what a MISSING SECRET looks like, which is why this sits under the check above:
+  # a pod whose secretKeyRef names a Secret that does not exist stays Pending with
+  # CreateContainerConfigError, and that reads like a capacity problem.
+  pending=$($K -n "$TNS" get pods --no-headers 2>/dev/null \
+            | awk '$3 != "Running" && $3 != "Completed" {print "        " $1 "  " $3}' || true)
+  if [[ -z "$pending" ]]; then
+    n_pods=$($K -n "$TNS" get pods --no-headers 2>/dev/null | grep -c . || true)
+    ok "all $n_pods tenant pods Running"
+  else
+    bad 'some tenant pods are not Running:'
+    printf '%s\n' "$pending"
+    note 'if the Secret above is missing, that is the cause and not capacity - a pod whose'
+    note 'secretKeyRef names a missing Secret stays Pending and looks like a scheduling problem'
+  fi
+
+  # THE STORAGE DIFFERENCE, read back rather than asserted. On-prem this volume is a directory on
+  # one worker's disk and a dead node takes the data with it (ADR-0015). Here it should be a
+  # network Persistent Disk that detaches and reattaches - which is most of what "cloud native
+  # storage" means, and the clearest thing this substrate buys that a laptop cannot.
+  pvc_sc=$($K -n "$TNS" get pvc -o jsonpath='{.items[0].spec.storageClassName}' 2>/dev/null || true)
+  pvc_ph=$($K -n "$TNS" get pvc -o jsonpath='{.items[0].status.phase}' 2>/dev/null || true)
+  if [[ "$pvc_ph" == "Bound" ]]; then
+    ok "MongoDB's volume is Bound on StorageClass ${pvc_sc:-<unnamed>}"
+    note 'a network Persistent Disk, not a directory on a node: it detaches from a failed node'
+    note 'and reattaches elsewhere, which platform-local on-prem cannot do at any price'
+    note 'it is also billed while it exists - make gcp-down takes it, make cost-check checks'
+  elif [[ -n "$pvc_ph" ]]; then
+    bad "MongoDB's volume is $pvc_ph, not Bound"
+  else
+    warn 'no PVC in the tenant namespace yet'
+  fi
+
+  printf '\n'
+  $K -n "$TNS" get pods -o wide --no-headers 2>/dev/null | awk '{print "    " $1, $2, $3, $7}' \
+    | { column -t 2>/dev/null || cat; }
+
+  note ''
+  note 'WHAT THIS CANNOT CHECK, and it is the larger half: whether the storefront SERVES.'
+  note '`make shopverse-check` registers a user, fills a cart, checks out, deletes MongoDB and'
+  note 'confirms the order survived - over HTTPS through the on-prem Gateway, with the platform'
+  note 'CA. There is no Gateway on this cluster and no ingress, on purpose: an Ingress object'
+  note 'here WOULD work and would bill a Google load balancer by the hour (ADR-0003). Until that'
+  note 'decision is made, the storefront is reached the same way Argo CD is:'
+  note "  kubectl --context $CTX -n $TNS port-forward svc/shopverse-frontend 8081:80"
+fi
+
 # ---------------------------------------------------------------- verdict
 printf '\n'
 if (( fails )); then

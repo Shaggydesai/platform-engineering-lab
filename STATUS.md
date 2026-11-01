@@ -5,8 +5,8 @@
 > not stall like the last one.
 
 **Last updated:** 2026-11-01
-**Current module:** 08 — GCP. **Layer 2 is done and verified on a live cluster.** Remaining: the
-tenant, which needs External Secrets against GCP Secret Manager first.
+**Current module:** 08 — GCP. Guardrail, cluster, Layer 2 and the secret backend are **applied
+and verified**. The tenant and the ingress decision are **written but never run**.
 **Overall progress:** Modules 00–07 complete — 8 / 13
 
 ---
@@ -33,6 +33,9 @@ tenant, which needs External Secrets against GCP Secret Manager first.
 | **GCP secret backend** | **APPLIED and verified, 2026-11-01.** `terraform/gcp/secrets` — a service account, `secretAccessor` **on the secret not the project**, a Workload Identity binding, and ONE Secret Manager secret holding all six credentials as JSON. All six seeded and hash-matched on the round trip; `make gcp-secrets-verify` passes 5/5. **This is the first GCP resource that deliberately stays up between sessions**, at ₹0 |
 | **The portability claim, settled** | ShopVerse's own ExternalSecret uses **one `remoteKey` + six `property` lookups**, so the tenant's manifest is identical on both substrates and ONE value differs: `shopverse/prod` → `shopverse-prod`. The slash is the whole difference, forced by Secret Manager IDs matching `[A-Za-z0-9_-]+` (ADR-0018 amendment) |
 | **GCP secret cost** | **₹0, at one version of six free.** Secret Manager bills $0.06/version/month above six; one JSON secret uses one. Watched in **two** places now: `gcp-secrets-verify` fails at seven, and `make cost-check` counts versions per project **and account-wide** — because 4 + 4 across two projects is 8 against a billing-account quota and every per-project line would read clean. **Disabling a version is not enough — it must be destroyed** |
+| **ShopVerse on GKE** | **written, never run.** Same chart, same commit, same seven images; `gitops/environments/gcp/shopverse.yaml` + `gitops/clusters/gcp/apps/shopverse.yaml` + a third seam file. **Four values differ and two of them are the same text** — `ingress: false` is a no-op on-prem and a standing charge here; `storageClass: ""` is a node-local directory there and a network Persistent Disk here (ADR-0016 amendment) |
+| **The `tenants` AppProject** | **travelled unedited.** Its destinations name `shopverse-*` and the in-cluster address, so the boundary ports: no cluster-scoped resources, no ResourceQuota/LimitRange/NetworkPolicy even in the tenant's own namespace |
+| **GCP storefront** | **not reachable, on purpose.** An Ingress object here WOULD work and would bill a Google load balancer by the hour. Port-forward until the ingress decision is made — ADR-0003 forbids *leaving* an LB running, not creating one |
 | **GCP idempotency** | **not established.** `make gcp-argocd` has been run once. The `changed=0`-on-second-run gate every other module passed has not been run on this substrate — ADR-0020 says to run it twice next session |
 | **GCP costs while up** | **~₹3/hour** — 2 spot nodes, 2 external IPv4, 64 GB pd-standard. ~₹70 if left overnight. `make gcp-down` ends it; `make cost-check` proves it |
 | **Kubernetes versions DIFFER** | on-prem **v1.34.12**, GKE **v1.36.4**. Two minors. Measured, not chosen — see ADR-0019's verified section. First concrete entry for Module 09's "six differences" |
@@ -78,25 +81,20 @@ re-apply is gone.
 
 ## The next action
 
-**Apply the GCP secret backend. It is written, linted and committed, and has never been applied.**
-
-The first two commands cost nothing and need no cluster — they create a service account, three IAM
-bindings and one Secret Manager secret, all inside the free tier:
-
-```bash
-make gcp-secrets          # terraform: the identity and an EMPTY secret
-make gcp-secrets-seed     # the six values, generated and streamed in on stdin
-make gcp-secrets-verify   # read the arrangement back: identity, grant, binding, payload
-```
-
-Then the cluster session, which is also where the two outstanding gates get closed:
+**One cluster session, which now settles everything written since the last one.** The secret
+backend is applied and ₹0 and stays up, so this starts at `gcp-up`:
 
 ```bash
 make gcp-up && make gcp-kubeconfig
 make gcp-argocd           # and AGAIN, to see changed=0 - the gate ADR-0020 left open
-make gcp-smoke            # now also checks the WI annotation and the ClusterSecretStore
+make gcp-smoke            # Layer 2, the WI annotation, the store, AND the tenant
 make gcp-down && make cost-check
 ```
+
+**Read `gcp-smoke`'s output in order, because the order is the diagnosis.** It checks the
+ClusterSecretStore and the six-key Secret *before* it looks at pods — a tenant pod whose
+`secretKeyRef` names a missing Secret stays Pending and reads exactly like a capacity problem on
+two e2-medium nodes.
 
 **The four things only a cluster can settle** (ADR-0018's amendment lists them): that the gcpsm
 provider resolves `property` against a JSON payload; that `clusterLocation` accepts a zone; that

@@ -1,0 +1,56 @@
+# The root Application for TENANT workloads on GKE. ANSIBLE APPLIES THIS FILE - it is part of
+# the seam (ADR-0009, amended by ADR-0016, carried to a second substrate by ADR-0020).
+#
+# Why a second root rather than another file under the platform one: the platform root reads
+# gitops/clusters/gcp/platform/ with recursion off (ADR-0002 Rule 4), so there is no way to add a
+# sibling directory to it. A tenant workload is not a platform component and should not share a
+# directory with one.
+#
+# NOTE THE PROJECT. This Application is in `platform`, not `tenants`, and that is not a mistake:
+# it creates Application OBJECTS in the argocd namespace, and the tenants project is restricted to
+# `shopverse-*` destinations precisely so a tenant cannot write there. A tenants-project root
+# could not create the very Applications it exists to create.
+#
+# The Applications it creates are in `tenants`. So the boundary sits one level down, where it
+# belongs: this object is platform-owned plumbing, and what it deploys is tenant-owned.
+#
+# THE SEAM IS THREE FILES ON THIS SUBSTRATE NOW, matching on-prem. ansible/inventory/gcp.py lists
+# them in order, and the order still matters: an Application referencing a missing AppProject is
+# rejected, so projects.yaml stays first. projects.yaml itself is SHARED with on-prem and
+# unedited - the AppProjects turned out to be substrate-independent because their destinations
+# name the in-cluster address rather than a cluster.
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: tenants-gcp
+  namespace: argocd
+spec:
+  project: platform
+
+  source:
+    repoURL: https://github.com/Shaggydesai/platform-engineering-lab.git
+    targetRevision: main
+    path: gitops/clusters/gcp/apps
+    directory:
+      # Non-recursive, same reasoning as the platform root. `recurse` is ABSENT rather than
+      # written as false - stating that default explicitly caused a permanent phantom diff on the
+      # on-prem platform root, which cost two parking-lot entries before a saved diff showed the
+      # field was ours and something was removing it between applies. See
+      # gitops/bootstrap/root-onprem.yaml for the full account.
+      include: '*.yaml'
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

@@ -95,17 +95,22 @@ def build():
                 # is what stops this role installing the platform onto the wrong cluster.
                 "argocd_kubeconfig": os.path.expanduser("~/.kube/config"),
                 "argocd_kube_context": KUBE_CONTEXT,
-                # TWO seam files, not three. projects.yaml is shared with on-prem and unchanged -
-                # the AppProjects turned out to be substrate-independent, because their
-                # destinations name https://kubernetes.default.svc rather than a cluster.
+                # THREE seam files, matching on-prem, and the order matters: an Application
+                # referencing a missing AppProject is rejected, so projects.yaml stays first.
                 #
-                # root-tenants-onprem.yaml has no counterpart yet: ShopVerse is not deployed on
-                # GKE. Its absence is a scope boundary rather than an oversight - the tenant
-                # needs an ingress implementation and a secret backend that this substrate does
-                # not have yet (gitops/environments/gcp/ says so component by component).
+                # projects.yaml is shared with on-prem and UNCHANGED - the AppProjects turned out
+                # to be substrate-independent, because their destinations name
+                # https://kubernetes.default.svc and `shopverse-*` rather than a cluster. The
+                # tenant root needed no edit to that file at all.
+                #
+                # It was two files until the tenant arrived. The third was added once the GCP
+                # secret backend existed (ADR-0018's amendment): ShopVerse cannot start without
+                # its six credentials, so deploying it before there was anywhere to read them
+                # from would have been a crash-looping tenant rather than a milestone.
                 "argocd_seam_files": [
                     "projects.yaml",
                     "root-gcp.yaml",
+                    "root-tenants-gcp.yaml",
                 ],
                 "argocd_root_app": "platform-gcp",
                 "argocd_platform_path": "gitops/clusters/gcp/platform",

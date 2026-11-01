@@ -1,0 +1,89 @@
+# ShopVerse on GKE. The platform's first tenant, on its second substrate.
+#
+# Compare this to gitops/clusters/onprem/apps/shopverse.yaml: ONE path segment differs, in the
+# values file reference. The chart, the commit it is pinned to, the project, the destination
+# namespace, the sync policy and the retry schedule are all identical - and the retry schedule in
+# particular was earned on-prem for a reason that applies here unchanged (see below).
+#
+# The chart comes from the APPLICATION's repository, not from this one. The platform does not
+# vendor its tenant's code: ShopVerse owns its Helm chart, this repository owns where it runs and
+# with what settings (ADR-0016).
+#
+# WHAT THIS DEPENDS ON THAT NOTHING HERE ENFORCES, said plainly because the failure is otherwise
+# a crash-looping tenant and an unobvious cause:
+#
+#   terraform/gcp/secrets      the identity, the grant, the binding, and the secret
+#   make gcp-secrets-seed      a version in that secret, or the ExternalSecret cannot resolve
+#   the external-secrets App   the operator and the ClusterSecretStore
+#
+# None of that is expressed as a sync wave, deliberately. Argo CD waves order objects within one
+# Application's sync, not across Applications, so a wave here could not wait for the operator in
+# another one. What actually happens if the backend is missing: the ExternalSecret stays
+# SecretSyncedError, the Secret is never created, and every Deployment's pods stay Pending on a
+# missing secretKeyRef. That is loud and correct, and `make gcp-smoke` names it.
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: shopverse
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  # THE TENANTS PROJECT, and it needed no edit for this substrate - which is the quiet result
+  # here. Its destinations name `shopverse-*` and `https://kubernetes.default.svc`, the address a
+  # cluster uses for itself, so the boundary travels: cluster-scoped resources forbidden,
+  # ResourceQuota, LimitRange and NetworkPolicy forbidden even inside the tenant's own namespace.
+  #
+  # That last one is why networkPolicy.enabled is false in the overlay. The chart ships
+  # NetworkPolicies and the tenant is not allowed to create them; the platform supplies them
+  # instead, because a tenant that writes its own network policy can write one that opens itself
+  # up.
+  project: tenants
+
+  sources:
+    - repoURL: https://github.com/Shaggydesai/microservice-app.git
+      # THE SAME COMMIT as on-prem. Pinned to a commit rather than a tag because the repository
+      # has no tags - which is strictly stronger: a commit cannot be moved, so there is no re-tag
+      # to detect. Both substrates running the same commit is what makes a behaviour difference
+      # between them attributable to the platform.
+      targetRevision: d3cfecb3aeb14a9d2db167fec24ae9cb100a2703
+      path: helm/shopverse
+      helm:
+        valueFiles:
+          - $values/gitops/environments/gcp/shopverse.yaml
+
+    - repoURL: https://github.com/Shaggydesai/platform-engineering-lab.git
+      targetRevision: main
+      ref: values
+
+  destination:
+    server: https://kubernetes.default.svc
+    # Must match the tenants project's `shopverse-*` pattern. A destination outside it is
+    # REJECTED rather than failed - the Application reports Unknown/Unknown with no revision,
+    # which reads like a repository problem. That happened once already, to the storage
+    # Application whose source repo was not in the project's list.
+    namespace: shopverse-prod
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      # TEN, inherited from on-prem and justified by the same mechanism rather than copied.
+      #
+      # MongoDB has to be accepting connections before the six services that talk to it settle,
+      # and the chart has no sync waves - so the first sync legitimately churns: services
+      # crash-loop until Mongo is up, and Argo CD retries.
+      #
+      # There is a second reason on this substrate, which makes ten if anything more necessary
+      # here: the images come from ghcr.io over the nodes' external IPs (ADR-0019 Decision 3),
+      # and seven first-time pulls across two spot nodes is slower than seven pulls on a laptop
+      # with a warm containerd cache.
+      limit: 10
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 5m

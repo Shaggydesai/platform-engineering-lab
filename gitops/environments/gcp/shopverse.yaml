@@ -1,0 +1,195 @@
+# ShopVerse, on GKE. The same chart, the same commit, the same seven images.
+#
+# This file is what ADR-0001 was written to produce: a tenant that runs on two substrates from one
+# Git repository, with the differences confined to a values file. Read it next to
+# gitops/environments/onprem/shopverse.yaml - the shape is identical and FOUR values differ. Three
+# of those four differ for reasons that have nothing to do with the tenant.
+#
+#   externalSecret.remoteKey   shopverse/prod -> shopverse-prod   Secret Manager forbids the slash
+#   secrets.existingSecret     set -> empty                       no hand-made Secret to fall back to
+#   ingress.enabled            false -> false                     SAME VALUE, OPPOSITE REASON (below)
+#   mongodb.storageClass       "" -> ""                            SAME VALUE, DIFFERENT MEANING (below)
+#
+# The last two are the interesting ones, and they are the argument for writing overlays as values
+# with reasons rather than as diffs: two of the four "differences" are the same text, and would
+# not appear in a diff at all.
+
+global:
+  # THE SAME PIN AS ON-PREM, and that is the point rather than a convenience.
+  #
+  # `sha-6fd8524` was identified by DIGEST on-prem: `latest` resolved to sha256:25c271ce for the
+  # frontend, and sha-6fd8524 was the only one of eight sha-* tags carrying it - then confirmed
+  # for all seven services against the digests their pods were actually running. So this names
+  # exactly the bytes `make shopverse-check` passed against on the laptop.
+  #
+  # Which makes the two substrates comparable in the way ADR-0001 needs: if ShopVerse behaves
+  # differently here, it is the platform that differs and not the application.
+  #
+  # IMAGES COME FROM ghcr.io, WHICH IS WHY THE NODES HAVE EXTERNAL IPs. ADR-0019 Decision 3: a
+  # GKE node with no external IP and no Cloud NAT cannot reach ghcr.io at all, because Private
+  # Google Access covers Google's own services and nothing else. ADR-0003 forbids NAT gateways,
+  # so the options were external IPs (~₹3 a session, chosen) or mirroring into Artifact Registry
+  # (genuinely ₹0 within 0.5 GB, parked). If a pull ever fails with a timeout rather than a 401,
+  # that decision is the first place to look.
+  imageTag: sha-6fd8524
+
+# ---------------------------------------------------------------- ingress
+#
+# OFF - the same value as on-prem, for the OPPOSITE reason, and this is the sharpest contrast the
+# three-substrate comparison has produced so far.
+#
+#   on-prem   off because an Ingress object would do NOTHING. There is no Ingress controller in
+#             that cluster; ingress is Gateway API served by Cilium (ADR-0013/0014), so the object
+#             would be created, accepted, and silently serve no traffic.
+#
+#   gcp       off because an Ingress object WOULD WORK. GKE has a built-in ingress controller,
+#             and an Ingress here provisions a Google HTTP(S) load balancer - which is billed by
+#             the hour from the moment it exists, whether anyone visits the storefront or not.
+#
+# So the identical line is a no-op on one substrate and a standing charge on the other. ADR-0003
+# forbids leaving a load balancer running, and the thing that makes this dangerous is that
+# `enabled: true` here would succeed: Argo CD would report Synced and Healthy, the storefront
+# would work, and the bill would arrive monthly. A failure that works is harder to catch than one
+# that does not.
+#
+# HOW THE STOREFRONT IS REACHED INSTEAD, until Module 08's ingress decision is made:
+#
+#   kubectl --context gcp-platform -n shopverse-prod port-forward svc/shopverse-frontend 8081:80
+#
+# The same arrangement as Argo CD's UI on this cluster (`make argocd-ui CTX=gcp-platform`), and
+# for the same reason. A cloud load balancer brought up for the length of a session and destroyed
+# with `make gcp-down` would be perfectly within ADR-0003 - what is forbidden is leaving one
+# running, not creating one. That is a deliberate next step, not a prohibition.
+ingress:
+  enabled: false
+
+# ---------------------------------------------------------------- secrets
+#
+# THE WHOLE POINT OF THIS FILE, and the thing the GCP secret backend was built for.
+#
+# No hand-made Secret, no `make shopverse-secret`, and no time-boxed exception to ADR-0002 Rule 3
+# of the kind the on-prem overlay had to carry for a module. The six credentials arrive from GCP
+# Secret Manager through External Secrets, authenticated by Workload Identity - so there is no
+# credential anywhere in this chain: no key file, no Vault token, no unseal key.
+#
+# `create: false` and `existingSecret` EMPTY. The chart's helper reads:
+#
+#     if and .Values.secrets.existingSecret (not .Values.externalSecret.enabled)
+#       -> existingSecret
+#     else
+#       -> <release>-secrets
+#
+# so with externalSecret on, the name is `shopverse-secrets` regardless of what existingSecret
+# says. On-prem deliberately LEAVES existingSecret set, because `shopverse-credentials` still
+# exists there and turning the flag off is a one-line rollback. Here there is nothing to roll
+# back to, and a value that implies otherwise would be a small lie in a file about secrets.
+secrets:
+  create: false
+  existingSecret: ""
+
+externalSecret:
+  enabled: true
+
+  # THE ONE VALUE THAT DIFFERS FOR A REASON INTRINSIC TO THE BACKEND.
+  #
+  # `shopverse-prod`, not `shopverse/prod`. Secret Manager secret IDs match [A-Za-z0-9_-]+ and
+  # forbid the slash Vault's hierarchy is built from - so this single character is the only place
+  # the two backends' addressing is visibly incompatible (ADR-0018's 2026-11-01 amendment).
+  #
+  # Everything else about the tenant's ExternalSecret is IDENTICAL, and that is not luck. The
+  # chart renders one entry per name in a hardcoded list, all six pointing at ONE remoteKey with
+  # a `property` each. Vault reads a KV path and picks fields out of the object; the gcpsm
+  # provider JSON-parses the payload and does the same. Had the chart used six separate keys,
+  # this substrate would have needed six Secret Manager secrets - six of the six free versions,
+  # and a standing charge on the first rotation.
+  remoteKey: shopverse-prod
+
+  # Left at the chart's defaults, named here so they are visible rather than inherited:
+  #   apiVersion: external-secrets.io/v1
+  #   refreshInterval: 1h
+  #   secretStoreRef: ClusterSecretStore/vault-backend
+  #
+  # THAT STORE IS NOT VAULT ON THIS CLUSTER, and the name is deliberate. It is the contract every
+  # ExternalSecret in this repository writes against, including this one, which is written by the
+  # application's own chart and not by the platform. Renaming it to `gcpsm-backend` to match the
+  # implementation would mean the tenant's manifest is not portable after all - and portability
+  # was the entire reason ADR-0018 chose this arrangement.
+
+# ---------------------------------------------------------------- network policy
+#
+# OFF, and this one is off for exactly the same reason on both substrates: the `tenants`
+# AppProject forbids a tenant from creating NetworkPolicy objects. A tenant that writes its own
+# network policy can write one that opens itself up.
+#
+# The platform supplies them instead - and on this cluster they will actually be ENFORCED, which
+# was not true of the first GKE cluster built here. It came up with `datapath_provider` unset, and
+# GKE then accepts NetworkPolicy objects and enforces nothing: ADR-0017's tenant policies would
+# have been created, reported Synced and Healthy by Argo CD, and done nothing at all. Fixed
+# before it mattered, because `datapath_provider` cannot be changed without replacing the cluster
+# (ADR-0020). `make gcp-smoke` reads it back off the control plane every run.
+#
+# The platform-side policies are NOT deployed here yet, and the reason is recorded in
+# gitops/environments/gcp/tenant-network-policies.yaml: the pod-to-pod rules port unchanged, and
+# "allow the ingress layer in" does not - on-prem that source is Cilium's Envoy presenting as
+# `reserved:host`, here it would be a Google-owned range. That rule cannot be written once for
+# three substrates, and it is the one rule the tenant most needs.
+networkPolicy:
+  enabled: false
+
+# ---------------------------------------------------------------- storage
+#
+# `storageClass: ""` - THE SAME TEXT AS ON-PREM AND A COMPLETELY DIFFERENT THING, which is why
+# this is a comment and not a diff.
+#
+# Empty means "use the cluster's default StorageClass", and letting the default apply is the
+# principle both substrates follow: a chart that names a class has the platform's implementation
+# baked into it. What the default IS differs entirely:
+#
+#   on-prem   platform-local, local-path-provisioner (ADR-0015). A directory on one worker's
+#             disk. Lose that node and the data is gone - a warning that is supposed to stay
+#             uncomfortable.
+#
+#   gcp       standard-rwo, backed by a Persistent Disk. A NETWORK device: it detaches from a
+#             failed node and reattaches elsewhere, and the pod moves with its data.
+#
+# That single property is most of what people mean by "cloud native storage", and it is the
+# clearest thing this substrate buys that the laptop cannot have at any price. It is also why
+# gitops/environments/gcp/local-path.yaml deploys nothing: the component whose entire job is
+# dynamic provisioning has no counterpart where the provider ships one.
+#
+# AND IT IS WHY `make gcp-down` MATTERS MORE HERE. A Persistent Disk is billed while it exists,
+# and a PVC whose StorageClass has reclaimPolicy Delete takes its disk with it when the cluster
+# goes - which GKE's standard-rwo does. `make cost-check` lists unattached disks for the case
+# where it does not.
+#
+# 5Gi, the same as on-prem, against the free tier's 30 GB-months of pd-standard - which the two
+# 32 GB node disks already exceed (clusters/gcp/cluster.json records that as a deliberate,
+# visible non-zero line).
+mongodb:
+  enabled: true
+  persistence:
+    enabled: true
+    size: 5Gi
+    storageClass: ""
+
+# ---------------------------------------------------------------- not yet
+#
+# Observability arrives in Module 10. Already false in the chart's defaults; restated so that
+# enabling them is a visible edit here rather than a surprise when Prometheus appears and starts
+# selecting objects that were quietly already present.
+#
+# Worth one line for this substrate specifically: GKE runs Managed Service for Prometheus and the
+# cluster has `managed_prometheus { enabled = true }` whether we asked or not. So a ServiceMonitor
+# here is a different proposition from one on-prem - there is already a collector, and Module 10
+# will have to decide whether the platform brings its own or uses Google's. The same boundary
+# question as metrics-server, which ADR-0020 answered by deploying nothing.
+monitoring:
+  serviceMonitor:
+    enabled: false
+  prometheusRule:
+    enabled: false
+  dashboards:
+    enabled: false
+
+profiling:
+  enabled: false
