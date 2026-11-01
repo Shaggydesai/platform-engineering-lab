@@ -205,6 +205,90 @@ else
   skip 'jq or python3 missing, skipped'
 fi
 
+step 'The GCP secret backend agrees with cluster.json and with its Terraform'
+# Exactly the same shape of problem as the check above, one substrate over, and the same honest
+# trade: Argo CD renders a Helm chart from Git and cannot reach into clusters/gcp/cluster.json, so
+# the project ID, the zone, the cluster name and the service account email are written out
+# literally in gitops/environments/gcp/external-secrets.yaml. Duplication with a check, rather
+# than a generator that makes the overlay a build artifact.
+#
+# WHAT EACH MISMATCH WOULD ACTUALLY DO, because they fail in different and unhelpful ways:
+#
+#   wrong projectID        the store looks for the secret in a project that does not have it, and
+#                          reports NotFound on a secret that plainly exists in the console
+#   wrong clusterLocation  the region instead of the zone - the store cannot find its own cluster
+#   wrong service account  Workload Identity exchanges the token for an account with no grant,
+#                          and the error is a 403 that reads like a missing role
+#
+# All three produce a ClusterSecretStore that is Ready=False with a message about the backend,
+# several layers from a one-character typo in this file.
+if command -v python3 >/dev/null 2>&1; then
+  if python3 - <<'PYCHECK'
+import json, re, sys, yaml
+
+cfg = json.load(open('clusters/gcp/cluster.json'))
+ov  = yaml.safe_load(open('gitops/environments/gcp/external-secrets.yaml'))
+
+# Read the names out of Terraform's locals rather than repeating them a third time here. A
+# regex over HCL is crude, and it is still better than a third copy of the string: if the
+# pattern stops matching, the value comes back None and the comparison fails loudly.
+hcl = open('terraform/gcp/secrets/variables.tf').read()
+def local(name, default=None):
+    m = re.search(r'^\s*%s\s*=\s*"([^"]*)"' % re.escape(name), hcl, re.M)
+    return m.group(1) if m else default
+
+gsa_id    = local('gsa_id')
+secret_id = local('secret_id')
+ksa_ns    = local('ksa_namespace')
+ksa_name  = local('ksa_name')
+
+gcpsm = (ov.get('secretStore') or {}).get('provider', {}).get('gcpsm') or {}
+wi    = (gcpsm.get('auth') or {}).get('workloadIdentity') or {}
+sa    = ((ov.get('external-secrets') or {}).get('serviceAccount') or {}).get('annotations') or {}
+
+want_gsa = '%s@%s.iam.gserviceaccount.com' % (gsa_id, cfg['project_id'])
+
+pairs = [
+    ('projectID',       cfg['project_id'], gcpsm.get('projectID')),
+    ('clusterLocation', cfg['zone'],       wi.get('clusterLocation')),
+    ('clusterName',     'platform',        wi.get('clusterName')),
+    ('gcp-service-account annotation', want_gsa, sa.get('iam.gke.io/gcp-service-account')),
+    # The namespace/name pair the Workload Identity binding is written against. A different
+    # value here is a pod whose token Google will not exchange at all.
+    ('serviceAccountRef.name',      ksa_name, (wi.get('serviceAccountRef') or {}).get('name')),
+    ('serviceAccountRef.namespace', ksa_ns,   (wi.get('serviceAccountRef') or {}).get('namespace')),
+]
+bad = []
+for what, want, got in pairs:
+    if want != got:
+        print('    %s: expected %r, the overlay says %r' % (what, want, got))
+        bad.append(what)
+
+# The destination namespace of the Application must equal the one in the binding, for the same
+# reason - and it is in a third file, which is exactly why this is checked rather than trusted.
+app = yaml.safe_load(open('gitops/clusters/gcp/platform/external-secrets.yaml'))
+app_ns = (app.get('spec') or {}).get('destination', {}).get('namespace')
+if app_ns != ksa_ns:
+    print('    Application destination namespace is %r, the Workload Identity binding names %r'
+          % (app_ns, ksa_ns))
+    bad.append('destination')
+
+# Secret Manager secret IDs match [A-Za-z0-9_-]+ and forbid the slash Vault's paths use. The
+# tenant overlay's remoteKey is the Secret Manager ID on this substrate, so a value copied
+# across from the on-prem overlay would be rejected by the API rather than merely not found.
+if secret_id and not re.fullmatch(r'[A-Za-z0-9_-]+', secret_id):
+    print('    secret_id %r is not a legal Secret Manager ID ([A-Za-z0-9_-]+)' % secret_id)
+    bad.append('secret_id')
+
+sys.exit(1 if bad else 0)
+PYCHECK
+  then ok 'project, zone, cluster, service account and namespace all agree'
+  else bad 'fix the mismatch above - cluster.json and terraform/gcp/secrets are the source of truth'
+  fi
+else
+  skip 'python3 missing, skipped'
+fi
+
 step 'Optional linters, where installed'
 
 command -v yamllint     >/dev/null 2>&1 && { yamllint -s . && ok yamllint || bad yamllint; } || skip 'yamllint not installed'

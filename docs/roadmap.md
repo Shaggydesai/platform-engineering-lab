@@ -142,7 +142,9 @@ than written here.**
 | Layer 2 on GKE | **done and verified on a live cluster, 2026-11-01** — the same `argocd` role as on-prem (ADR-0020), 27 ok / 0 failed, root app and both components Synced/Healthy |
 
 **Not met yet, and both need the same prerequisite:** the storefront is not on GKE, so it is not
-reachable through a cloud load balancer. Everything *under* it now is: the same Git repository
+reachable through a cloud load balancer. That prerequisite — the secret backend — is now written
+and committed but never applied (ADR-0018's 2026-11-01 amendment), which leaves ShopVerse on GKE
+and the ingress decision as the last two pieces of this module. Everything *under* it now is: the same Git repository
 renders the same platform definitions onto both substrates, which is the half of this module's
 "done when" that Layer 2 and the overlays were for. ShopVerse needs its six credentials, which on this
 substrate means External Secrets against GCP Secret Manager with Workload Identity — the overlay

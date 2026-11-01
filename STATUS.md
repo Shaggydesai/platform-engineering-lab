@@ -30,6 +30,9 @@ tenant, which needs External Secrets against GCP Secret Manager first.
 | **GCP Layer 2** | **done and verified, 2026-11-01.** `make gcp-argocd` runs the *same* `ansible/roles/argocd` as on-prem against `gcp-platform` (ADR-0020): 27 ok, 0 failed. Argo CD v3.5.5, root app `platform-gcp` Synced/Healthy, `cert-manager` and `gitops-canary` both Synced/Healthy. One-play playbook, one-host inventory — there is no node on GKE to log into |
 | **ADR-0001's premise, tested** | **holds at Layer 3.** The canary rendered from the *same* directory on-prem renders, no overlay, `generation=2` matching Git. cert-manager rendered from the *same* wrapper chart with one path segment different — on-prem a self-signed root CA and three certificates, GKE nothing at all. One definition, two trust models |
 | **GCP smoke** | `make gcp-smoke` — every check passed. `ADVANCED_DATAPATH` confirmed, 2 spot e2-medium, **no control-plane node**, nodes `gke-platform-workers-c328afe6-*`, metrics served by GKE's own and the negative check (no `metrics-server` Application of ours) passed |
+| **GCP secret backend** | **written, never applied.** `terraform/gcp/secrets` — a service account, `secretAccessor` **on the secret not the project**, a Workload Identity binding, and ONE Secret Manager secret holding all six credentials as JSON. Survives `make gcp-down` on purpose. `make gcp-secrets` / `-seed` / `-verify` / `-destroy` |
+| **The portability claim, settled** | ShopVerse's own ExternalSecret uses **one `remoteKey` + six `property` lookups**, so the tenant's manifest is identical on both substrates and ONE value differs: `shopverse/prod` → `shopverse-prod`. The slash is the whole difference, forced by Secret Manager IDs matching `[A-Za-z0-9_-]+` (ADR-0018 amendment) |
+| **GCP secret cost** | **₹0, at one version of six free.** Secret Manager bills $0.06/version/month above six; one JSON secret uses one. `gcp-secrets-verify` fails at seven and warns above one. **Disabling a version is not enough — it must be destroyed** |
 | **GCP idempotency** | **not established.** `make gcp-argocd` has been run once. The `changed=0`-on-second-run gate every other module passed has not been run on this substrate — ADR-0020 says to run it twice next session |
 | **GCP costs while up** | **~₹3/hour** — 2 spot nodes, 2 external IPv4, 64 GB pd-standard. ~₹70 if left overnight. `make gcp-down` ends it; `make cost-check` proves it |
 | **Kubernetes versions DIFFER** | on-prem **v1.34.12**, GKE **v1.36.4**. Two minors. Measured, not chosen — see ADR-0019's verified section. First concrete entry for Module 09's "six differences" |
@@ -75,42 +78,38 @@ re-apply is gone.
 
 ## The next action
 
-**External Secrets against GCP Secret Manager.** Layer 2 is done, so the next thing on GKE is the
-one prerequisite everything else waits on: ShopVerse needs its six credentials, and on this
-substrate that means Workload Identity rather than Vault.
+**Apply the GCP secret backend. It is written, linted and committed, and has never been applied.**
 
-It is the only remaining item with no decisions left to make — the overlay is written
-(`gitops/environments/gcp/external-secrets.yaml`) and names a store called `vault-backend` on
-purpose, because the name is the contract the tenant writes against rather than a description of
-the implementation (ADR-0018). What it needs:
-
-1. three values from `terraform output` — project ID, cluster name, zone — into that overlay
-2. a Google service account, an IAM binding to `roles/secretmanager.secretAccessor`, and the
-   Workload Identity annotation on the `external-secrets` Kubernetes service account
-3. the six credentials in Secret Manager. Six secret versions is inside the free tier
-4. an Application in `gitops/clusters/gcp/platform/`
-
-**Then, in the same session, two things that are cheap only while the cluster is up:**
-
-- **Run `make gcp-argocd` twice.** The `changed=0` gate every other module passed has not been run
-  on this substrate (ADR-0020). It is thirty seconds and it is the difference between the
-  idempotency checks being written and being observed.
-- **`make gcp-smoke`** after each change, since it now compares the metrics node count rather than
-  printing it.
-
-The session shape, unchanged and not optional:
+The first two commands cost nothing and need no cluster — they create a service account, three IAM
+bindings and one Secret Manager secret, all inside the free tier:
 
 ```bash
-make gcp-guardrails          # needs TF_VAR_billing_account, or .cache/gcp-billing-account
-make gcp-up                  # ~9 min. REFUSES if the guardrail is missing or unverifiable
-make gcp-kubeconfig          # creates the gcp-platform context
-make gcp-argocd              # and again, to see changed=0
-make gcp-smoke
-make gcp-down && make cost-check    # ADR-0003 Decision 5
+make gcp-secrets          # terraform: the identity and an EMPTY secret
+make gcp-secrets-seed     # the six values, generated and streamed in on stdin
+make gcp-secrets-verify   # read the arrangement back: identity, grant, binding, payload
 ```
 
-Cost: roughly **₹3–6** an hour-ish sitting (2 spot nodes, 2 external IPv4, 64 GB pd-standard),
-against ₹28,257 of trial credit. Measured over two full build/destroy cycles on 2026-11-01.
+Then the cluster session, which is also where the two outstanding gates get closed:
+
+```bash
+make gcp-up && make gcp-kubeconfig
+make gcp-argocd           # and AGAIN, to see changed=0 - the gate ADR-0020 left open
+make gcp-smoke            # now also checks the WI annotation and the ClusterSecretStore
+make gcp-down && make cost-check
+```
+
+**The four things only a cluster can settle** (ADR-0018's amendment lists them): that the gcpsm
+provider resolves `property` against a JSON payload; that `clusterLocation` accepts a zone; that
+the Workload Identity binding resolves; and — the subtle one — that the overlay's
+`serviceAccount.annotations` path reaches the subchart at all. The ESO chart's own values file
+warns that **Helm silently ignores an unknown values path**, so a wrong path renders a valid
+ServiceAccount with no annotation, Workload Identity is simply off, and the symptom is a 403 that
+reads like a missing IAM role. `make gcp-smoke` reads the annotation off the live ServiceAccount,
+which is the only thing that can tell "I set it" from "it took effect".
+
+Cost: roughly **₹3–6** for an hour-ish sitting (2 spot nodes, 2 external IPv4, 64 GB
+pd-standard), against ₹28,257 of trial credit. Measured over two full build/destroy cycles on
+2026-11-01. The secret backend itself is ₹0 and stays up between sessions.
 
 ### Also still open in Module 08
 

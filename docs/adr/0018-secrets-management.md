@@ -335,3 +335,139 @@ than a budget.
   that makes Secrets unreadable if done in one.
 - **etcd backup and restore**, which is where the encryption key stops being a formality and
   becomes the difference between a restorable backup and an archive of ciphertext.
+
+## Amendment, 2026-11-01 — the same design on GCP Secret Manager
+
+The deciding argument for External Secrets was portability: *the ExternalSecret manifest names a
+store and a key and nothing else, so the same object works on GKE and EKS with twelve lines of
+provider changing in an overlay.* That was written with no cloud substrate in existence. This is
+what happened when one appeared.
+
+### The claim was testable, because the tenant's manifest says something specific
+
+ShopVerse's chart is in the application's own repository, which this platform does not control.
+Reading it rather than assuming was the whole of the design work — `helm/shopverse/templates/externalsecret.yaml`
+renders:
+
+```yaml
+data:
+  {{- range $key := list "jwt-secret" "internal-token" "admin-email"
+                         "admin-password" "mongo-username" "mongo-password" }}
+  - secretKey: {{ $key }}
+    remoteRef:
+      key:      {{ $.Values.externalSecret.remoteKey }}
+      property: {{ $key }}
+  {{- end }}
+```
+
+**One remote key, six `property` lookups.** On Vault that reads one KV v2 path and picks fields
+out of the object stored there; the gcpsm provider JSON-parses the payload and does the same. So
+the tenant's object is structurally identical on both substrates and exactly one value differs:
+
+| | on-prem | gcp |
+|:--|:--|:--|
+| `externalSecret.remoteKey` | `shopverse/prod` | `shopverse-prod` |
+
+**The slash is the entire difference, and it is forced.** Secret Manager secret IDs match
+`[A-Za-z0-9_-]+` and forbid the separator Vault's hierarchy is built from. That one character is
+the only place these two backends' addressing is visibly incompatible — a better result than this
+ADR claimed, and the reason `remoteKey` had to be a Helm value rather than a constant in the
+chart. A tenant chart that hardcoded its Vault path would not have been portable, and nothing in
+the manifest would have hinted at why.
+
+### The provider block is shorter than the on-prem one, and the absences are the finding
+
+```yaml
+gcpsm:
+  projectID: platform-eng-lab-261031
+  auth:
+    workloadIdentity:
+      clusterLocation: asia-south1-a        # the ZONE - ADR-0003 forbids regional clusters
+      clusterName: platform
+      serviceAccountRef: {name: external-secrets, namespace: external-secrets}
+```
+
+No server address, no mount path, no KV version, no Vault role, no token reviewer — **and no
+unseal key.** The hardest problem in the on-prem design, an irreducible secret a human holds and
+re-enters after every restart (Decision 3), does not exist here. That is not Vault being badly
+designed; it is the same problem solved by something with a hardware root of trust, which a
+laptop does not have.
+
+The store is still called `vault-backend`, which is now a lie about the implementation and the
+truth about the contract. **The name is an interface.** Every ExternalSecret in this repository
+names it, including the tenant's. Renaming it to match the backend would be the mistake.
+
+### One secret, not six — and that is what keeps it free
+
+Secret Manager bills **$0.06 per active secret version per month, with six free.** Six separate
+secrets, one per credential, would have spent the entire allowance and put a standing charge on
+the first rotation. ADR-0003 forbids a standing charge however small, so this is a cost
+constraint that shaped a design decision rather than a note added afterwards.
+
+One secret holding all six as JSON uses **one** version and leaves five of headroom. The
+consequence is written into `make gcp-secrets-verify`, which fails at seven versions and warns
+above one — and says what the manual says only in passing: **disabling a version is not enough,
+a disabled version still counts. It has to be destroyed.**
+
+### Terraform owns the shape; a script owns the content
+
+`terraform/gcp/secrets/` creates a Google service account, a `secretAccessor` binding **on the
+secret rather than on the project**, a `workloadIdentityUser` binding, and the secret as an empty
+container. There is deliberately no `google_secret_manager_secret_version`.
+
+**Terraform writes every attribute it manages into local state in plaintext, and `sensitive`
+suppresses a value in *output*, not in state.** A version resource with `secret_data` set would
+therefore have put all six credentials in a file next to a repository whose entire subject is
+"no secrets in Git" — on the way to a secret manager. So `make gcp-secrets-seed` generates the
+values and streams them to `gcloud` on stdin: never in argv, never on disk, never printed.
+
+The grant being on the secret rather than the project is the GCP analogue of the Vault policy
+`make vault-bootstrap` writes, scoped to `secret/data/shopverse/*`. A project-wide
+`secretAccessor` would also have made the ExternalSecret work — which is why
+`gcp-secrets-verify` reads the binding off the secret and not off the project. *"It works"* was
+not the question.
+
+### Fresh values, not copies of the on-prem ones
+
+Decision 5 required the on-prem migration to copy the existing six byte-for-byte, because
+`mongo-password` had already initialised a database on a volume that was being kept. **That
+reason does not transfer.** GKE's MongoDB will be a fresh PersistentVolume on a cluster that does
+not exist between sessions, so there is nothing to stay identical with — and sharing credentials
+across substrates would mean a compromise on the laptop is a compromise in the cloud.
+
+The constraint survives in a different form, and `make gcp-secrets-seed` refuses rather than
+explains it: **a reseed is only correct together with destroying the database volume.** Adding a
+version changes `mongo-password`, and a database initialised with the previous one comes up
+Running and Ready and refuses every connection.
+
+### A different risk profile, not a smaller one
+
+| | lose it and… |
+|:--|:--|
+| `.cache/vault-init.json` | every Vault secret is **unrecoverable** |
+| the Secret Manager payload | a reseed and a fresh database |
+
+The second is recoverable only because nothing on GKE yet holds data worth keeping. That changes
+the first time it does, and the seeding script says so on every successful run.
+
+### What a cluster still has to confirm
+
+Everything above was built and checked without one, so the honest list is short and specific:
+
+- **that the gcpsm provider resolves `property` against a JSON payload.** The provider documents
+  it and ESO implements it with gjson, but this project has been wrong before about a feature it
+  read about and did not run. If it does not, the fallback is six secrets and a cost note.
+- **that `clusterLocation` as a zone is accepted.** The field name says location and ADR-0003
+  forbids the regional cluster that would make it a region.
+- **that the Workload Identity binding resolves with no cluster at apply time.** The pool
+  `PROJECT.svc.id.goog` is project-scoped and should outlive `make gcp-down`; IAM accepts any
+  syntactically valid principal, so a wrong one fails in the pod as a 403 and not at apply.
+- **that the overlay's `serviceAccount.annotations` path reaches the subchart at all.** The
+  chart's own values file warns that Helm silently ignores an unknown values path, so "I set it"
+  and "it took effect" are different claims. `make gcp-smoke` now reads the annotation off the
+  live ServiceAccount, which is the only thing that can tell them apart.
+
+`make lint` checks the five values duplicated between `clusters/gcp/cluster.json`,
+`terraform/gcp/secrets/variables.tf` and the two GitOps files — verified by breaking each one in
+turn and watching it fail, because a cross-file check that has never failed is a check that
+confirms nothing.

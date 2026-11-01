@@ -261,6 +261,64 @@ else
   fi
 fi
 
+# ---------------------------------------------------------------- 5. the secret backend
+step "secrets: does Workload Identity actually work?"
+if ! $K -n external-secrets get deploy >/dev/null 2>&1; then
+  warn 'External Secrets is not installed on this cluster yet'
+  note 'it arrives via Argo CD from gitops/clusters/gcp/platform/external-secrets.yaml'
+else
+  # THE ANNOTATION, read off the live ServiceAccount rather than off our overlay.
+  #
+  # This exists because of a warning in the chart's own values file: Helm SILENTLY IGNORES a
+  # value path that does not exist, so `external-secrets.serviceAccount.annotations` either
+  # reaches the subchart or vanishes without a word. A wrong path renders a perfectly valid
+  # ServiceAccount with no annotation, Workload Identity is simply off, and the failure surfaces
+  # as a 403 from the metadata server - which reads like a missing IAM role.
+  #
+  # `make lint` checks that the overlay names the right account. Only the cluster can say whether
+  # the value took effect. That distinction is the whole reason this file exists.
+  want_gsa="external-secrets@${project}.iam.gserviceaccount.com"
+  got_gsa=$($K -n external-secrets get sa external-secrets \
+            -o jsonpath='{.metadata.annotations.iam\.gke\.io/gcp-service-account}' 2>/dev/null || true)
+  if [[ "$got_gsa" == "$want_gsa" ]]; then
+    ok 'the ServiceAccount carries the gcp-service-account annotation'
+    note 'so the overlay value reached the subchart - which Helm would not have said'
+  elif [[ -z "$got_gsa" ]]; then
+    bad 'the external-secrets ServiceAccount has NO gcp-service-account annotation'
+    note 'Workload Identity is off. Helm ignores an unknown values path without a word, so the'
+    note 'likely cause is the path in gitops/environments/gcp/external-secrets.yaml, not IAM.'
+  else
+    bad "the annotation names $got_gsa"
+    note "expected $want_gsa"
+  fi
+
+  # The store. Ready=True means ESO exchanged a token, reached Secret Manager, and was allowed
+  # to read - all four Terraform resources and the annotation above, in one condition.
+  store=$($K get clustersecretstore vault-backend \
+          -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+  case "$store" in
+    True)
+      ok 'ClusterSecretStore/vault-backend is Ready'
+      note 'still called vault-backend on purpose: the name is the contract the tenant writes'
+      note 'against, not a description of the backend (ADR-0018)'
+      ;;
+    False)
+      msg=$($K get clustersecretstore vault-backend \
+            -o jsonpath='{.status.conditions[?(@.type=="Ready")].message}' 2>/dev/null || true)
+      bad "ClusterSecretStore/vault-backend is Ready=False: ${msg:-no message}"
+      note 'READ THIS BY TIME before believing it. ESO backs off exponentially (1s, 4s, 8s,'
+      note '16s, 32s), so a store checked seconds after the backend was fixed looks broken and'
+      note 'is not - that cost an hour in Module 07. Compare lastTransitionTime against when'
+      note 'make gcp-secrets-seed ran, then re-check.'
+      note 'If it persists:  make gcp-secrets-verify'
+      ;;
+    *)
+      warn 'no ClusterSecretStore/vault-backend yet'
+      note 'the Application may still be syncing - it renders in sync wave 1, after the CRDs'
+      ;;
+  esac
+fi
+
 # ---------------------------------------------------------------- verdict
 printf '\n'
 if (( fails )); then

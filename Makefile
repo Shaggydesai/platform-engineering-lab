@@ -486,6 +486,58 @@ gcp-argocd: _no-stray-flags ## Install Argo CD on GKE and apply the seam (needs 
 	fi
 	@$(GCP_PLAY) $(ARGS)
 
+# ---------------------------------------------------------------- the GCP secret backend
+#
+# A THIRD Terraform state, and the reason is lifetime rather than tidiness. terraform/gcp holds a
+# cluster destroyed at the end of every session; this holds the identity ShopVerse's secrets are
+# read with, and the secret itself, and both SURVIVE `make gcp-down` on purpose. Regenerating
+# credentials every session would hand a fresh mongo-password to a database initialised with the
+# previous one - the Module 07 failure, presenting as a Running, Ready MongoDB that refuses every
+# connection (ADR-0018 Decision 5).
+#
+# No guardrail gate on these: nothing here is billable within the free tier (one service account,
+# three IAM bindings, one secret version of six free). The gate belongs on `make gcp-up`.
+GCP_SECRETS_TF := terraform/gcp/secrets
+
+.PHONY: gcp-secrets
+gcp-secrets: _no-stray-flags _gcp-preflight ## The GCP secret backend - identity, IAM, and an EMPTY secret
+# Terraform creates the SHAPE and never the CONTENT. A google_secret_manager_secret_version with
+# secret_data set would write all six ShopVerse credentials into terraform.tfstate in plaintext -
+# `sensitive` suppresses a value in OUTPUT, not in state - so a module whose whole subject is "no
+# secrets in Git" would have put them on disk beside the repository. Values go in with
+# `make gcp-secrets-seed`, generated and streamed on stdin.
+	@set -eu; \
+	proj=$$(jq -r '.project_id' clusters/gcp/cluster.json); \
+	printf 'enabling secretmanager and iam (no-op if already on)\n'; \
+	printf '  not Terraform resources, for the reason ADR-0019 Decision 1c gives: an API that\n'; \
+	printf '  must exist before Terraform can refresh its own state cannot be managed by it.\n'; \
+	gcloud services enable secretmanager.googleapis.com iam.googleapis.com \
+	  --project="$$proj" --quiet; \
+	printf '\nproject   %s\n\n' "$$proj"; \
+	cd $(GCP_SECRETS_TF) && terraform init -input=false && terraform apply
+	@printf '\nThe box exists and is EMPTY. Next:\n'
+	@printf '  make gcp-secrets-seed     generate the six values and put them in\n'
+	@printf '  make gcp-secrets-verify   read the whole arrangement back out of the API\n'
+
+.PHONY: gcp-secrets-seed
+gcp-secrets-seed: _gcp-preflight ## Generate ShopVerse's six credentials into Secret Manager (refuses to overwrite)
+	@bash scripts/gcp-secrets.sh seed
+
+.PHONY: gcp-secrets-verify
+gcp-secrets-verify: _gcp-preflight ## Read the secret backend back out of the API - identity, grant, binding, payload
+# Four separate questions, and the third is the one nobody thinks to ask: a project-wide
+# secretAccessor would also make the ExternalSecret work, and would let External Secrets read
+# every secret in the project. "It works" is not the question.
+	@bash scripts/gcp-secrets.sh verify
+
+.PHONY: gcp-secrets-destroy
+gcp-secrets-destroy: _no-stray-flags _gcp-preflight ## Destroy the secret backend INCLUDING every version of the secret
+	@printf '\033[31mThis destroys the secret and every version of it.\033[0m\n'
+	@printf 'The six credentials exist nowhere else - not in Git, not in Terraform state, not on\n'
+	@printf 'this disk. That is recoverable (reseed, and let ShopVerse build a fresh database) but\n'
+	@printf 'it is NOT recoverable if anything on GKE is holding data you want to keep.\n\n'
+	@cd $(GCP_SECRETS_TF) && terraform destroy
+
 .PHONY: gcp-smoke
 gcp-smoke: ## Read back what the GKE cluster actually is (nodes, datapath, metrics, the seam)
 # NOT `make smoke` with a different context. Three of that script's assertions cannot hold here -
