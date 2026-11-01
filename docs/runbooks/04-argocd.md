@@ -39,9 +39,28 @@ Confirm the chart version before the first install, the same discipline as Ciliu
 helm search repo argo/argo-cd --versions | head -3
 ```
 
-If something newer than the pinned `argocd_chart_version` in `clusters/onprem/nodes.json`
-appears, move the pin deliberately and record it. Do not let a `helm repo update` decide which
-version of the thing that reconciles everything else is running.
+If something newer than the pinned `chart_version` in **`clusters/platform.json`** appears, move
+the pin deliberately and record it. Do not let a `helm repo update` decide which version of the
+thing that reconciles everything else is running.
+
+That file is shared by every substrate (ADR-0020), so moving the pin moves it for **all** of
+them — which is the point, and also the thing to be aware of: the next `make onprem-argocd` and
+the next `make gcp-argocd` will both upgrade. It used to live in `clusters/onprem/nodes.json`,
+which is where most people will look first; there is a comment there pointing here.
+
+The same role installs Argo CD on GKE:
+
+```bash
+make gcp-argocd-check    # --check --diff, changes nothing
+make gcp-argocd          # needs: make gcp-up, then make gcp-kubeconfig
+```
+
+The helper targets above take `CTX=` to pick a cluster, and print which one they acted on:
+
+```bash
+make gitops-status CTX=gcp-platform
+make argocd-ui     CTX=gcp-platform
+```
 
 ## The gate for this module
 

@@ -5,7 +5,8 @@
 > not stall like the last one.
 
 **Last updated:** 2026-11-01
-**Current module:** 08 — GCP. Guardrail and cluster done; the platform is not on it yet.
+**Current module:** 08 — GCP. Guardrail, cluster and Layer 2 written; Layer 2 not yet *run* on a
+live cluster.
 **Overall progress:** Modules 00–07 complete — 8 / 13
 
 ---
@@ -24,7 +25,9 @@
 | **Ingress failover** | **measured: ~15s** on a hard node power-off, bounded by the L2 lease duration (ADR-0013) |
 | **Storage** | **working** — local-path-provisioner v0.0.37, default class `platform-local` (ADR-0015). Node-local: a dead node takes its data with it |
 | **Certificates expire** | **2027-10-22** — `sudo kubeadm certs renew all` before then, or nothing works |
-| **GCP cluster** | **built** — zonal `platform` in asia-south1-a, 2× e2-medium **spot**, external IPs, Workload Identity. `make gcp-up` / `make gcp-down` / `make gcp-kubeconfig` (context `gcp-platform`). **Nothing is installed on it yet** |
+| **GCP cluster** | **buildable, currently destroyed** — zonal `platform` in asia-south1-a, 2× e2-medium **spot**, external IPs, Workload Identity. `make gcp-up` / `make gcp-down` / `make gcp-kubeconfig` (context `gcp-platform`) |
+| **GCP NetworkPolicy** | **fixed before it mattered.** The first cluster had `datapath_provider` unset — GKE then *accepts* NetworkPolicy objects and enforces nothing, so ADR-0017's tenant policies would have reported Synced/Healthy and done nothing. Now `ADVANCED_DATAPATH` (Dataplane V2, which is managed Cilium). **Cannot be changed in place** — it forces cluster replacement, so going in between a destroy and the next create was free |
+| **GCP Layer 2** | **written, not yet run on a cluster.** `make gcp-argocd` runs the *same* `ansible/roles/argocd` as on-prem against the `gcp-platform` context (ADR-0020). One-play playbook, one-host inventory — there is no node on GKE to log into. Platform set: the canary + cert-manager. `make gcp-smoke` reads back what the cluster actually is |
 | **GCP costs while up** | **~₹3/hour** — 2 spot nodes, 2 external IPv4, 64 GB pd-standard. ~₹70 if left overnight. `make gcp-down` ends it; `make cost-check` proves it |
 | **Kubernetes versions DIFFER** | on-prem **v1.34.12**, GKE **v1.36.4**. Two minors. Measured, not chosen — see ADR-0019's verified section. First concrete entry for Module 09's "six differences" |
 | **GCP guardrail** | ₹400 budget `ad4e1d32`, thresholds 50/90/100%, verified against the API. **`make gcp-up` refuses to run without it** |
@@ -69,27 +72,64 @@ re-apply is gone.
 
 ## The next action
 
-**Module 08.** Modules 06 and 07 are closed; nothing is half-built and there is no cliffhanger.
+**One command, and it needs the laptop.** Everything for Layer 2 on GKE is written, linted and
+committed; nothing has touched a live cluster. In order, in one sitting of about twenty minutes:
 
-Before picking up anything new, two small debts are worth clearing because both are cheap and
-both are already scoped:
+```bash
+make gcp-guardrails          # needs TF_VAR_billing_account, or .cache/gcp-billing-account
+make gcp-up                  # ~9 min. REFUSES if the guardrail is missing or unverifiable
+make gcp-kubeconfig          # creates the gcp-platform context
+make gcp-argocd              # the SAME ansible role as on-prem (ADR-0020)
+make gcp-smoke               # reads back what the cluster IS, including the negatives
+make gcp-down && make cost-check    # ADR-0003 Decision 5. Not optional
+```
+
+**The six claims `gcp-smoke` settles**, all currently unverified because they need a cluster:
+the role installs Argo CD on GKE; the seam applies; `platform-gcp` reaches Synced/Healthy; the
+canary ConfigMap appears (which proves the whole Layer 2 chain on a second substrate); cert-manager's
+CRDs apply with ServerSideApply on this datapath; and GKE's own metrics-server serves `kubectl top`
+**without** us installing one — including the negative check that no `metrics-server` Application
+exists here, because two of them conflict over a cluster-scoped APIService with no error message.
+
+Cost for that sitting: roughly **₹3–6** (2 spot nodes, 2 external IPv4, 64 GB pd-standard, under
+an hour), against ₹28,257 of trial credit.
+
+### Still open in Module 08, after that
+
+- **External Secrets against GCP Secret Manager.** The overlay is written and needs three values
+  from `terraform output` (project, cluster name, zone), a Google service account, an IAM binding
+  and the six credentials in Secret Manager. Six secret versions is inside the free tier.
+- **Ingress.** No Application, on purpose: a `type=LoadBalancer` Service here bills monthly, which
+  ADR-0003 forbids leaving running. GKE Gateway is a different implementation of the same contract
+  and deserves its own module rather than a corner of this one.
+- **The ACME ClusterIssuer is cancelled, not deferred.** The overlay promised publicly trusted
+  certificates via DNS-01 against Cloud DNS. That needs a public zone (~$0.20/month — a standing
+  charge ADR-0003 forbids) and a domain this project does not own. cert-manager is installed and
+  issues nothing; the correction is written into the overlay above the original sentence.
+
+### Two older debts, both cheap and already scoped
 
 1. **Module 06's browser half.** `make shopverse-check` passes with a CA that `curl` verifies,
    but the roadmap's bar says a *browser* trusting it. That means importing `platform-ca` into
    the Windows trust store — a change to a machine, not to this repository — and it is untested
    whether Windows can even reach `192.168.100.*` from WSL2. `docs/runbooks/06-shopverse.md` has
    the steps.
-2. **Module 08's own opening move is already written down.** Two things in
-   `docs/parking-lot.md` belong to it and were deferred *to* it: Vault's API is plaintext HTTP
-   (`tls_disable = 1`, mitigated by a NetworkPolicy and nothing else), and External Secrets runs
-   its own CA for its own webhook. cert-manager and the `platform-ca` ClusterIssuer already
-   exist, so both are a Certificate plus a values change — and together they make "everything in
-   this cluster that presents a certificate got it from `platform-ca`" true, which is currently
-   false in three places counting metrics-server.
+2. **The on-prem PKI gaps, which belong to no module yet.** Two parking-lot entries: Vault's API
+   is plaintext HTTP (`tls_disable = 1`, mitigated by a NetworkPolicy and nothing else), and
+   External Secrets runs its own CA for its own webhook. Both are a Certificate plus a values
+   change, since `platform-ca` already exists, and together they would make "everything in this
+   cluster that presents a certificate got it from `platform-ca`" true — currently false in three
+   places counting metrics-server.
 
-**Before any cloud module:** the AWS $5 and GCP ₹400 budget alarms, which ADR-0003 requires to
-exist *before* the first cloud resource. That is not a suggestion in the roadmap, it is the thing
-standing between this project and a bill.
+   **An earlier version of this file called that "Module 08's opening move". It is not.** The
+   roadmap says Module 08 is GCP; the attribution came from parking-lot entries written here and
+   then believed on a later read. They need a named module in `docs/roadmap.md` or they will keep
+   drifting to whichever one is next.
+
+**Before AWS (Module 09): the $5 budget alarm**, which ADR-0003 requires to exist *before* the
+first cloud resource. The GCP ₹400 one exists and is verified against the API; the AWS one does
+not exist at all. That is not a suggestion in the roadmap, it is the thing standing between this
+project and a bill.
 
 ## Module 07 closed, 2026-10-31
 

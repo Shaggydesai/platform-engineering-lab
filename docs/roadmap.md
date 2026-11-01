@@ -130,6 +130,29 @@ No plaintext secrets in Git, decided and implemented rather than postponed.
 - **Sessions:** 3
 - **Cost note:** zonal cluster only — the free management credit does not cover regional.
 
+**Progress, 2026-11-01 — roughly two sessions in, and two deliverables are done differently
+than written here.**
+
+| | |
+|:--|:--|
+| Terraform for a zonal GKE cluster with spot nodes | **done** — `terraform/gcp`, ADR-0019. Plus the budget guardrail as its own prior state, which `make gcp-up` refuses to run without |
+| `make up ENV=gcp` / `make down ENV=gcp` | **done as `make gcp-up` / `make gcp-down`.** Named targets rather than an `ENV` switch, because a mistyped `ENV` would have silently defaulted to on-prem — the same class of bug as `make onprem-up TAggS=…` running the whole playbook. `ENV` survives for `make gitops-render` |
+| the GCP overlay | **decided, not all deployed.** All seven overlays now hold real decisions; two have Applications (canary, cert-manager). The other five are absent *on purpose* and ADR-0020 §5 says why each |
+| `make cost-check` | **done**, and widened twice after it twice reported a clean account it had not read |
+| Layer 2 on GKE | **written, not yet run on a cluster** — the same `argocd` role as on-prem (ADR-0020) |
+
+**Not met yet, and both need the same prerequisite:** the storefront is not on GKE, so it is not
+reachable through a cloud load balancer. ShopVerse needs its six credentials, which on this
+substrate means External Secrets against GCP Secret Manager with Workload Identity — the overlay
+is written and needs three Terraform outputs, a Google service account and an IAM binding.
+
+**On the load balancer and ADR-0003.** These are not in conflict, and it is worth being precise
+because they look like they are: ADR-0003 forbids *leaving* a load balancer running, not creating
+one. A cloud LB up for the length of a session and gone after `make gcp-down` meets this bar
+honestly. What would not is an ingress Application left enabled in the overlay, because then
+every `gcp-up` creates one whether anyone is looking at the storefront or not — which is why
+`gitops/environments/gcp/platform-ingress.yaml` is off today rather than "off for now".
+
 ### Module 09 — AWS: the self-managed environment
 
 - **Deliverables:** Terraform for spot EC2 instances (no NAT gateway); Ansible reused from
