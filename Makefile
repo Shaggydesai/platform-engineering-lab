@@ -292,6 +292,11 @@ gcp-guardrails: _no-stray-flags ## ADR-0003 gate - the ₹400 budget alert, BEFO
 	  printf '  then edit clusters/gcp/cluster.json\n'; \
 	  exit 1; \
 	fi; \
+	if [ -z "$${TF_VAR_billing_account:-}" ] && [ -r .cache/gcp-billing-account ]; then \
+	  TF_VAR_billing_account=$$(cat .cache/gcp-billing-account); \
+	  export TF_VAR_billing_account; \
+	  printf 'billing account read from .cache/gcp-billing-account\n'; \
+	fi; \
 	if [ -z "$${TF_VAR_billing_account:-}" ]; then \
 	  printf '\033[31mTF_VAR_billing_account is not set\033[0m\n\n'; \
 	  printf 'It is kept OUT of Git because this repository is public and a billing account ID\n'; \
@@ -310,6 +315,9 @@ gcp-guardrails: _no-stray-flags ## ADR-0003 gate - the ₹400 budget alert, BEFO
 	  printf '  gcloud config set project %s\n' "$$proj"; \
 	  exit 1; \
 	fi; \
+	mkdir -p .cache; \
+	printf '%s' "$$TF_VAR_billing_account" > .cache/gcp-billing-account; \
+	chmod 600 .cache/gcp-billing-account; \
 	printf 'enabling the four bootstrap APIs (no-op if already on)\n'; \
 	gcloud services enable cloudresourcemanager.googleapis.com serviceusage.googleapis.com \
 	  cloudbilling.googleapis.com billingbudgets.googleapis.com \
@@ -357,14 +365,18 @@ gcp-up: _no-stray-flags _gcp-preflight ## Build the zonal GKE cluster (REFUSES w
 # Here it is the difference between this target running and not running.
 	@set -eu; \
 	printf 'checking the guardrail before creating anything billable...\n'; \
-	if ! bash scripts/gcp-guardrails-verify.sh >/dev/null 2>&1; then \
-	  printf '\033[31mthe budget guardrail is missing, wrong, or unverifiable\033[0m\n\n'; \
+	set +e; bash scripts/gcp-guardrails-verify.sh | sed 's/^/  /'; gv=$${PIPESTATUS[0]}; set -e; \
+	if [ "$$gv" -eq 2 ]; then \
+	  printf '\n\033[31mthe guardrail could not be CHECKED - refusing anyway\033[0m\n\n'; \
+	  printf 'It may well be fine. "I could not look" is not "it is missing", and the output\n'; \
+	  printf 'above says which - but neither is a basis for creating something billable.\n'; \
+	  exit 1; \
+	elif [ "$$gv" -ne 0 ]; then \
+	  printf '\n\033[31mthe budget guardrail is missing or does not match cluster.json\033[0m\n\n'; \
 	  printf 'ADR-0003 Decision 3: the alarm exists BEFORE the first resource. Refusing to build\n'; \
-	  printf 'a cluster that nothing is watching. See what is wrong:\n'; \
-	  printf '  make gcp-guardrails-verify\n'; \
+	  printf 'a cluster that nothing is watching.\n  make gcp-guardrails\n'; \
 	  exit 1; \
 	fi; \
-	printf '  guardrail verified\n'; \
 	proj=$$(jq -r '.project_id' clusters/gcp/cluster.json); \
 	printf 'enabling compute and container (no-op if already on)\n'; \
 	gcloud services enable compute.googleapis.com container.googleapis.com \

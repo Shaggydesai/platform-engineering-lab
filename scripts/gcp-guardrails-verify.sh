@@ -30,8 +30,23 @@ bad()  { printf '    %s%s%s\n' "$c_err" "$*" "$c_off"; }
 die()  { printf '%s%s%s\n' "$c_err" "$*" "$c_off" >&2; exit 1; }
 
 command -v jq >/dev/null || die "jq not installed - run: make tools"
+# Env first, then the file `make gcp-guardrails` persists it to. Without the fallback this has
+# to be exported in every new shell, and the first thing that happened when it was not was a
+# false refusal from `make gcp-up`: the guardrail was present and correct, and the gate said
+# "missing, wrong, or unverifiable" because a variable was absent from a terminal.
+#
+# .cache is gitignored, which is the whole reason the value can live there (ADR-0019 Decision 5:
+# not a credential, but the one value identifying a payment instrument, and this repo is public).
+BILLING_FILE=.cache/gcp-billing-account
 B="${TF_VAR_billing_account:-}"
-[[ -n "$B" ]] || die "TF_VAR_billing_account is not set - see: make gcp-guardrails"
+[[ -n "$B" && -r "$BILLING_FILE" ]] || B="${B:-$(cat "$BILLING_FILE" 2>/dev/null || true)}"
+if [[ -z "$B" ]]; then
+  warn 'the billing account ID is not set, so the guardrail cannot be checked'
+  printf '  export TF_VAR_billing_account=<id>   # or: make gcp-guardrails, which remembers it\n'
+  # 2, not 1. "I could not look" is not "it is missing", and a caller gating on this needs to be
+  # able to tell them apart - `make gcp-up` could not, and refused on a guardrail that was fine.
+  exit 2
+fi
 
 want_amount=$(jq -r '.budget.amount_inr' "$CFG")
 want_currency=$(jq -r '.budget.currency' "$CFG")
