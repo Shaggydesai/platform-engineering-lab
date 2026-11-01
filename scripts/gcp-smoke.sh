@@ -29,11 +29,28 @@ c_step=$'\033[36m'; c_ok=$'\033[32m'; c_err=$'\033[31m'; c_warn=$'\033[33m'; c_d
 step() { printf '\n%s==> %s%s\n' "$c_step" "$*" "$c_off"; }
 ok()   { printf '    %s[ ok ]%s %s\n' "$c_ok" "$c_off" "$*"; }
 bad()  { printf '    %s[fail]%s %s\n' "$c_err" "$c_off" "$*"; fails=$((fails + 1)); }
-warn() { printf '    %s[warn]%s %s\n' "$c_warn" "$c_off" "$*"; }
+warn() { printf "    %s[warn]%s %s\n" "$c_warn" "$c_off" "$*"; unknowns=$((unknowns + 1)); }
 note() { printf '           %s%s%s\n' "$c_dim" "$*" "$c_off"; }
 die()  { printf '%s%s%s\n' "$c_err" "$*" "$c_off" >&2; exit 1; }
 
 fails=0
+
+# THREE OUTCOMES, NOT TWO, and the omission of this counter was a real bug rather than a
+# refinement. This script printed "every check passed" on a run where the tenant namespace did not
+# exist, because `warn` incremented nothing - so a warning was indistinguishable from a pass in
+# the one line a human actually reads.
+#
+# The lesson was already written down twice in this repository before this script was created:
+# `gcp-guardrails-verify.sh` exits 2 for "I could not look" and says at length why that is neither
+# a pass nor a failure, and the parking-lot entry for `make eso-check` records the same fix in the
+# same words - "three outcomes instead of two: yes, no, and NOT KNOWN". Then this was written with
+# two. Applying a lesson in the place it was learned and not in the next place is the shape to
+# watch for; it is the fourth time here.
+#
+#   fails     something is DEPLOYED AND WRONG        exit 1
+#   unknowns  something could not be ESTABLISHED     exit 2   (not a pass)
+#   neither                                          exit 0
+unknowns=0
 
 command -v jq >/dev/null || die "jq not installed - run: make tools"
 kubectl config get-contexts -o name | grep -qx "$CTX" \
@@ -313,8 +330,20 @@ else
       note 'If it persists:  make gcp-secrets-verify'
       ;;
     *)
-      warn 'no ClusterSecretStore/vault-backend yet'
-      note 'the Application may still be syncing - it renders in sync wave 1, after the CRDs'
+      # Same distinction as the tenant below: absent-because-not-deployed is a warning,
+      # absent-while-its-Application-reports-Synced is a failure. A Synced Application whose
+      # object is not in the cluster is the exact shape ADR-0016 named for the Ingress object.
+      eso_app=$($K -n argocd get application external-secrets \
+                -o jsonpath='{.status.sync.status}' 2>/dev/null || true)
+      if [[ "$eso_app" == "Synced" ]]; then
+        bad 'the external-secrets Application is Synced but there is no ClusterSecretStore'
+        note 'Synced means Argo CD believes the cluster matches Git. If the store is not here,'
+        note 'either secretStore.enabled is false in the overlay, or the chart rendered nothing'
+        note 'for it - check with:  make gitops-render CHART=external-secrets ENV=gcp'
+      else
+        warn "no ClusterSecretStore/vault-backend yet (Application: ${eso_app:-absent})"
+        note 'it renders in sync wave 1, after the CRDs, so give it a moment'
+      fi
       ;;
   esac
 fi
@@ -323,8 +352,36 @@ fi
 step "the tenant: did the credentials arrive, and did anything schedule?"
 TNS=shopverse-prod
 if ! $K get ns "$TNS" >/dev/null 2>&1; then
-  warn "no $TNS namespace - ShopVerse is not deployed on this cluster yet"
-  note 'it arrives via Argo CD from gitops/clusters/gcp/apps/shopverse.yaml'
+  # WHETHER A MISSING NAMESPACE IS A WARNING OR A FAILURE DEPENDS ON WHETHER ANYTHING IS TRYING
+  # TO CREATE IT, and the first version of this check did not ask.
+  #
+  # It said "ShopVerse is not deployed on this cluster yet" and warned. On 2026-11-01 that was
+  # printed on a cluster where the `shopverse` Application WAS deployed, was reporting
+  # OutOfSync/Missing, and had applied nothing - so the one explanatory sentence was false and
+  # the verdict read "every check passed".
+  #
+  # "Not deployed" and "deployed and not working" are different states with different causes and
+  # different next steps. Argo CD knows which one it is, so ask it.
+  app_state=$($K -n argocd get application shopverse \
+              -o jsonpath='{.status.sync.status}/{.status.health.status}' 2>/dev/null || true)
+  if [[ -z "$app_state" ]]; then
+    warn "no $TNS namespace and no shopverse Application - the tenant is not deployed here"
+    note 'it arrives via Argo CD from gitops/clusters/gcp/apps/shopverse.yaml, through the'
+    note 'tenants-gcp root Application. If that root is Synced and this is still absent, the'
+    note 'file is in Git but the root is not reading the directory it is in.'
+  else
+    bad "the shopverse Application exists ($app_state) but created no $TNS namespace"
+    note 'So it is deployed and NOT WORKING, which is a different problem from not deployed.'
+    note 'Argo CD rendered the chart - it has a revision - and applied nothing. Ask it why:'
+    note "  kubectl --context $CTX -n argocd get application shopverse -o json \\"
+    note "    | jq '{conditions: [.status.conditions[]?], phase: .status.operationState.phase,"
+    note "           message: .status.operationState.message}'"
+    note ''
+    note 'FIRST THING TO RULE OUT: a Namespace is a CLUSTER-SCOPED resource, and the `tenants`'
+    note 'AppProject blacklists every cluster-scoped kind by design. With CreateNamespace=true'
+    note 'and no namespace already present, the sync has to create one - and on-prem it never'
+    note 'had to, because Module 06 made that namespace by hand before Argo CD existed.'
+  fi
 else
   # THE SECRET ESO WROTE, which is the end of the whole chain this substrate was built for:
   # Workload Identity -> Secret Manager -> ExternalSecret -> Secret -> secretKeyRef -> pod.
@@ -380,8 +437,15 @@ else
     note 'it is also billed while it exists - make gcp-down takes it, make cost-check checks'
   elif [[ -n "$pvc_ph" ]]; then
     bad "MongoDB's volume is $pvc_ph, not Bound"
+  elif $K -n "$TNS" get statefulset shopverse-mongodb >/dev/null 2>&1; then
+    # The StatefulSet exists, so its volumeClaimTemplate should have produced a PVC. Absent here
+    # is a failure, not a "yet" - and the likeliest cause on this substrate is a StorageClass
+    # that does not exist, which leaves the PVC itself missing rather than Pending.
+    bad 'the MongoDB StatefulSet exists but there is no PVC'
+    note 'a volumeClaimTemplate that cannot be satisfied leaves the claim absent, not Pending.'
+    note "check the default StorageClass:  kubectl --context $CTX get storageclass"
   else
-    warn 'no PVC in the tenant namespace yet'
+    warn 'no PVC and no MongoDB StatefulSet - the tenant chart has not applied yet'
   fi
 
   printf '\n'
@@ -401,8 +465,25 @@ fi
 # ---------------------------------------------------------------- verdict
 printf '\n'
 if (( fails )); then
-  printf '%s%d check(s) failed%s\n' "$c_err" "$fails" "$c_off"
+  printf '%s%d check(s) failed%s' "$c_err" "$fails" "$c_off"
+  (( unknowns )) && printf '%s, and %d could not be established%s' "$c_warn" "$unknowns" "$c_off"
+  printf '\n'
   exit 1
+fi
+if (( unknowns )); then
+  # NOT A PASS, and the exit code says so. Nothing is known to be broken, and something could not
+  # be looked at - which on this substrate usually means a component has not been deployed yet.
+  # Saying "every check passed" here is what this script did on 2026-11-01 with the tenant
+  # namespace absent, and the two words a human reads were both wrong.
+  printf '%snothing failed, but %d thing(s) could not be established%s\n\n' \
+    "$c_warn" "$unknowns" "$c_off"
+  printf 'Read the [warn] lines above. The common case is a component that is not deployed yet,\n'
+  printf 'which is a different statement from "the platform is healthy" - and the difference is\n'
+  printf 'the whole reason this exits 2 rather than 0.\n\n'
+  printf 'And still, regardless (ADR-0003 Decision 5):\n'
+  printf '  make gcp-down\n'
+  printf '  make cost-check\n'
+  exit 2
 fi
 printf '%severy check passed%s\n\n' "$c_ok" "$c_off"
 printf 'And the thing to do next, which no check can do for you (ADR-0003 Decision 5):\n'
