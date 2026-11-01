@@ -337,6 +337,70 @@ gcp-guardrails-verify: ## Read the budget back from the API and check it MATCHES
 # account with two pre-existing ₹2500 budgets would have passed with ours missing entirely.
 	@bash scripts/gcp-guardrails-verify.sh
 
+GCP_TF := terraform/gcp
+
+.PHONY: _gcp-preflight
+_gcp-preflight:
+	@set -eu; \
+	proj=$$(jq -r '.project_id' clusters/gcp/cluster.json); \
+	if [ -z "$$proj" ] || [ "$$proj" = "null" ]; then \
+	  printf '\033[31mproject_id is empty in clusters/gcp/cluster.json\033[0m\n'; exit 1; fi; \
+	if ! gcloud auth application-default print-access-token >/dev/null 2>&1; then \
+	  printf '\033[31mno Application Default Credentials\033[0m\n'; \
+	  printf '  gcloud auth application-default login\n'; exit 1; fi
+
+.PHONY: gcp-up
+gcp-up: _no-stray-flags _gcp-preflight ## Build the zonal GKE cluster (REFUSES without the budget guardrail)
+# The guardrail check is a PREREQUISITE, not a reminder. ADR-0003 Decision 3 says the budget
+# alarm exists before the first cloud resource, and for six modules that has been a sentence in a
+# document which someone has to remember at the one moment they are keen to get on with it.
+# Here it is the difference between this target running and not running.
+	@set -eu; \
+	printf 'checking the guardrail before creating anything billable...\n'; \
+	if ! bash scripts/gcp-guardrails-verify.sh >/dev/null 2>&1; then \
+	  printf '\033[31mthe budget guardrail is missing, wrong, or unverifiable\033[0m\n\n'; \
+	  printf 'ADR-0003 Decision 3: the alarm exists BEFORE the first resource. Refusing to build\n'; \
+	  printf 'a cluster that nothing is watching. See what is wrong:\n'; \
+	  printf '  make gcp-guardrails-verify\n'; \
+	  exit 1; \
+	fi; \
+	printf '  guardrail verified\n'; \
+	proj=$$(jq -r '.project_id' clusters/gcp/cluster.json); \
+	printf 'enabling compute and container (no-op if already on)\n'; \
+	gcloud services enable compute.googleapis.com container.googleapis.com \
+	  --project="$$proj" --quiet; \
+	printf '\nzone      %s\n' "$$(jq -r '.zone' clusters/gcp/cluster.json)"; \
+	printf 'nodes     %s x %s, spot=%s\n\n' \
+	  "$$(jq -r '.nodes.count' clusters/gcp/cluster.json)" \
+	  "$$(jq -r '.nodes.machine_type' clusters/gcp/cluster.json)" \
+	  "$$(jq -r '.nodes.spot' clusters/gcp/cluster.json)"; \
+	cd $(GCP_TF) && terraform init -input=false && terraform apply
+
+.PHONY: gcp-down
+gcp-down: _no-stray-flags _gcp-preflight ## Destroy the GKE cluster, then prove nothing is left
+	@cd $(GCP_TF) && terraform destroy
+# cost-check runs REGARDLESS of what destroy reported, which is the point of having it.
+# `terraform destroy` succeeding means Terraform removed what it knew about - it says nothing
+# about a disk it never created, or a resource an earlier failed apply orphaned. ADR-0003
+# Decision 5: a session cannot end without this.
+	@printf '\n==> and now the question terraform cannot answer\n'
+	@$(MAKE) --no-print-directory cost-check
+
+.PHONY: gcp-kubeconfig
+gcp-kubeconfig: _gcp-preflight ## Point kubectl at the GKE cluster, under an unmistakable context name
+	@set -eu; \
+	proj=$$(jq -r '.project_id' clusters/gcp/cluster.json); \
+	zone=$$(jq -r '.zone' clusters/gcp/cluster.json); \
+	gcloud container clusters get-credentials platform --zone "$$zone" --project "$$proj"; \
+	auto="gke_$${proj}_$${zone}_platform"; \
+	kubectl config delete-context gcp-platform >/dev/null 2>&1 || true; \
+	kubectl config rename-context "$$auto" gcp-platform; \
+	printf '\ncontext renamed to \033[36mgcp-platform\033[0m\n'; \
+	printf 'The generated name (%s) is long enough that the\n' "$$auto"; \
+	printf 'prompt truncates it, and a truncated context name next to onprem-admin is how a\n'; \
+	printf 'command lands on the wrong cluster.\n\n'; \
+	kubectl config get-contexts
+
 .PHONY: etcd-encryption-check
 etcd-encryption-check: ## Read etcd directly: are Secrets ciphertext or plaintext?
 	@bash scripts/etcd-encryption-check.sh
