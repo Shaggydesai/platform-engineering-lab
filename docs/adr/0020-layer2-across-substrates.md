@@ -322,6 +322,26 @@ five diff shapes, including the two that matter: a file where one object is crea
 has drifted, and `rc=1` with no output at all. Both resolve to *difference*, so ambiguity records
 evidence rather than discarding it.
 
+### A third bug in the checking, found the same way
+
+**`make gcp-smoke` printed "every check passed" on a run where the tenant namespace did not
+exist.** Two faults, and the second is the one worth keeping.
+
+`warn` incremented nothing, so a warning was indistinguishable from a pass in the one line a human
+actually reads. **Three outcomes, not two** — and that lesson was already written down twice in
+this repository before this script existed: `gcp-guardrails-verify.sh` exits 2 for "I could not
+look" and explains at length why that is neither a pass nor a failure, and the parking-lot entry
+for `make eso-check` records the same fix in the same words. Then this was written with two.
+**Applying a lesson where it was learned and not in the next place is the shape to watch for**;
+this is the fourth instance here. There is now an `unknowns` counter and exit 2.
+
+The deeper fault was the model, which is why the *message* was false as well as the verdict. "No
+namespace" was reported as *"ShopVerse is not deployed on this cluster yet"* — on a cluster where
+it was deployed, had a revision, and had applied nothing. "Not deployed" and "deployed and not
+working" have different causes and different next steps, and Argo CD knows which it is, so the
+check now asks. The same correction was applied to the ClusterSecretStore and the MongoDB PVC:
+absent while its own Application reports Synced is a **failure**, not a wait.
+
 ### Everything the cluster could not show
 
 These were verified against stubbed `helm` and `kubectl`, which exercises the role's logic and
