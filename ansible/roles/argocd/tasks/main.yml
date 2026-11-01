@@ -202,6 +202,154 @@
          == (lookup('file', argocd_values_file) | from_yaml) }}
   run_once: true
 
+# ------------------------------------------------------------------- the chart, as a separate step
+#
+# FETCHING THE CHART IS NOT PART OF INSTALLING IT, and separating them is a fix rather than
+# tidiness. Written as one step - `helm upgrade --install argocd argo/argo-cd --version X` - helm
+# downloads the tarball from GitHub's release CDN and then talks to the cluster, inside a single
+# command whose failure says only "the command exited with a non-zero return code".
+#
+# On 2026-11-01 that step failed on GKE after two minutes with:
+#
+#   Error: Get "https://release-assets.githubusercontent.com/...argo-cd-10.11.0.tgz":
+#   context deadline exceeded (Client.Timeout exceeded while awaiting headers)
+#
+# A WSL2 network reaching GitHub's asset CDN slowly, presenting as a failed Argo CD install on a
+# brand-new cluster - with ten tasks of cluster-shaped output above it and `rc: 1` at the bottom.
+# The first thing anyone would suspect is the cluster, and the cluster was fine.
+#
+# Three things fall out of splitting it:
+#
+#   the network step can RETRY, and only the network step. Retrying the combined command would
+#   re-run a helm release install, which is idempotent but not free and not obviously safe to
+#   repeat while `--wait` may have already started creating objects.
+#
+#   the download happens ONCE per chart version per workstation. A second run, or the other
+#   substrate's run ten minutes later, uses the file on disk.
+#
+#   a human can put the file there. If that CDN is unreachable rather than slow, downloading the
+#   tarball by any other means into .cache/ makes this role work unchanged - which is an escape
+#   hatch the combined form did not have.
+#
+# .cache/ rather than /tmp, for the same reason the Gateway API bundle lives there (ADR-0012): a
+# WSL shutdown clears /tmp, and the run most likely to need this is the one right after a restart.
+- name: Where the pinned chart lives, and is it already there?
+  ansible.builtin.stat:
+    path: "{{ argocd_chart_tgz }}"
+  delegate_to: localhost
+  run_once: true
+  become: false
+  register: argocd_chart_file
+
+- name: Make sure .cache exists, for the chart and for the seam evidence later
+  # Nothing in Ansible creates a parent directory, and "it exists because another role made it"
+  # is a coincidence rather than a dependency - the fourth occurrence of that bug in this
+  # repository. It is created HERE, before the first thing that writes into it, rather than
+  # twice in one role: the seam-diff section further down used to create it again, which was
+  # harmless and also two places to keep right.
+  ansible.builtin.file:
+    path: "{{ repo_root }}/.cache"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+  run_once: true
+  become: false
+  changed_when: false
+
+- name: Fetch the Argo CD chart, retrying the network and nothing else
+  when: not argocd_chart_file.stat.exists
+  ansible.builtin.command:
+    argv:
+      - helm
+      - pull
+      - argo/argo-cd
+      - --version
+      - "{{ argocd_chart_version }}"
+      - --destination
+      - "{{ repo_root }}/.cache"
+  delegate_to: localhost
+  run_once: true
+  become: false
+  register: argocd_pull
+  # Four attempts over about 45 seconds. `retries: 4` means four ATTEMPTS, not one plus four -
+  # Ansible's retry log counts down "3 retries left" to "0 retries left" and stops, and the
+  # registered result reports `attempts: 4`. Checked by running it, after the comment here first
+  # said four and was then "corrected" to five on a reading of the log that was off by one.
+  #
+  # Which is why the message below prints `argocd_pull.attempts` instead of restating the number.
+  # A count written in prose beside a count in code is a second copy of a fact, and this one was
+  # wrong within a minute of being written.
+  #
+  # A CDN that is slow rather than down usually answers on a later try; one that is down fails
+  # every time and says so - a different message from "the install failed", which is the whole
+  # point of this block.
+  until: argocd_pull.rc == 0
+  retries: 4
+  delay: 15
+  changed_when: argocd_pull.rc == 0
+  # NOT a failure, so that the next task gets to explain it. A failed task ends the play, and
+  # the explanation - which is the only useful output here - would never print. `until` still
+  # drives the retries: failed_when only decides how the FINAL result is reported.
+  failed_when: false
+
+- name: If that CDN could not be reached, say so as a network problem
+  when: not argocd_chart_file.stat.exists
+  ansible.builtin.assert:
+    that: argocd_pull.rc == 0
+    fail_msg: |-
+      helm could not download argo-cd-{{ argocd_chart_version }}.tgz after
+      {{ argocd_pull.attempts | default('several') }} attempts.
+
+      THIS IS THE WORKSTATION'S NETWORK, NOT THE CLUSTER. Nothing has been installed, and
+      there is nothing wrong with {{ argocd_kube_context }} - the ten tasks above all passed
+      against it. helm said:
+
+        {{ (argocd_pull.stderr | default('') | trim) | truncate(300) }}
+
+      Get the file to this path by any means and re-run; this role will find it and skip the
+      download entirely:
+
+        {{ argocd_chart_tgz }}
+
+      From anywhere with working access to GitHub release assets:
+        helm pull argo/argo-cd --version {{ argocd_chart_version }} --destination {{ repo_root }}/.cache
+    success_msg: "fetched argo-cd-{{ argocd_chart_version }}.tgz"
+  run_once: true
+
+- name: The tarball on disk must be the version that was asked for
+  # A download that times out part-way leaves a FILE. The stat above would then find it, every
+  # later run would skip the fetch, and helm would fail to install a truncated archive - a
+  # permanent failure caused by a transient one, which is the worst kind to inherit.
+  #
+  # `helm show chart` parses the archive, so this catches both a corrupt file and the case where
+  # the pin moved while a tarball from the previous pin was still cached.
+  ansible.builtin.command:
+    argv:
+      - helm
+      - show
+      - chart
+      - "{{ argocd_chart_tgz }}"
+  delegate_to: localhost
+  run_once: true
+  become: false
+  register: argocd_chart_meta
+  changed_when: false
+  failed_when: false
+
+- name: And if it is not, say which rather than letting helm fail on it
+  vars:
+    on_disk: >-
+      {{ (argocd_chart_meta.stdout | from_yaml).version | default('unreadable')
+         if argocd_chart_meta.rc == 0 else 'unreadable' }}
+  ansible.builtin.assert:
+    that: on_disk == argocd_chart_version
+    fail_msg: >-
+      {{ argocd_chart_tgz }} is {{ on_disk }}, not {{ argocd_chart_version }}.
+      A download interrupted part-way leaves a file that every later run then trusts, so delete
+      it and re-run:  rm {{ argocd_chart_tgz }}
+    success_msg: "chart {{ on_disk }} on disk at {{ argocd_chart_tgz }}"
+  run_once: true
+
 - name: Install or upgrade Argo CD
   when: >-
     not argocd_installed
@@ -213,14 +361,19 @@
       - upgrade
       - --install
       - argocd
-      - argo/argo-cd
+      # THE LOCAL TARBALL, not argo/argo-cd. By the time this runs the chart is on disk and
+      # verified, so this command touches the network only to reach the cluster - which means a
+      # failure here is about the cluster, and can be read that way.
+      #
+      # NOTE THE MISSING --version. helm rejects it against a local chart path, and the pin is
+      # not lost: it selected the file (which the task above re-read out of the archive), and the
+      # app-version assertion below reads back what actually landed in the cluster.
+      - "{{ argocd_chart_tgz }}"
       # helm's flag is --kube-context, not --context. Spelled the kubectl way it is rejected as
       # an unknown flag, which is at least loud; the dangerous version is leaving it off, because
       # helm then silently uses the kubeconfig's current-context.
       - --kube-context
       - "{{ argocd_kube_context }}"
-      - --version
-      - "{{ argocd_chart_version }}"
       - --namespace
       - argocd
       - --create-namespace
@@ -320,29 +473,17 @@
   # kubeconfig would read as "no differences" and the apply would be skipped silently.
   failed_when: argocd_seam_diff.rc not in [0, 1]
 
-- name: A timestamp, and somewhere to put the evidence
+- name: A timestamp for the evidence file
   # Not the gathered-facts date, and not for style: that fact only exists if facts were
   # gathered, and `make onprem-argocd` runs --tags argocd, which skips the preflight play that
   # gathers them. The task would work on a full run and fail on exactly the run someone reaches
   # for when Argo CD is the broken thing - the one job this role exists to do.
   #
-  # The directory is created here as well as in the gateway_api role, because that role is
-  # skipped by the same tag. Fourth time for this class of bug: nothing in Ansible creates a
-  # parent directory, and "it exists because another role made it" is a coincidence, not a
-  # dependency.
+  # The .cache directory this writes into is created near the top of this role, not by the
+  # gateway_api role, which is skipped by the same tag.
   ansible.builtin.set_fact:
     seam_stamp: "{{ lookup('pipe', 'date -u +%Y%m%dT%H%M%SZ') }}"
   run_once: true
-
-- name: Make sure there is somewhere to write the evidence
-  ansible.builtin.file:
-    path: "{{ repo_root }}/.cache"
-    state: directory
-    mode: "0755"
-  delegate_to: localhost
-  run_once: true
-  become: false
-  changed_when: false
 
 - name: Record WHAT differs, whenever something does
   # Added after the second unexplained occurrence, both times on the first run after the cluster

@@ -1,0 +1,17 @@
+---
+# Values DERIVED from what the inventory supplies. Nothing substrate-specific belongs here -
+# that lives in ansible/inventory/{nodes,gcp}.py, and ADR-0020 says why.
+#
+# vars/ rather than defaults/ deliberately. A default is a value a caller may reasonably
+# override; this is an arithmetic consequence of argocd_chart_version and repo_root, and an
+# inventory that overrode it would point the install at a file the fetch step did not create.
+
+# Where `helm pull` puts the chart and where `helm upgrade` reads it from. The filename is helm's
+# own convention (<name>-<version>.tgz) and is not ours to choose, which is the useful part: a
+# tarball downloaded by hand, or by a colleague, or by the other substrate's run ten minutes ago,
+# lands at exactly this path and is picked up with no configuration.
+#
+# The version is IN the filename, so moving the pin in clusters/platform.json does not silently
+# reuse the old chart - the stat misses, the fetch runs, and the old file stays behind harmlessly
+# in a gitignored directory.
+argocd_chart_tgz: "{{ repo_root }}/.cache/argo-cd-{{ argocd_chart_version }}.tgz"

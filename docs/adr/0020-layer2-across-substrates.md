@@ -225,9 +225,75 @@ generator, and it is the right *end state* rather than the right next step: a mi
 generator is a mistake on every cluster at once. Worth making deliberately with three clusters to
 justify it, not with two. `argocd-values.yaml` already carries the note.
 
+## Amendment, 2026-11-01: fetching the chart is not part of installing it
+
+The first real run of `make gcp-argocd` against a live GKE cluster got through all five guards
+above and then failed here:
+
+```
+TASK [argocd : Install or upgrade Argo CD]
+  Error: Get "https://release-assets.githubusercontent.com/...argo-cd-10.11.0.tgz":
+  context deadline exceeded (Client.Timeout exceeded while awaiting headers)
+  rc: 1    delta: 0:02:01
+```
+
+A slow network between WSL2 and GitHub's release CDN, presenting as a failed Argo CD install on a
+brand-new cluster — ten tasks of cluster-shaped output above it and `rc: 1` at the bottom. The
+first thing anyone would suspect is the cluster, and the cluster was fine.
+
+**The cause is that one command did two unrelated things.** `helm upgrade --install argocd
+argo/argo-cd --version X` downloads a tarball from the internet *and* talks to the cluster, inside
+a single `command` task whose failure message is "the command exited with a non-zero return code".
+There is no way to retry the half that is worth retrying, and no way to tell the two halves apart
+in the output.
+
+So the fetch is now its own step: `helm pull` into `.cache/`, four attempts, then install from the
+local path. Three things follow, and the third was not the motivation but is the most useful:
+
+1. **Only the network retries.** Retrying the combined command would re-run a release install
+   that may already have started creating objects under `--wait`.
+2. **The download happens once** per chart version per workstation — so the other substrate's run
+   ten minutes later, and every re-run, use the file on disk.
+3. **A human can put the file there.** If that CDN is unreachable rather than slow, getting
+   `argo-cd-<version>.tgz` into `.cache/` by any means makes this role work unchanged. Verified
+   by running it with the download deliberately broken and the file pre-placed: it succeeds.
+
+`--version` is dropped from the install, because helm rejects it against a local chart path. The
+pin is not lost — it selects the filename, and a new task re-reads the version *out of the
+archive* with `helm show chart` before installing. That task exists for a specific failure: **a
+download that times out part-way leaves a file.** Without the check, the `stat` would find it,
+every later run would skip the fetch, and helm would fail on a truncated archive forever — a
+permanent failure inherited from a transient one.
+
+This is the same shape as the `.cache` handling the Gateway API bundle already had (ADR-0012), and
+it should have been the pattern from the start: **anything fetched over the network is a separate,
+retryable, cacheable step from anything done with it.**
+
+A smaller note, recorded because it happened twice in one minute. The comment beside `retries: 4`
+first said "four attempts", was then "corrected" to five on a misreading of Ansible's countdown
+log, and is four: Ansible counts down `3 retries left` → `0 retries left` and stops, and the
+registered result reports `attempts: 4`. The message now prints `argocd_pull.attempts` instead of
+restating the number. **A count written in prose beside the same count in code is a second copy of
+a fact**, and this copy was wrong within a minute of being written.
+
 ## Verified
 
-Without a cluster, which bounds what this section can claim:
+The role has now been **run end to end against a live GKE cluster through the install task**, and
+all of Decisions 2–4 held on the first attempt: the guards passed, the context was found, helm
+reached the cluster, and the only failure was the network one amended above.
+
+The rest was verified against stubbed `helm` and `kubectl`, which exercises the role's logic and
+nothing about Kubernetes:
+
+- the full happy path, 24 tasks, `failed=0`, installing from the local tarball with
+  `--kube-context` and no `--version`;
+- the CDN unreachable: four attempts, then a message that says the workstation's network is at
+  fault and names the path to drop a file into;
+- the download truncated: the version read out of the archive catches it and says which file to
+  delete, instead of helm failing on it on every future run;
+- the chart already on disk *with the download deliberately broken*: succeeds, fetch skipped.
+
+The remaining items were verified without a cluster at all, which bounds what they claim:
 
 - `clusters/platform.json` parses; both inventories render and emit the same `argocd_*` key set
   with substrate-correct values — `kubernetes-admin@onprem` vs `gcp-platform`, three seam files vs
@@ -241,8 +307,8 @@ Without a cluster, which bounds what this section can claim:
 - `make lint` clean, including the new render matrix — which resolves to exactly the previous
   seven `onprem` pairs plus `cert-manager (gcp)`.
 
-**Not verified, and these are the claims a cluster has to settle:** that the role installs Argo CD
-on GKE; that the seam applies; that `platform-gcp` reaches `Synced/Healthy`; that the canary
+**Still not verified, and these are the claims a cluster has to settle:** that Argo CD comes up on
+GKE; that the seam applies; that `platform-gcp` reaches `Synced/Healthy`; that the canary
 ConfigMap appears; that cert-manager's CRDs apply with `ServerSideApply` on this datapath; and
 that GKE's own metrics-server serves `kubectl top` without us installing one. `make gcp-smoke`
 asserts every one of those, including the negative — that no `metrics-server` Application exists
