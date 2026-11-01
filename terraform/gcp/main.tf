@@ -74,6 +74,28 @@ resource "google_container_cluster" "platform" {
   remove_default_node_pool = true
   initial_node_count       = 1
 
+  # GKE DATAPLANE V2, and this is not a performance choice - it is what makes NetworkPolicy
+  # actually enforced.
+  #
+  # The first cluster was built without it, and its own destroy plan said so:
+  #
+  #     network_policy { enabled = false, provider = "PROVIDER_UNSPECIFIED" }
+  #     addons_config { network_policy_config { disabled = true } }
+  #
+  # A GKE cluster with neither Dataplane V2 nor the legacy Calico addon ACCEPTS NetworkPolicy
+  # objects and ignores them. ADR-0017's tenant policies would have been created, reported
+  # healthy, and enforced nothing - the same failure shape ADR-0016 named for the Ingress object
+  # that this cluster would have accepted and never served. `make netpol-check` would have
+  # caught it, because probe 2 expects a denied connection; nothing else would.
+  #
+  # Dataplane V2 is GKE's managed Cilium, which is a pleasing symmetry rather than a coincidence:
+  # the on-prem substrate runs Cilium directly (ADR-0007), so both enforce the same plain
+  # networking.k8s.io policy with the same engine, one managed and one not.
+  #
+  # IT CANNOT BE CHANGED AFTER CREATION. Setting it on an existing cluster forces replacement,
+  # which is why it is going in now, between a destroy and the next create, rather than later.
+  datapath_provider = "ADVANCED_DATAPATH"
+
   networking_mode = "VPC_NATIVE"
   ip_allocation_policy {
     cluster_secondary_range_name  = "pods"
