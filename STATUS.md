@@ -4,8 +4,8 @@
 > before you close the laptop. It takes thirty seconds and it is the reason this project will
 > not stall like the last one.
 
-**Last updated:** 2026-10-31
-**Current module:** 08 — not started. Modules 06 and 07 are closed.
+**Last updated:** 2026-11-01
+**Current module:** 08 — GCP. Guardrail and cluster done; the platform is not on it yet.
 **Overall progress:** Modules 00–07 complete — 8 / 13
 
 ---
@@ -24,9 +24,12 @@
 | **Ingress failover** | **measured: ~15s** on a hard node power-off, bounded by the L2 lease duration (ADR-0013) |
 | **Storage** | **working** — local-path-provisioner v0.0.37, default class `platform-local` (ADR-0015). Node-local: a dead node takes its data with it |
 | **Certificates expire** | **2027-10-22** — `sudo kubeadm certs renew all` before then, or nothing works |
-| **GCP cluster** | not built. Guardrail IS applied: ₹400 budget `ad4e1d32`, thresholds 50/90/100%, verified against the API by `make gcp-guardrails-verify` |
-| **GCP account** | project `shopverse-lab`, billing `01662D-…-2D203C` linked. **Free trial: ₹28,257 of ₹28,797 left, ends 2027-01-02** (63 days as of 31 Oct). Console shows an unactioned **"administrator must verify this account"** banner |
-| **GCP spend so far** | ₹591 this month, fully covered — so something HAS run. Two pre-existing ₹2500 budgets exist that nothing in this repo manages, one named "(terraform)". Run `make cost-check` before building |
+| **GCP cluster** | **built** — zonal `platform` in asia-south1-a, 2× e2-medium **spot**, external IPs, Workload Identity. `make gcp-up` / `make gcp-down` / `make gcp-kubeconfig` (context `gcp-platform`). **Nothing is installed on it yet** |
+| **GCP costs while up** | **~₹3/hour** — 2 spot nodes, 2 external IPv4, 64 GB pd-standard. ~₹70 if left overnight. `make gcp-down` ends it; `make cost-check` proves it |
+| **Kubernetes versions DIFFER** | on-prem **v1.34.12**, GKE **v1.36.4**. Two minors. Measured, not chosen — see ADR-0019's verified section. First concrete entry for Module 09's "six differences" |
+| **GCP guardrail** | ₹400 budget `ad4e1d32`, thresholds 50/90/100%, verified against the API. **`make gcp-up` refuses to run without it** |
+| **GCP account** | project `platform-eng-lab-261031`, billing `01662D-…-2D203C` linked. **Free trial: ₹28,257 of ₹28,797 left, ends 2027-01-02.** After that date the same mistake bills a card. Console still shows an unactioned **"administrator must verify this account"** banner |
+| **GCP leftovers** | **cleaned 2026-11-01.** The old `shopverse-lab` project is deleted, taking its tfstate bucket, Vault bucket and KMS keyring with it; the two stray ₹2500 budgets are gone. `make cost-check` clean |
 | **AWS cluster** | not built |
 | **Argo CD** | **running** — chart 10.11.0 / Argo CD v3.5.5, root app Synced, self-heal verified |
 | **Platform components** | metrics-server 3.14.0, cert-manager v1.21.3 + internal PKI — both Synced/Healthy |

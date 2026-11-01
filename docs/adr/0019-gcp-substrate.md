@@ -202,3 +202,49 @@ follow-up so it is a remembered step rather than a hoped-for one.
 - Nothing in this ADR is verified. No GCP resource exists at the time of writing, `terraform init`
   has never run in this directory, and at least one section above will turn out to be wrong — the
   external-IP cost estimate and the free-tier management-fee assumption being the two most likely.
+
+
+---
+
+## Verified, 2026-11-01 — the cluster exists, and one claim above was wrong
+
+```
+google_compute_network.vpc          15s
+google_compute_subnetwork.nodes     42s
+google_container_cluster.platform   7m24s
+google_container_node_pool.spot     1m24s
+
+gke-platform-platform-spot-f96b9da4-3wj9   Ready   v1.36.4-gke.2046003
+gke-platform-platform-spot-f96b9da4-w3q8   Ready   v1.36.4-gke.2046003
+```
+
+Four resources, nine minutes, zonal, spot, `deletion_protection = false` confirmed in the plan
+rather than assumed. The guardrail gate refused once first — correctly in mechanism and wrongly
+in substance, on a shell with no billing account exported — which is recorded in its own commit.
+
+### The release-channel reasoning was right and did not achieve its goal
+
+Decision 2 says REGULAR was chosen over RAPID because "the on-prem cluster is pinned to one
+Kubernetes version and a channel that moves weekly would make *the same platform on three
+substrates* quietly false."
+
+**It is quietly false anyway.** On-prem is `v1.34.12`, pinned by the Packer image and asserted by
+Ansible's preflight. GKE REGULAR gave `v1.36.4-gke.2046003` — two minor versions ahead. Choosing
+a slower channel controls the *rate* of drift and does nothing about the *starting point*, which
+is the thing that mattered here. I reasoned about the derivative and not the value.
+
+Not corrected by pinning `min_master_version`, deliberately: GKE auto-upgrades within a channel,
+so a pin would hold for weeks and then not, which is worse than a known gap. The gap is recorded
+instead, and it is now the first concrete entry in the list Module 09's "done when" asks for —
+six real differences between the substrates. This is one, it was measured rather than predicted,
+and it will shape what the GCP overlays have to do.
+
+**What the gap is likely to cost**, in rough order of when it will be felt:
+
+- **The ingress mechanism does not transfer at all**, and that is the larger finding. On-prem
+  serves Gateway API through Cilium with LB-IPAM and L2 announcements over ARP (ADR-0013). GKE
+  has its own Gateway controller and a real cloud load balancer. The `platform-ingress` overlay
+  for GCP is not a few values — it is a different implementation of the same contract, which is
+  exactly what ADR-0001 predicted and the first place it gets tested.
+- Two minors of API deprecations between the substrates, which the Helm charts may or may not
+  notice. `make gitops-render` against the gcp overlay is the cheap way to find out.

@@ -411,6 +411,13 @@ gcp-kubeconfig: _gcp-preflight ## Point kubectl at the GKE cluster, under an unm
 	printf 'The generated name (%s) is long enough that the\n' "$$auto"; \
 	printf 'prompt truncates it, and a truncated context name next to onprem-admin is how a\n'; \
 	printf 'command lands on the wrong cluster.\n\n'; \
+	stale=$$(kubectl config get-contexts -o name | grep '^gke_' | grep -v "_$${proj}_" || true); \
+	if [ -n "$$stale" ]; then \
+	  printf '\033[33mcontexts pointing at a GKE cluster that is not this one:\033[0m\n'; \
+	  printf '%s\n' "$$stale" | sed 's/^/    /'; \
+	  printf '  A context for a DELETED cluster still appears here and still looks selectable.\n'; \
+	  printf '  Remove each with:  kubectl config delete-context NAME\n\n'; \
+	fi; \
 	kubectl config get-contexts
 
 .PHONY: etcd-encryption-check
