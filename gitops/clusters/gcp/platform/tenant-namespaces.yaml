@@ -1,0 +1,74 @@
+# The namespaces the platform grants to tenants. A PLATFORM component, not a tenant one.
+#
+# This Application exists because a tenant may not create its own namespace: a Namespace is
+# cluster-scoped and the `tenants` AppProject blacklists every cluster-scoped kind by design.
+# gitops/manifests/tenant-namespaces/shopverse-prod.yaml carries the full account, including why
+# this only ever failed on GKE.
+#
+# It is in the `platform` project, which does permit cluster-scoped resources - and that is the
+# boundary working rather than being worked around: creating a namespace is a platform act, so it
+# is done by a platform-owned Application, from a directory the tenant cannot write to.
+#
+# WAVE -20, ahead of everything. cert-manager is -10 on-prem and was chosen to "leave room for
+# something that must precede even cert-manager" - this is that something. The ordering is
+# genuinely load-bearing here in a way most waves in this repository are not: a namespace that
+# does not exist makes every object destined for it unappliable.
+#
+# It does NOT order the tenant, and cannot: Argo CD waves order objects within one Application's
+# sync, not across Applications, and the tenant is reached through a different root (ADR-0009).
+# If the tenant syncs first it fails on a missing namespace and retries - limit 10, backing off to
+# 5m - which is loud, correct, and eventually consistent.
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: tenant-namespaces
+  namespace: argocd
+  # NO FINALIZER, and this is the most important line in the file.
+  #
+  # Every other child Application here carries resources-finalizer.argocd.argoproj.io, so that
+  # deleting it removes what it created. That is right for a chart and catastrophic for this:
+  # deleting a Namespace deletes EVERYTHING INSIDE IT, so a mistyped `kubectl delete app
+  # tenant-namespaces` would destroy the running tenant, its database and its PersistentVolume.
+  #
+  # Without the finalizer, deleting this Application orphans the namespace - it keeps running, and
+  # re-applying this file re-adopts it. Recovery stays the cheap path (ADR-0002).
+  annotations:
+    argocd.argoproj.io/sync-wave: "-20"
+spec:
+  project: platform
+
+  source:
+    repoURL: https://github.com/Shaggydesai/platform-engineering-lab.git
+    targetRevision: main
+    path: gitops/manifests/tenant-namespaces
+
+  destination:
+    server: https://kubernetes.default.svc
+    # Irrelevant for a cluster-scoped object and required by the schema. The Namespace's own
+    # metadata.name decides what is created; this is where Argo CD would put anything in the
+    # directory that is namespaced, and nothing in it is.
+    namespace: argocd
+
+  syncPolicy:
+    automated:
+      # PRUNE OFF, deliberately, and it is the one place in this repository where automated
+      # pruning is wrong.
+      #
+      # Everywhere else prune: true is what makes Git the description of the cluster - delete the
+      # file, the resource goes. Here, deleting shopverse-prod.yaml from that directory would
+      # delete the NAMESPACE and every object in it, including MongoDB's PersistentVolumeClaim and
+      # therefore its Persistent Disk. A one-line change in Git would be unrecoverable data loss.
+      #
+      # The cost is honest and small: removing a tenant means deleting the namespace by hand, once,
+      # on purpose. That is the correct amount of friction for the operation.
+      prune: false
+      # selfHeal stays on. If someone strips the labels off the namespace, they come back - which
+      # matters because ADR-0017's network policies select on them.
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

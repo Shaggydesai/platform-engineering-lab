@@ -1,0 +1,45 @@
+# The tenant's namespace, granted by the platform.
+#
+# SHARED BY EVERY SUBSTRATE, like gitops/manifests/gitops-canary - one file, rendered by each
+# cluster's platform root Application. A namespace name is not a substrate difference.
+#
+# WHY THIS FILE EXISTS AT ALL, which is the whole content of ADR-0016's 2026-11-01 correction.
+#
+# The tenant Application used to carry `CreateNamespace=true`, and on GKE that failed:
+#
+#     one or more synchronization tasks are not valid:
+#     resource :Namespace is not permitted in project tenants
+#
+# A Namespace is CLUSTER-SCOPED, and the `tenants` AppProject blacklists every cluster-scoped kind
+# by design - a tenant that can create cluster-scoped objects is not a tenant. So the project was
+# working exactly as intended and the Application was asking for something it should never have
+# been able to do.
+#
+# IT HAD NEVER FAILED ON-PREM, and that is the interesting part rather than a footnote. There,
+# `shopverse-prod` was created by hand in Module 06 - `make shopverse-secret` applied a Secret
+# into it before Argo CD existed - so `CreateNamespace=true` was a no-op for five modules and the
+# restriction never bit. GKE removed that manual step, which is precisely what the GCP secret
+# backend was for, and the latent bug surfaced on the first sync.
+#
+# A manual step was masking a design error. Removing the manual step is what found it, and the
+# on-prem cluster was ALSO wrong the whole time in a way nobody could see: it had a namespace that
+# was not in Git and not managed by Argo CD, which is a quiet violation of ADR-0002 Rule 3
+# ("nothing in Layer 3 is ever installed by hand"). A namespace is invisible once it exists.
+#
+# THE FIX IS NOT "ALLOW NAMESPACE IN THE TENANTS PROJECT". It is the same principle ADR-0016
+# already applies to hostnames: the tenant cannot give itself a name on the Gateway, because the
+# Gateway is platform-owned and a name on it is something the platform GRANTS. A namespace is the
+# same kind of thing, and more so - it is the boundary every other tenant restriction is written
+# against. The `tenants` project is unchanged.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: shopverse-prod
+  labels:
+    # kubernetes.io/metadata.name is set automatically by the API server and is what
+    # namespaceSelector in a NetworkPolicy should match on (ADR-0017). These are for humans and
+    # for anything that wants to find tenant namespaces without knowing their names.
+    app.kubernetes.io/part-of: platform
+    platform.local/tenant: shopverse
+    platform.local/environment: prod

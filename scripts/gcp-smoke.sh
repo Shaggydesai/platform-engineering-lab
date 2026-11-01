@@ -377,12 +377,53 @@ if ! $K get ns "$TNS" >/dev/null 2>&1; then
     note "    | jq '{conditions: [.status.conditions[]?], phase: .status.operationState.phase,"
     note "           message: .status.operationState.message}'"
     note ''
-    note 'FIRST THING TO RULE OUT: a Namespace is a CLUSTER-SCOPED resource, and the `tenants`'
-    note 'AppProject blacklists every cluster-scoped kind by design. With CreateNamespace=true'
-    note 'and no namespace already present, the sync has to create one - and on-prem it never'
-    note 'had to, because Module 06 made that namespace by hand before Argo CD existed.'
+    note 'FIRST THING TO RULE OUT, now that the namespace is platform-granted: whether the'
+    note 'platform actually granted it. The tenant Application no longer carries'
+    note 'CreateNamespace=true, so it depends on tenant-namespaces (sync wave -20) having run:'
+    note "  kubectl --context $CTX -n argocd get application tenant-namespaces"
+    note ''
+    note 'Those are separate root Applications, so no wave orders one against the other - the'
+    note 'tenant failing on a missing namespace and retrying is the expected shape, not a bug.'
+    note 'If tenant-namespaces is itself failing, the message says so and this is a consequence.'
+    note ''
+    note 'THE ORIGINAL CAUSE, for the record: this Application used to ask for'
+    note 'CreateNamespace=true, and a Namespace is cluster-scoped, which the `tenants` AppProject'
+    note 'blacklists by design. It had never failed on-prem only because Module 06 created that'
+    note 'namespace by hand before Argo CD needed it (ADR-0016, 2026-11-01).'
   fi
 else
+  # IS THE NAMESPACE ARGO CD'S, OR DID SOMEBODY MAKE IT BY HAND?
+  #
+  # A namespace existing is not the same as a namespace being managed, and this is the check that
+  # would have caught the on-prem hole five modules earlier. There, `shopverse-prod` was created
+  # by `make shopverse-secret` in Module 06 and was never in Git - invisible, because a namespace
+  # looks identical whoever made it.
+  #
+  # Argo CD records ownership in an ANNOTATION rather than a label on this platform, deliberately:
+  # argocd-values.yaml sets application.resourceTrackingMethod to annotation because the older
+  # label-based default truncates at Kubernetes' 63-character limit and can make two resources
+  # look like they belong to the same Application (ADR-0009 Decision 4).
+  owner=$($K get ns "$TNS" \
+          -o jsonpath='{.metadata.annotations.argocd\.argoproj\.io/tracking-id}' 2>/dev/null || true)
+  case "$owner" in
+    tenant-namespaces:*)
+      ok "the namespace is managed by Argo CD ($owner)"
+      note 'granted by the platform, not created by the tenant - which is the fix for the sync'
+      note 'failure this Application hit on its first run (ADR-0016, 2026-11-01)'
+      ;;
+    '')
+      bad "$TNS exists but carries no Argo CD tracking annotation - nothing in Git owns it"
+      note 'a namespace that exists and is unmanaged is the exact hole this check was added for:'
+      note 'ADR-0002 Rule 3 says nothing in Layer 3 is installed by hand, and a namespace is'
+      note 'invisible once it exists, so the violation went unnoticed on-prem for five modules.'
+      note 'Expected owner: the tenant-namespaces Application.'
+      ;;
+    *)
+      warn "the namespace is tracked by $owner, not tenant-namespaces"
+      note 'not wrong in itself, but something other than the platform grant owns it now'
+      ;;
+  esac
+
   # THE SECRET ESO WROTE, which is the end of the whole chain this substrate was built for:
   # Workload Identity -> Secret Manager -> ExternalSecret -> Secret -> secretKeyRef -> pod.
   # Six keys present means every link held.

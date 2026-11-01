@@ -264,7 +264,7 @@ clearest thing this substrate buys that the laptop cannot have at any price. It 
 `gitops/environments/gcp/local-path.yaml` deploys nothing — the component whose entire job is
 dynamic provisioning has no counterpart where the provider ships one.
 
-### What did not need touching, which is the quiet result
+### What did not need touching — and the one thing that did
 
 The `tenants` AppProject travelled unedited. Its destinations name `shopverse-*` and
 `https://kubernetes.default.svc` — the address a cluster uses for *itself* — so cluster-scoped
@@ -292,3 +292,82 @@ decision, not separate from it.
 Dataplane V2's agent, and then eight tenant pods. The arithmetic says it fits. An estimate is not
 a measurement, and `Pending` is what a wrong one looks like — which is also what a missing Secret
 looks like, hence the ordering above.
+
+## Correction, 2026-11-01 — a tenant may not create its own namespace
+
+The amendment above said the `tenants` AppProject travelled unedited and left it there. It did
+travel unedited — and on the tenant's first sync on GKE it did its job:
+
+```
+one or more synchronization tasks are not valid:
+resource :Namespace is not permitted in project tenants
+```
+
+The Application carried `CreateNamespace=true`. **A Namespace is cluster-scoped, and the `tenants`
+project blacklists every cluster-scoped kind by design** — a tenant that can create cluster-scoped
+objects is not a tenant. So the project was working exactly as written, and the Application had
+been asking for a permission a tenant should never have.
+
+### It had never failed on-prem, and that is the finding
+
+`shopverse-prod` already existed there. `make shopverse-secret` created it in Module 06 by
+applying a Secret into it, before Argo CD ever needed the namespace — so `CreateNamespace=true`
+was a no-op for five modules and the restriction never had anything to reject.
+
+**A manual step was masking a design error, and removing the manual step is what found it.** The
+manual step was itself the thing the GCP secret backend replaced: on GKE the credentials come from
+Secret Manager through Workload Identity, so nothing touches the cluster by hand, so nothing
+created the namespace first.
+
+It also means the on-prem cluster was wrong the whole time in a way nobody could see: **it has a
+namespace that is not in Git and not managed by Argo CD** — a quiet violation of ADR-0002 Rule 3
+("nothing in Layer 3 is ever installed by hand"). A namespace is invisible once it exists. There
+is no symptom to notice.
+
+### The fix is not "allow Namespace in the tenants project"
+
+That would have made the error go away and the design worse. The correct answer is the one this
+ADR already applies to hostnames: *the tenant cannot give itself a name on the Gateway, because
+the Gateway is platform-owned and a name on it is something the platform grants.* **A namespace is
+the same kind of thing, and more so — it is the boundary every other tenant restriction is written
+against.**
+
+So the namespace is a platform-owned manifest:
+
+- `gitops/manifests/tenant-namespaces/shopverse-prod.yaml` — shared by every substrate, like the
+  canary. A namespace name is not a substrate difference.
+- `gitops/clusters/<substrate>/platform/tenant-namespaces.yaml` — an Application in the
+  **`platform`** project, which does permit cluster-scoped resources. Sync wave **-20**, ahead of
+  cert-manager's -10, which was chosen to "leave room for something that must precede even
+  cert-manager". This is that something.
+- `CreateNamespace=true` removed from **both** tenant Applications. The on-prem one had been
+  asking for a permission it should not have since Module 06; it simply never needed it.
+
+**On-prem, the first sync is an adoption rather than a creation.** The Application reports
+OutOfSync, adds the labels, and goes Synced; nothing inside the namespace is touched, because
+applying a Namespace changes metadata and nothing else. After that, Git describes it.
+
+### Two deliberate exceptions, both the opposite of the repository's defaults
+
+**No finalizer**, where every other child Application has one. Deleting a Namespace deletes
+*everything inside it*, so `resources-finalizer.argocd.argoproj.io` here would turn a mistyped
+`kubectl delete app tenant-namespaces` into the loss of the tenant, its database and its volume.
+Without it, deleting the Application orphans the namespace and re-applying the file re-adopts it —
+recovery stays the cheap path (ADR-0002).
+
+**`prune: false`**, where everything else in this repository prunes. Pruning is what makes Git the
+description of the cluster: delete the file, the resource goes. Here, deleting
+`shopverse-prod.yaml` would delete the namespace and every object in it, including MongoDB's PVC
+and therefore its Persistent Disk — **a one-line change in Git as unrecoverable data loss.**
+Removing a tenant means deleting the namespace by hand, once, on purpose. That is the correct
+amount of friction for that operation.
+
+### And a check, because the hole was invisible rather than hard
+
+`make gcp-smoke` now reads the namespace's `argocd.argoproj.io/tracking-id` annotation and fails
+if it is absent. A namespace existing is not the same as a namespace being managed, and that
+distinction is the whole reason this went unnoticed for five modules.
+
+**The on-prem `make smoke` has no equivalent check yet**, which is the same gap one substrate over
+— worth adding the next time that cluster is up, along with confirming the adoption actually
+happened.

@@ -48,8 +48,21 @@ spec:
     automated:
       prune: true
       selfHeal: true
-    syncOptions:
-      - CreateNamespace=true
+    # NO CreateNamespace=true, removed 2026-11-01 after the same option failed on GKE with:
+    #
+    #     one or more synchronization tasks are not valid:
+    #     resource :Namespace is not permitted in project tenants
+    #
+    # IT NEVER FAILED HERE, and that is why it stayed for five modules. `shopverse-prod` already
+    # existed on this cluster - created by hand in Module 06, when `make shopverse-secret` applied
+    # a Secret into it before Argo CD needed it - so this option was a no-op and the `tenants`
+    # project's cluster-resource blacklist never had to reject anything.
+    #
+    # Which means this option has been asking for a permission a tenant should not have, on both
+    # substrates, the entire time. A manual step was masking it; removing the manual step on GKE
+    # is what found it. The namespace is granted by the platform now:
+    # gitops/clusters/onprem/platform/tenant-namespaces.yaml, in sync wave -20.
+    syncOptions: []
     retry:
       # MongoDB has to be Running before the services that connect to it settle, and the chart
       # has no sync waves. So the first sync legitimately churns: services crash-loop until

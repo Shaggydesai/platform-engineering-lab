@@ -69,8 +69,22 @@ spec:
     automated:
       prune: true
       selfHeal: true
-    syncOptions:
-      - CreateNamespace=true
+    # NO CreateNamespace=true, and its absence is the fix for the failure this Application hit on
+    # its first sync:
+    #
+    #     one or more synchronization tasks are not valid:
+    #     resource :Namespace is not permitted in project tenants
+    #
+    # A Namespace is cluster-scoped and the `tenants` AppProject blacklists every cluster-scoped
+    # kind by design, so the project was working exactly as intended and this option was asking
+    # for something a tenant should never be able to do. The namespace is granted by the platform
+    # instead: gitops/clusters/<substrate>/platform/tenant-namespaces.yaml, in the `platform`
+    # project, in sync wave -20.
+    #
+    # The same principle ADR-0016 already applies to hostnames - the tenant cannot give itself a
+    # name on the Gateway because the Gateway is platform-owned - extended to the boundary that
+    # every other tenant restriction is written against.
+    syncOptions: []
     retry:
       # TEN, inherited from on-prem and justified by the same mechanism rather than copied.
       #
