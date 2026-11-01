@@ -1,0 +1,52 @@
+---
+# Layer 2 on GKE: install Argo CD, then hand it the seam.
+#
+#   make gcp-argocd         this playbook
+#   make gcp-argocd-check   --check --diff, changes nothing
+#
+# ONE PLAY LONG, and the length is the finding rather than an accident of scope.
+#
+# Compare ansible/playbooks/cluster.yml, which is eight plays: assert the image, bootstrap the
+# control plane, turn on encryption at rest, install the Gateway API CRDs, install the CNI,
+# remove kube-proxy, join the workers, install Argo CD. Seven of those eight are Layer 0 and
+# Layer 1 (ADR-0002) - the substrate and Kubernetes itself - and on GKE every one of them is
+# either Google's job or impossible:
+#
+#   assert the image          there is no image; the nodes are Google's, and anything done to
+#                             them by hand is lost at the next auto-repair
+#   bootstrap the control      there is no control-plane host to log into, and nothing in
+#   plane                      `kubectl get nodes` to log into either
+#   encryption at rest         on by default, with Google holding the key. The irreducible
+#                              secret that the on-prem design has to put somewhere
+#                              (/etc/kubernetes/enc/key1.b64, ADR-0018) does not exist here.
+#   Gateway API CRDs           GKE ships them, on its own schedule
+#   the CNI                    Dataplane V2, set at creation in terraform/gcp/main.tf
+#   removing kube-proxy        not ours to remove
+#   joining workers            the managed instance group does it
+#
+# The eighth is this one. That ratio - seven plays of substrate, one play of platform - is what
+# ADR-0001 set out to measure, and it is the clearest number in the project so far: managed
+# Kubernetes removes almost all of the work and all of the choice at the same time.
+#
+# PREREQUISITES, which this playbook does not create and will fail without:
+#   make gcp-up           the cluster (Terraform; refuses without the budget guardrail)
+#   make gcp-kubeconfig   the gcp-platform context, which the argocd role asserts exists
+#
+# Both are deliberate. A playbook that creates a billable cluster as a side effect of installing
+# Argo CD would route around ADR-0003's gate, which is the one thing in this repository that is
+# enforced by make rather than by memory.
+
+- name: Install Argo CD on GKE and hand it the seam
+  # The single host is this workstation (ansible/inventory/gcp.py explains why). Every task in
+  # the argocd role delegates to localhost and runs helm or kubectl, so nothing here needs a
+  # machine in the cluster - a property the role has because it had to work when the on-prem
+  # control plane was broken, and which turned out to be exactly what portability required.
+  hosts: gcp
+  # Nothing in the argocd role reads a gathered fact. It used to - a task took its timestamp from
+  # ansible_date_time, which exists only if facts were gathered, and `--tags argocd` skips the
+  # play that gathers them. That failed on exactly the run someone reaches for when Argo CD is
+  # the broken thing. It uses lookup('pipe', 'date') now, so this can stay off.
+  gather_facts: false
+  roles:
+    - argocd
+  tags: [argocd, gitops]

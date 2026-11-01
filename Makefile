@@ -18,7 +18,7 @@ ENV ?= onprem
 # This is a prerequisite rather than the first line of each recipe because prerequisites are
 # built before the recipe runs, which is the whole point.
 # Every variable this Makefile understands on the command line. Anything else is a typo.
-KNOWN_VARS := TAGS ARGS CHART ENV STORE_NAME PROBE_NS VAULT_NS VAULT_POD VAULT_KEYS
+KNOWN_VARS := TAGS ARGS CHART ENV CTX STORE_NAME PROBE_NS VAULT_NS VAULT_POD VAULT_KEYS
 
 .PHONY: _no-stray-flags
 _no-stray-flags:
@@ -133,6 +133,27 @@ PLAYBOOK     := $(ANSIBLE_ENV) ansible-playbook
 # TAGS=gateway-api limits a run to one play; ARGS="--check --diff" passes anything else.
 # Both empty by default, so `make onprem-up` is unchanged.
 PLAY_OPTS    := $(if $(TAGS),--tags $(TAGS),) $(ARGS)
+
+# CTX=<kubectl context> for the Argo CD and GitOps helper targets below.
+#
+# WHY THIS APPEARED IN MODULE 08 and not before: until there was a second cluster, every
+# `kubectl -n argocd ...` in this file acted on the only cluster there was. Now ~/.kube/config
+# holds onprem-admin and gcp-platform, and current-context is whatever the last command set - so
+# `make gitops-status` can describe a cluster the reader is not thinking about, and say nothing
+# about which.
+#
+# The fix is deliberately small. These targets are READ-ONLY (status, a password, a refresh
+# annotation), so a wrong cluster costs confusion rather than damage, and forcing an explicit
+# context on every invocation would be friction out of proportion to that. Instead: the default
+# is unchanged - current-context, exactly as before - and every target that uses it PRINTS which
+# context it acted on. Ambiguity you can see is a different thing from ambiguity you cannot.
+#
+# Anything that writes gets the opposite treatment: the argocd role names its context explicitly
+# and asserts it exists before installing anything (ADR-0020).
+CTX ?=
+KUBECTL      := kubectl $(if $(CTX),--context $(CTX),)
+# Evaluated by the SHELL inside a recipe, not by make, so `make help` does not run kubectl.
+CTX_SHOW      = $(if $(CTX),$(CTX),$$(kubectl config current-context 2>/dev/null || echo '?'))
 
 .PHONY: onprem-ping
 onprem-ping: ## Module 03 - can Ansible reach all three nodes?
@@ -387,6 +408,12 @@ gcp-up: _no-stray-flags _gcp-preflight ## Build the zonal GKE cluster (REFUSES w
 	  "$$(jq -r '.nodes.machine_type' clusters/gcp/cluster.json)" \
 	  "$$(jq -r '.nodes.spot' clusters/gcp/cluster.json)"; \
 	cd $(GCP_TF) && terraform init -input=false && terraform apply
+	@printf '\nLayers 0 and 1 are up, and Google owns everything in them. Next:\n'
+	@printf '  make gcp-kubeconfig   name the context gcp-platform\n'
+	@printf '  make gcp-argocd       Layer 2 - the SAME ansible role as on-prem (ADR-0020)\n'
+	@printf '  make gcp-smoke        read back what the cluster actually is\n\n'
+	@printf 'And the one that ends the session, whatever else happens (ADR-0003 Decision 5):\n'
+	@printf '  make gcp-down\n'
 
 .PHONY: gcp-down
 gcp-down: _no-stray-flags _gcp-preflight ## Destroy the GKE cluster, then prove nothing is left
@@ -419,6 +446,52 @@ gcp-kubeconfig: _gcp-preflight ## Point kubectl at the GKE cluster, under an unm
 	  printf '  Remove each with:  kubectl config delete-context NAME\n\n'; \
 	fi; \
 	kubectl config get-contexts
+
+# ---------------------------------------------------------------- Layer 2 on GCP
+#
+# THE SAME ROLE AS ON-PREM, against the gcp-platform context (ADR-0020). ansible/playbooks/gcp.yml
+# is one play long, and ansible/inventory/gcp.py has one host, which is this workstation - there
+# is no control-plane node on GKE to log into, and the argocd role never needed one because every
+# task in it already delegated to localhost.
+#
+# No guardrail gate on these two, deliberately. ADR-0003 Decision 3 guards the creation of
+# BILLABLE resources, and installing Argo CD creates none - the cluster is already running and
+# already billing by the time these can work. The gate belongs on `make gcp-up`, which is where
+# it is. A gate repeated everywhere becomes a gate nobody reads.
+#
+# -i overrides ansible.cfg's inventory, which names the on-prem one. It is passed explicitly on
+# both targets rather than being switched by ENV, because a wrong inventory here would run Layer
+# 2 against the wrong cluster, and `make gcp-argocd` should not depend on a variable's default
+# being right.
+GCP_PLAY := $(PLAYBOOK) -i ansible/inventory/gcp.py ansible/playbooks/gcp.yml
+
+.PHONY: gcp-inventory
+gcp-inventory: ## Show the GCP inventory derived from clusters/gcp/cluster.json
+	@$(ANSIBLE_ENV) ansible-inventory -i ansible/inventory/gcp.py --graph --vars
+
+.PHONY: gcp-argocd-check
+gcp-argocd-check: _no-stray-flags ## Dry run Layer 2 on GKE (--check --diff, changes nothing)
+	@$(GCP_PLAY) --check --diff $(ARGS)
+
+.PHONY: gcp-argocd
+gcp-argocd: _no-stray-flags ## Install Argo CD on GKE and apply the seam (needs gcp-up + gcp-kubeconfig)
+	@set -eu; \
+	if ! kubectl config get-contexts -o name | grep -qx gcp-platform; then \
+	  printf '\033[31mno kubectl context named gcp-platform\033[0m\n\n'; \
+	  printf 'The role asserts this too and prints the contexts that DO exist, but failing here\n'; \
+	  printf 'costs a second instead of a playbook run. In order:\n'; \
+	  printf '  make gcp-up           the cluster (refuses without the budget guardrail)\n'; \
+	  printf '  make gcp-kubeconfig   creates and names this context\n'; \
+	  exit 1; \
+	fi
+	@$(GCP_PLAY) $(ARGS)
+
+.PHONY: gcp-smoke
+gcp-smoke: ## Read back what the GKE cluster actually is (nodes, datapath, metrics, the seam)
+# NOT `make smoke` with a different context. Three of that script's assertions cannot hold here -
+# three nodes, a node named k8s-cp01, our own metrics-server - and the third must not. The
+# divergence is the measurement ADR-0001 asked for, not a gap; the script says which is which.
+	@bash scripts/gcp-smoke.sh
 
 .PHONY: etcd-encryption-check
 etcd-encryption-check: ## Read etcd directly: are Secrets ciphertext or plaintext?
@@ -493,15 +566,20 @@ shopverse-admin: ## Show ShopVerse's admin login (from the Secret, never from Gi
 	printf 'password: %s\n' "$$(kubectl -n "$$ns" get secret "$$name" -o jsonpath='{.data.admin-password}' | base64 -d)"
 
 .PHONY: argocd-password
-argocd-password: ## Show the Argo CD admin password (from the Secret, never from Git)
-	@kubectl -n argocd get secret argocd-initial-admin-secret \
+argocd-password: ## Show the Argo CD admin password (CTX= to pick a cluster)
+# Deliberately prints NOTHING but the password, so `$(make -s argocd-password)` stays usable.
+# Every cluster's Argo CD generates its own, so this is a different string per context - which
+# is why argocd-ui below prints the context next to it.
+	@$(KUBECTL) -n argocd get secret argocd-initial-admin-secret \
 	  -o jsonpath='{.data.password}' | base64 -d; echo
 
 .PHONY: argocd-ui
-argocd-ui: ## Port-forward the Argo CD UI to http://localhost:8080 (Ctrl-C to stop)
-	@echo "user: admin   password: $$(make -s argocd-password)"
-	@echo "open http://localhost:8080"
-	@kubectl -n argocd port-forward svc/argocd-server 8080:80
+argocd-ui: ## Port-forward the Argo CD UI to http://localhost:8080 (CTX= to pick a cluster)
+	@printf 'cluster:  \033[36m%s\033[0m\n' "$(CTX_SHOW)"
+	@echo "user:     admin"
+	@echo "password: $$($(MAKE) -s argocd-password CTX=$(CTX))"
+	@echo "open      http://localhost:8080"
+	@$(KUBECTL) -n argocd port-forward svc/argocd-server 8080:80
 
 .PHONY: gitops-status
 gitops-status: ## What Argo CD thinks the cluster should look like, and whether it agrees
@@ -512,10 +590,11 @@ gitops-status: ## What Argo CD thinks the cluster should look like, and whether 
 # The jq program is ONE line on purpose. Make consumes the backslash in a line continuation
 # and passes the rest through, so a multi-line quoted script arrives at jq with literal
 # backslashes in it and fails to compile - which is what the first version of this did.
-	@kubectl -n argocd get applications -o json 2>/dev/null \
+	@printf 'cluster: \033[36m%s\033[0m\n' "$(CTX_SHOW)"
+	@$(KUBECTL) -n argocd get applications -o json 2>/dev/null \
 	  | jq -r '["APP","PROJECT","SYNC","HEALTH","REVISION"], (.items[] | [.metadata.name, .spec.project, (.status.sync.status // "-"), (.status.health.status // "-"), ((.status.sync.revision // (.status.sync.revisions // ["-"])[0])[0:12])]) | @tsv' \
 	  | { column -t 2>/dev/null || cat; } \
-	  || { echo "Argo CD is not installed - run: make onprem-argocd"; exit 1; }
+	  || { echo "Argo CD is not installed on this cluster - run: make onprem-argocd, or make gcp-argocd"; exit 1; }
 
 .PHONY: gitops-refresh
 gitops-refresh: ## Make Argo CD re-read Git NOW instead of waiting for its poll
@@ -526,7 +605,8 @@ gitops-refresh: ## Make Argo CD re-read Git NOW instead of waiting for its poll
 	@#
 	@# This annotation is what the UI's Refresh button sets. It asks for a re-read of Git; it
 	@# does not force a sync, so an Application with automated sync off still only reports.
-	@for app in $$(kubectl -n argocd get applications -o jsonpath='{range .items[*]}{.metadata.name}{" "}{end}'); do 	  kubectl -n argocd annotate application "$$app" 	    argocd.argoproj.io/refresh=normal --overwrite >/dev/null; 	done
+	@printf 'cluster: \033[36m%s\033[0m\n' "$(CTX_SHOW)"
+	@for app in $$($(KUBECTL) -n argocd get applications -o jsonpath='{range .items[*]}{.metadata.name}{" "}{end}'); do 	  $(KUBECTL) -n argocd annotate application "$$app" 	    argocd.argoproj.io/refresh=normal --overwrite >/dev/null; 	done
 	@printf 'asked Argo CD to re-read Git for every Application. Give it a few seconds, then:\n'
 	@printf '  make gitops-status\n\n'
 	@printf 'Compare the REVISION column against:  git rev-parse --short=12 HEAD\n'

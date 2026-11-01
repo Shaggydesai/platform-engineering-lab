@@ -71,21 +71,46 @@ for s in scripts/*.sh; do
   bash -n "$s" && ok "$s" || bad "$s"
 done
 
-step 'Helm charts render'
+step 'Helm charts render, in every environment that actually deploys them'
 # The real check for the template files skipped above. A chart with templates that do not render
 # is a chart Argo CD will reject at sync time, which is a much worse place to find out.
+#
+# IT USED TO RENDER EVERY CHART AGAINST onprem AND ONLY onprem, which was correct while there was
+# one cluster and became a hole the moment there were two. gitops/environments/gcp/ had existed
+# for several modules, unrendered and unchecked, because nothing deployed from it - and the first
+# thing that did (cert-manager on GKE, ADR-0020) would have found out at sync time.
+#
+# The pairs come from the APPLICATIONS rather than from a list here, so the coverage grows on its
+# own: adding gitops/clusters/<env>/platform/<chart>.yaml is what makes that overlay checked. A
+# list would have to be remembered, and the module that adds a component is the module least
+# likely to remember it.
+#
+# Deliberately NOT every chart against every environment. An overlay with no Application deploys
+# nothing, so a failure in it is not yet a failure - and `aws` is seven such files. Rendering
+# them would report problems that cannot be fixed against decisions that have not been made.
 if command -v helm >/dev/null 2>&1; then
   for chart in gitops/charts/*/; do
     name=$(basename "$chart")
-    # Reuse gitops-render.sh rather than reimplementing the helm invocation. Two copies of
-    # "how a chart is rendered" is how lint and render come to disagree, and then one of them
-    # is wrong without anyone noticing - which is exactly what happened with the namespace.
-    if bash scripts/gitops-render.sh "$name" onprem >/dev/null 2>&1; then
-      ok "$name"
-    else
-      bad "$name"
-      bash scripts/gitops-render.sh "$name" onprem 2>&1 | tail -5 | sed 's/^/      /'
-    fi
+    found=0
+    for app in gitops/clusters/*/platform/"$name".yaml; do
+      [[ -f "$app" ]] || continue
+      found=1
+      # gitops/clusters/<env>/platform/<chart>.yaml -> <env>
+      env=$(basename "$(dirname "$(dirname "$app")")")
+      # Reuse gitops-render.sh rather than reimplementing the helm invocation. Two copies of
+      # "how a chart is rendered" is how lint and render come to disagree, and then one of them
+      # is wrong without anyone noticing - which is exactly what happened with the namespace.
+      if bash scripts/gitops-render.sh "$name" "$env" >/dev/null 2>&1; then
+        ok "$name ($env)"
+      else
+        bad "$name ($env)"
+        bash scripts/gitops-render.sh "$name" "$env" 2>&1 | tail -5 | sed 's/^/      /'
+      fi
+    done
+    # A chart nothing deploys. Not a failure - it is how a component arrives, one module before
+    # the Application that uses it - but silence here would hide a chart that has stopped
+    # rendering, so it is reported.
+    (( found )) || skip "$name - no Application in any cluster, so nothing renders it"
   done
 else
   skip 'helm not installed, skipped'

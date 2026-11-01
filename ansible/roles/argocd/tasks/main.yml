@@ -1,10 +1,151 @@
 ---
-# argocd: install Argo CD, then hand it the three objects that are the seam (ADR-0009).
+# argocd: install Argo CD, then hand it the objects that are the seam (ADR-0009).
 #
 # Layer 2 of ADR-0002. The whole point of this role is that it can be re-run when Argo CD is the
 # broken thing - so it must not depend on Argo CD working. Everything here is helm and kubectl
 # from the workstation, with nothing fetched through Argo CD itself.
+#
+# SUBSTRATE-NEUTRAL (ADR-0020). This file names no cluster, no kubeconfig, no Application and no
+# seam file. All of that arrives as inventory variables, so that "how Argo CD is installed" has
+# ONE definition across on-prem, GCP and AWS - which is ADR-0001's premise applied to Layer 2
+# itself rather than only to Layer 3.
+#
+# It was always nearly true: every task here already delegates to localhost and runs helm and
+# kubectl rather than anything over SSH, because the role had to work when the cluster's own
+# control plane was the thing being repaired. That property is what made a managed cluster with
+# no control-plane host to log into a one-day change rather than a rewrite.
 
+# ---------------------------------------------------------------------------- what this needs
+- name: Every substrate-specific value this role reads must be defined
+  # Ansible already fails on an undefined variable, but it fails at the task that happens to
+  # touch it first - which here would be `helm list`, reporting an unrelated-looking error about
+  # a template. Naming them together, at the top, means a new substrate's inventory is told what
+  # it forgot before anything runs.
+  ansible.builtin.assert:
+    that:
+      - argocd_kubeconfig is defined and argocd_kubeconfig | length > 0
+      - argocd_kube_context is defined and argocd_kube_context | length > 0
+      - argocd_chart_version is defined
+      - argocd_app_version is defined
+      - argocd_values_file is defined
+      - argocd_seam_files is defined and argocd_seam_files | length > 0
+      - argocd_root_app is defined and argocd_root_app | length > 0
+      - repo_root is defined
+    fail_msg: >-
+      This role is substrate-neutral and reads everything about WHICH cluster from the inventory.
+      See ansible/inventory/nodes.py or gcp.py for the full set; ADR-0020 explains why they are
+      variables rather than values in this file.
+    success_msg: "targeting context {{ argocd_kube_context | default('?') }}"
+  run_once: true
+
+- name: Is there a helm and a kubectl to do any of this with?
+  # BEFORE THE CONTEXT CHECK, and that ordering is the whole value of the task.
+  #
+  # This role is deliberately nothing but helm and kubectl run from the workstation (ADR-0009):
+  # it has to keep working when the cluster's control plane is the broken thing, so it depends on
+  # as little as possible. A missing binary is therefore the first thing that can go wrong.
+  #
+  # It is checked here rather than left to fail naturally because of what the natural failure
+  # SAID. On a machine with neither binary installed, the context check below asked kubectl for
+  # the list, got nothing because there was no kubectl, and reported "that kubeconfig has no
+  # contexts" - against a file holding two. A check whose "no" does not mean no, for the fourth
+  # time in this project, and this one was caught by deliberately pointing the role at a
+  # hand-written kubeconfig to read the error message rather than by trusting it.
+  #
+  # `command -v` is a shell builtin, hence shell rather than command. The version flags differ
+  # between the two tools (kubectl wants --client, helm wants nothing), and asking for a version
+  # would conflate "not installed" with "installed and unhappy".
+  ansible.builtin.shell: "command -v {{ item }}"
+  args:
+    executable: /bin/bash
+  loop:
+    - helm
+    - kubectl
+  delegate_to: localhost
+  run_once: true
+  become: false
+  register: argocd_tools
+  changed_when: false
+  failed_when: false
+
+- name: Both of them must be on PATH
+  vars:
+    missing: "{{ argocd_tools.results | rejectattr('rc', 'equalto', 0) | map(attribute='item') | list }}"
+  ansible.builtin.assert:
+    that: missing | length == 0
+    fail_msg: >-
+      not on this workstation's PATH: {{ missing | join(', ') }}.
+      Everything this role does is helm and kubectl from here, so there is nothing it can do
+      without them - and the checks below would otherwise report their absence as a cluster
+      problem. Install them with:  make tools
+    success_msg: "helm and kubectl are both here"
+  run_once: true
+
+- name: Which contexts does that kubeconfig actually contain?
+  # THE TASK THAT MAKES A SECOND SUBSTRATE SAFE, and it is worth saying what it is guarding.
+  #
+  # Until ADR-0020 this role passed no --context at all: it exported KUBECONFIG and let kubectl
+  # use whatever current-context that file happened to carry. On-prem that was harmless, because
+  # the fetched admin.conf holds exactly one cluster and nothing writes to it.
+  #
+  # It stops being harmless the moment a second substrate exists. `make gcp-kubeconfig` writes
+  # into ~/.kube/config, which also holds onprem-admin and any stale gke_* context - and
+  # current-context there is whatever the last gcloud or kubectl command set it to. A role that
+  # installs Argo CD into "whichever cluster was most recently selected" is one `kubectl config
+  # use-context` away from installing the on-prem platform onto GKE, and both would succeed.
+  #
+  # So the context is explicit now - and because it is explicit it can be WRONG, which is the
+  # second half of the guard. The first attempt passed `{{ kube_context }}`, the readable name
+  # (onprem-admin) that the control_plane role renames to in a COPY merged into ~/.kube/config.
+  # The fetched file still carries kubeadm's own kubernetes-admin@onprem, so that flag would
+  # have broken a working on-prem path with an error about a context, several layers from the
+  # cause. This asks the file what it holds and prints the list.
+  ansible.builtin.command: >-
+    kubectl config get-contexts -o name
+  delegate_to: localhost
+  run_once: true
+  become: false
+  environment:
+    KUBECONFIG: "{{ argocd_kubeconfig }}"
+  register: argocd_contexts
+  changed_when: false
+  failed_when: false
+
+- name: The context this role is about to act on must exist in that kubeconfig
+  vars:
+    found_contexts: "{{ argocd_contexts.stdout_lines | default([]) }}"
+    # `| default([])` on stdout_lines replaces UNDEFINED, not EMPTY, and the empty case is the
+    # likely one: a fresh machine with no kubeconfig at all, or one gcloud has not written to
+    # yet. The first version of this message read "It contains: ." - a sentence that sends
+    # someone looking for a list of contexts that does not exist.
+    #
+    # The same shape as `${var:+text}` testing for non-empty rather than for set, which cost an
+    # hour earlier in this project. A default is not a fallback for every falsy value, and in
+    # Jinja, Ansible and bash alike it is worth knowing which one each tests.
+    # Three outcomes, not two, and keeping them apart is the point. kubectl ran and listed
+    # contexts; kubectl ran and the file holds none; or kubectl did not run at all, which the
+    # task above now rules out but which this message should still be able to say rather than
+    # silently reporting it as the second case.
+    contexts_report: >-
+      {{ ('it contains ' ~ (found_contexts | join(', ')))
+         if (found_contexts | length > 0)
+         else ('that file holds no contexts at all'
+               if argocd_contexts.rc | default(1) == 0
+               else ('kubectl could not read it: '
+                     ~ ((argocd_contexts.stderr | default('') | trim)
+                        or (argocd_contexts.msg | default('') | trim)
+                        or ('exit ' ~ (argocd_contexts.rc | default('?')))))) }}
+  ansible.builtin.assert:
+    that: argocd_kube_context in found_contexts
+    fail_msg: >-
+      {{ argocd_kubeconfig }} has no context named {{ argocd_kube_context }} - {{ contexts_report }}.
+      For GCP, `make gcp-kubeconfig` creates and names the context. For on-prem, the context in
+      the fetched admin.conf is kubeadm's own kubernetes-admin@<cluster>, NOT the readable
+      onprem-admin that only exists in ~/.kube/config.
+    success_msg: "{{ argocd_kube_context }} found in {{ argocd_kubeconfig }}"
+  run_once: true
+
+# ---------------------------------------------------------------------------- install
 - name: Add the Argo CD chart repository
   ansible.builtin.command: helm repo add argo https://argoproj.github.io/argo-helm
   delegate_to: localhost
@@ -24,12 +165,13 @@
   # Same reasoning as the cilium role: `helm upgrade --install` is idempotent in effect but
   # always reports changed, which would make "changed=0 on the second run" unreachable.
   ansible.builtin.command: >-
-    helm list --namespace argocd --filter '^argocd$' --output json
+    helm list --kube-context {{ argocd_kube_context }}
+    --namespace argocd --filter '^argocd$' --output json
   delegate_to: localhost
   run_once: true
   become: false
   environment:
-    KUBECONFIG: "{{ kubeconfig_fetch_path }}"
+    KUBECONFIG: "{{ argocd_kubeconfig }}"
   register: argocd_release
   changed_when: false
 
@@ -39,12 +181,13 @@
   # does not apply leaves Git and the cluster disagreeing about the thing whose job is to stop
   # Git and the cluster disagreeing.
   ansible.builtin.command: >-
-    helm get values argocd --namespace argocd -o json
+    helm get values argocd --kube-context {{ argocd_kube_context }}
+    --namespace argocd -o json
   delegate_to: localhost
   run_once: true
   become: false
   environment:
-    KUBECONFIG: "{{ kubeconfig_fetch_path }}"
+    KUBECONFIG: "{{ argocd_kubeconfig }}"
   register: argocd_live_values
   changed_when: false
   failed_when: false
@@ -71,6 +214,11 @@
       - --install
       - argocd
       - argo/argo-cd
+      # helm's flag is --kube-context, not --context. Spelled the kubectl way it is rejected as
+      # an unknown flag, which is at least loud; the dangerous version is leaving it off, because
+      # helm then silently uses the kubeconfig's current-context.
+      - --kube-context
+      - "{{ argocd_kube_context }}"
       - --version
       - "{{ argocd_chart_version }}"
       - --namespace
@@ -85,7 +233,7 @@
   run_once: true
   become: false
   environment:
-    KUBECONFIG: "{{ kubeconfig_fetch_path }}"
+    KUBECONFIG: "{{ argocd_kubeconfig }}"
   register: argocd_install
   changed_when: true
 
@@ -103,23 +251,26 @@
   # It matters because the argocd CLI on this workstation talks to this server, and a CLI far
   # ahead of its server fails in ways that read like permissions problems.
   ansible.builtin.command: >-
-    helm list --namespace argocd --filter '^argocd$' --output json
+    helm list --kube-context {{ argocd_kube_context }}
+    --namespace argocd --filter '^argocd$' --output json
   delegate_to: localhost
   run_once: true
   become: false
   environment:
-    KUBECONFIG: "{{ kubeconfig_fetch_path }}"
+    KUBECONFIG: "{{ argocd_kubeconfig }}"
   register: argocd_installed_release
   changed_when: false
 
-- name: The installed app version must match nodes.json
+- name: The installed app version must match clusters/platform.json
   ansible.builtin.assert:
     that: >-
       (argocd_installed_release.stdout | from_json | first).app_version == argocd_app_version
     fail_msg: >-
       Chart {{ argocd_chart_version }} installed Argo CD
-      {{ (argocd_installed_release.stdout | from_json | first).app_version }}, but nodes.json
-      says {{ argocd_app_version }}. Check `helm search repo argo/argo-cd --versions`, which
+      {{ (argocd_installed_release.stdout | from_json | first).app_version }}, but
+      clusters/platform.json says {{ argocd_app_version }}. That file is shared by every
+      substrate, so this is one number for all three clusters.
+      Check `helm search repo argo/argo-cd --versions`, which
       prints CHART VERSION and APP VERSION side by side, and update whichever is wrong.
     success_msg: "chart {{ argocd_chart_version }} -> Argo CD {{ argocd_app_version }}"
   run_once: true
@@ -127,12 +278,13 @@
 - name: Wait for the application controller
   # The controller is what reconciles; without it the Applications below are inert objects.
   ansible.builtin.command: >-
-    kubectl --namespace argocd rollout status statefulset/argocd-application-controller --timeout=300s
+    kubectl --context {{ argocd_kube_context }}
+    --namespace argocd rollout status statefulset/argocd-application-controller --timeout=300s
   delegate_to: localhost
   run_once: true
   become: false
   environment:
-    KUBECONFIG: "{{ kubeconfig_fetch_path }}"
+    KUBECONFIG: "{{ argocd_kubeconfig }}"
   changed_when: false
 
 - name: Does the seam differ from what is in Git?
@@ -146,18 +298,22 @@
   # "changed" on an unchanged file, nondeterministically, depending on whether a refresh
   # happened to be in flight.
   ansible.builtin.command: >-
-    kubectl diff --server-side -f {{ repo_root }}/gitops/bootstrap/{{ item }}
+    kubectl --context {{ argocd_kube_context }}
+    diff --server-side -f {{ repo_root }}/gitops/bootstrap/{{ item }}
   delegate_to: localhost
   run_once: true
   become: false
   environment:
-    KUBECONFIG: "{{ kubeconfig_fetch_path }}"
-  loop:
-    - projects.yaml
-    - root-onprem.yaml
-    # Added by ADR-0016. The seam is three objects now, and the ORDER still matters: an
-    # Application referencing a missing project is rejected, so projects.yaml stays first.
-    - root-tenants-onprem.yaml
+    KUBECONFIG: "{{ argocd_kubeconfig }}"
+  # The list is per-substrate (ADR-0020) and the ORDER still matters: an Application referencing
+  # a missing AppProject is rejected, so projects.yaml is first in every inventory that defines
+  # this. On-prem has three files - the second tenant root arrived with ADR-0016; GCP has two,
+  # because there is no tenant on it yet.
+  #
+  # projects.yaml itself is SHARED and unchanged, which was not planned. The AppProjects turned
+  # out to be substrate-independent: their destinations name https://kubernetes.default.svc, the
+  # address a cluster uses for itself, so the boundary travels without edit.
+  loop: "{{ argocd_seam_files }}"
   register: argocd_seam_diff
   changed_when: false
   # 0 = identical, 1 = differs. Anything else is a real error, and without this a broken
@@ -202,7 +358,7 @@
     mode: "0644"
     content: |
       # {{ item.item }} differed from the live object at {{ seam_stamp }}
-      # Context: {{ kube_context }}. This file is evidence for docs/parking-lot.md, not config.
+      # Context: {{ argocd_kube_context }}. Evidence for docs/parking-lot.md, not config.
       # Written by the argocd role because the apply below erases the difference immediately.
       {{ item.stdout }}
   loop: "{{ argocd_seam_diff.results }}"
@@ -241,13 +397,14 @@
   # kubernetes library on the workstation, and this role is the recovery path - it should depend
   # on as little as possible.
   ansible.builtin.command: >-
-    kubectl apply --server-side --force-conflicts
+    kubectl --context {{ argocd_kube_context }}
+    apply --server-side --force-conflicts
     -f {{ repo_root }}/gitops/bootstrap/{{ item.item }}
   delegate_to: localhost
   run_once: true
   become: false
   environment:
-    KUBECONFIG: "{{ kubeconfig_fetch_path }}"
+    KUBECONFIG: "{{ argocd_kubeconfig }}"
   loop: "{{ argocd_seam_diff.results }}"
   loop_control:
     label: "{{ item.item }}"
@@ -260,13 +417,14 @@
   # repoURL, a project that forbids the destination, or a path that does not exist all leave a
   # perfectly healthy Argo CD managing nothing.
   ansible.builtin.command: >-
-    kubectl --namespace argocd get application platform-onprem
+    kubectl --context {{ argocd_kube_context }}
+    --namespace argocd get application {{ argocd_root_app }}
     -o jsonpath='{.status.sync.status}/{.status.health.status}'
   delegate_to: localhost
   run_once: true
   become: false
   environment:
-    KUBECONFIG: "{{ kubeconfig_fetch_path }}"
+    KUBECONFIG: "{{ argocd_kubeconfig }}"
   register: argocd_root_status
   until: argocd_root_status.stdout == 'Synced/Healthy'
   retries: 30
@@ -276,12 +434,18 @@
 - name: Report
   ansible.builtin.debug:
     msg: |
-      Argo CD chart {{ argocd_chart_version }}, root Application platform-onprem: {{ argocd_root_status.stdout }}
+      Argo CD chart {{ argocd_chart_version }} -> {{ argocd_app_version }}
+      context           {{ argocd_kube_context }}   ({{ argocd_kubeconfig }})
+      root Application  {{ argocd_root_app }}: {{ argocd_root_status.stdout }}
+      seam applied      {{ argocd_seam_files | join(', ') }}
 
-      UI:        make argocd-ui          (port-forward to http://localhost:8080)
-                 http, not https - server.insecure is on, see the values file
-      Password:  make argocd-password    (from the Secret the chart generated - not in Git)
+      UI:        make argocd-ui CTX={{ argocd_kube_context }}
+                 port-forward to http://localhost:8080 - http, not https, because
+                 server.insecure is on (see the values file for when that becomes wrong)
+      Password:  make argocd-password CTX={{ argocd_kube_context }}
+                 from the Secret the chart generated - never in Git
 
       From here, nothing in this cluster is installed by hand. Adding a component means adding
-      a file to gitops/clusters/onprem/platform/ and pushing it.
+      a file to {{ argocd_platform_path | default('the cluster platform directory') }} and
+      pushing it.
   run_once: true

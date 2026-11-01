@@ -22,11 +22,26 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 CONFIG = os.path.join(REPO, "clusters", "onprem", "nodes.json")
 
+# Layer 2 is defined once for every substrate (ADR-0020), so the Argo CD pins come from a file
+# that is not about this cluster. gcp.py reads the same file the same way.
+#
+# NOT a shared helper module imported by both inventories, deliberately. Ansible executes an
+# inventory script, so a sibling import works only because the script's own directory happens to
+# be on sys.path - and it would break the moment ansible.cfg pointed `inventory` at this
+# DIRECTORY rather than at one file in it, at which point Ansible would also try to parse the
+# helper as an inventory source. Six duplicated lines that read one shared file beat a shared
+# module that depends on a config line nobody would connect to the failure. The thing that must
+# not be duplicated is the version, and it is not.
+PLATFORM = os.path.join(REPO, "clusters", "platform.json")
+
 
 def build():
     with open(CONFIG, encoding="utf-8") as fh:
         cfg = json.load(fh)
+    with open(PLATFORM, encoding="utf-8") as fh:
+        platform = json.load(fh)
 
+    argocd = platform["argocd"]
     net = cfg["network"]
     k8s = cfg["kubernetes"]
     ssh = cfg["ssh"]
@@ -66,8 +81,6 @@ def build():
                 "cni": k8s["cni"],
                 "kubernetes_version": k8s["version"],
                 "cilium_version": k8s["cilium_version"],
-                "argocd_chart_version": k8s["argocd_chart_version"],
-                "argocd_app_version": k8s["argocd_app_version"],
                 "gateway_api_version": k8s["gateway_api_version"],
                 "gateway_api_sha256": k8s["gateway_api_sha256"],
                 # Every node's name, so a role can assert resolution rather than assume it.
@@ -79,10 +92,38 @@ def build():
                 "cilium_values_file": os.path.join(
                     REPO, "ansible", "roles", "cilium", "files", "cilium-values.yaml"
                 ),
-                "argocd_values_file": os.path.join(
-                    REPO, "ansible", "roles", "argocd", "files", "argocd-values.yaml"
-                ),
                 "kubeconfig_fetch_path": os.path.expanduser("~/.kube/onprem.conf"),
+                # ---------------------------------------------------------- Layer 2, on-prem
+                # Everything the argocd role needs that differs between substrates. The role
+                # itself names no cluster, no file and no Application; it reads these (ADR-0020).
+                "argocd_chart_version": argocd["chart_version"],
+                "argocd_app_version": argocd["app_version"],
+                "argocd_values_file": os.path.join(REPO, argocd["values_file"]),
+                # The PRISTINE fetched admin.conf, not ~/.kube/config. The control_plane role
+                # fetches it and never touches it again, so it holds exactly one cluster - which
+                # is what makes it the safe thing to point Layer 2 at.
+                "argocd_kubeconfig": os.path.expanduser("~/.kube/onprem.conf"),
+                # THE CONTEXT INSIDE THAT FILE, which is NOT kube_context.
+                #
+                # kube_context (onprem-admin) is the readable name the control_plane role renames
+                # to while merging a COPY into ~/.kube/config. The fetched file still carries
+                # kubeadm's own name, so `--context onprem-admin` against it fails - which is
+                # exactly the mistake adding --context to this role invited, and the reason the
+                # role now asserts the context exists before it installs anything.
+                "argocd_kube_context": f"kubernetes-admin@{cfg['cluster']}",
+                # The seam (ADR-0009). Order matters: an Application referencing a missing
+                # AppProject is rejected, so projects.yaml stays first.
+                #
+                # projects.yaml is SHARED with GCP, unchanged. The AppProjects turned out to be
+                # substrate-independent because their destinations name the in-cluster address
+                # rather than a cluster - so the boundary travels.
+                "argocd_seam_files": [
+                    "projects.yaml",
+                    "root-onprem.yaml",
+                    "root-tenants-onprem.yaml",
+                ],
+                "argocd_root_app": "platform-onprem",
+                "argocd_platform_path": "gitops/clusters/onprem/platform",
                 # Downloaded, verified, then applied. Under the repo rather than /tmp so that
                 # a WSL shutdown clearing /tmp cannot silently change what is verified.
                 "gateway_api_bundle": os.path.join(REPO, ".cache", "gateway-api-standard-install.yaml"),

@@ -1,0 +1,95 @@
+# cert-manager on GKE, with the platform PKI OFF.
+#
+# The second Application on this substrate, and the one that actually tests the overlay mechanism
+# rather than the Argo CD plumbing. The canary proves reconciliation with plain shared manifests;
+# this proves the harder claim: a wrapper chart with an upstream dependency, rendered from the
+# SAME gitops/charts/cert-manager directory the on-prem cluster uses, differing only in a values
+# file selected by path.
+#
+# Compare this file to gitops/clusters/onprem/platform/cert-manager.yaml. The difference is one
+# path segment - environments/onprem -> environments/gcp - and the result is a materially
+# different trust model: on-prem gets a self-signed root CA, three certificates and a sync wave
+# that depends on them; here cert-manager installs and issues nothing.
+#
+# WHICH RAISES THE OBVIOUS OBJECTION: why install a component that does nothing?
+#
+# Two honest answers and one honest admission.
+#
+#   It is a prerequisite with a long lead time. cert-manager's CRDs must be ESTABLISHED before
+#   any other component's Certificate or Issuer can be applied at all - an unknown resource type
+#   is a sync error, not a retry. Having it present and idle means the first component on this
+#   cluster that wants TLS does not also have to introduce cert-manager.
+#
+#   It is the only component in the platform set that exercises a chart dependency on this
+#   substrate. If `helm dependency` resolution, the pinned jetstack repository or ServerSideApply
+#   behave differently here, this is where it shows - with nothing depending on the answer.
+#
+#   The admission: gitops/environments/gcp/cert-manager.yaml says this module would use an ACME
+#   ClusterIssuer with DNS-01 against Cloud DNS, for publicly trusted certificates no browser has
+#   to be told to trust. THAT IS NOT DONE AND IS NOT DOABLE YET, and the overlay was optimistic.
+#   DNS-01 needs a public DNS zone, and a Cloud DNS managed zone is about $0.20 a month plus
+#   query charges - small, and not ₹0, and ADR-0003 forbids a standing charge. It also needs a
+#   domain name this project does not own. So the ACME issuer is parked with a price attached
+#   rather than written as a to-do, and this Application installs the machinery without an
+#   opinion about who the certificate authority is - which is exactly cert-manager's own default
+#   posture.
+#
+# NO SYNC WAVE, and the absence is deliberate. The on-prem Application carries wave -10 because
+# ADR-0010 Decision 4 requires a wave to have a dependency that FAILS without it, and on-prem
+# there are two: the PKI certificates and the Gateway's serving certificate. Neither exists here.
+# Copying the annotation across would have been the easy thing and would have made the wave mean
+# "this came from the other file" rather than "something depends on this".
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cert-manager
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+
+  sources:
+    - repoURL: https://github.com/Shaggydesai/platform-engineering-lab.git
+      targetRevision: main
+      path: gitops/charts/cert-manager
+      helm:
+        valueFiles:
+          # Shared first, substrate second. Helm's later file wins, which is the whole mechanism:
+          # values.yaml says platformPKI.enabled false and the on-prem overlay turns it on. This
+          # one leaves it off, so the two files that follow this line are the only difference
+          # between a cluster with its own certificate authority and one without.
+          - values.yaml
+          - $values/gitops/environments/gcp/cert-manager.yaml
+
+    - repoURL: https://github.com/Shaggydesai/platform-engineering-lab.git
+      targetRevision: main
+      ref: values
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: cert-manager
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      # ServerSideApply is not optional. cert-manager's CRDs are enormous, and a client-side
+      # apply stores the whole manifest in the kubectl.kubernetes.io/last-applied-configuration
+      # annotation, which has a hard 262144-byte limit. The CRDs exceed it, and the error
+      # ("metadata.annotations: Too long") names the annotation rather than the cause.
+      - ServerSideApply=true
+    retry:
+      # Less patience than on-prem, which needed limit 10 because three PKI waves each waited for
+      # the previous one and the webhook is slow to start serving on laptop-sized nodes. With no
+      # PKI here there is one thing to install, so the default-ish schedule is enough - and a
+      # retry limit copied from a cluster with different work to do is a number nobody can
+      # justify later.
+      limit: 5
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 3m

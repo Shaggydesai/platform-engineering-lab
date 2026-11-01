@@ -1,6 +1,25 @@
 # metrics-server on GKE.
 #
-# Empty on purpose, and the emptiness is the statement: GKE provides a managed metrics
-# server, so Module 08 will decide whether this Application exists on that cluster at all
-# rather than what it is configured with. An empty file beats a missing one - it makes "no
-# difference here" explicit (ADR-0010 Decision 2).
+# Empty on purpose, and the emptiness is the statement: GKE provides a managed metrics server, so
+# the question was never what to configure but whether this Application should exist on that
+# cluster at all. An empty file beats a missing one - it makes "no difference here" explicit
+# (ADR-0010 Decision 2).
+#
+# MODULE 08 DECIDED: NO APPLICATION. There is deliberately no
+# gitops/clusters/gcp/platform/metrics-server.yaml (ADR-0020).
+#
+# Not because ours would be redundant - because it would be actively worse than redundant. GKE
+# runs its own metrics-server in kube-system, and metrics-server serves the metrics.k8s.io
+# APIService, which is CLUSTER-SCOPED and singular. Two of them means whichever registered last
+# owns the endpoint; `kubectl top` keeps working, so nothing looks broken, and the HPA reads
+# whichever one won. That is a conflict with no error message, which is the worst kind this
+# repository has catalogued.
+#
+# The deeper reason is the same one that applies to the CNI and to encryption at rest: on a
+# managed substrate, Layer 1 extends further up than it does on-prem. metrics-server is a
+# platform component of OUR platform on a cluster we built from kubeadm, and part of GOOGLE'S
+# platform on a cluster they built. The boundary moved, and the overlay mechanism cannot express
+# "this component belongs to someone else" - only an absent Application can.
+#
+# `make gcp-smoke` asserts `kubectl top nodes` works WITHOUT us installing anything, which turns
+# "GKE provides one" from a sentence in this comment into a checked fact.

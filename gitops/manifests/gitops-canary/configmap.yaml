@@ -24,5 +24,12 @@ data:
   # Why this exists at all, for whoever finds it in six months and wonders.
   purpose: |
     The cheapest possible answer to "is GitOps working right now?".
-    Owned by the gitops-canary Application: gitops/clusters/onprem/platform/gitops-canary.yaml
-    Rationale: docs/adr/0009-gitops-layout.md
+    Owned by a gitops-canary Application in gitops/clusters/<substrate>/platform/ - this
+    directory is rendered by every cluster, so the same ConfigMap exists on each of them.
+    Rationale: docs/adr/0009-gitops-layout.md, docs/adr/0020-layer2-across-substrates.md
+
+    THIS CONFIGMAP CANNOT TELL YOU WHICH CLUSTER YOU ARE LOOKING AT, on purpose. A substrate
+    name in here would have to come from an overlay, which would mean this stopped being plain
+    shared manifests and became a chart - and the thing it proves (a commit reaches the
+    cluster) is the same question on every substrate. `kubectl config current-context` answers
+    "which cluster"; this answers "is it listening".

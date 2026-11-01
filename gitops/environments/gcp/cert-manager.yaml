@@ -1,11 +1,25 @@
 # cert-manager on GKE.
 #
-# platformPKI stays OFF. The cluster will have a public DNS name, so Module 08 uses an ACME
-# ClusterIssuer with DNS-01 against Cloud DNS and gets publicly trusted certificates - which no
-# browser has to be told to trust, and no laptop has to have a root installed in it.
+# platformPKI stays OFF, and this cluster therefore has no certificate authority of its own.
 #
-# The contrast with on-prem is the clearest statement of what gitops/environments is for: the
-# same component, the same chart, a completely different trust model.
+# WHAT THIS FILE ORIGINALLY PROMISED, written before anything was built: "the cluster will have a
+# public DNS name, so Module 08 uses an ACME ClusterIssuer with DNS-01 against Cloud DNS and gets
+# publicly trusted certificates". Module 08 did NOT do that, and the sentence is kept rather than
+# quietly rewritten because the reason it was wrong is the useful part.
+#
+# DNS-01 needs a public DNS zone. A Cloud DNS managed zone is roughly $0.20 a month plus query
+# charges - a standing charge, which ADR-0003 forbids outright regardless of how small it is -
+# and it needs a domain name this project does not own. Neither of those was a surprise available
+# only in hindsight; they were simply not checked when the sentence was written. The pattern is
+# the one this repository keeps finding in its own notes: a plan recorded as a decision because
+# it was plausible.
+#
+# So cert-manager IS installed here (gitops/clusters/gcp/platform/cert-manager.yaml) and issues
+# nothing. The ACME issuer is parked with its price attached rather than written as a to-do.
+#
+# The contrast with on-prem remains the clearest statement of what gitops/environments is for:
+# the same component, the same chart, one path segment different, a completely different trust
+# model - on-prem a self-signed root that a human has to distribute, here no authority at all.
 cert-manager: {}
 
 platformPKI:

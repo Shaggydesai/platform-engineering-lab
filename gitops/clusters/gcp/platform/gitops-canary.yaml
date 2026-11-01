@@ -1,0 +1,46 @@
+# The canary, on GKE. Byte-for-byte identical to the on-prem one except for nothing at all -
+# and that is the point of it being first.
+#
+# It deploys a namespace and a ConfigMap, from gitops/manifests/gitops-canary, which is the SAME
+# directory the on-prem cluster renders. No overlay, no values, no substrate-specific anything.
+# So if this Application reports Synced/Healthy on GKE, the entire Layer 2 chain has been proven
+# on a second substrate: the role installed Argo CD, the seam applied, the root Application found
+# its directory, the AppProject let it read this repository, and the controller reconciled
+# something real into the cluster.
+#
+# That chain is worth proving with the cheapest possible payload BEFORE anything with a cloud
+# dependency, because every later failure then has a known-good baseline to be compared against.
+# The alternative - finding out whether Argo CD works by deploying External Secrets with Workload
+# Identity - produces a failure that could be in any of six layers.
+#
+# It is also the gate, the same way it was in Module 04: change the ConfigMap in Git and this
+# cluster changes with no kubectl; change it with kubectl and self-heal puts it back.
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: gitops-canary
+  namespace: argocd
+  finalizers:
+    # Children DO carry the finalizer (ADR-0009): deleting this Application removes the
+    # resources it created rather than orphaning them, which is what makes `prune` on the root
+    # Application actually clean up when a component is removed from Git.
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+
+  source:
+    repoURL: https://github.com/Shaggydesai/platform-engineering-lab.git
+    targetRevision: main
+    path: gitops/manifests/gitops-canary
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: platform-canary
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
