@@ -205,6 +205,39 @@ else
   skip 'jq or python3 missing, skipped'
 fi
 
+step 'Every Terraform state has its provider lock file committed'
+# THE LOCK FILE IS THE REAL PIN, and this repository says so in a comment and then did not check
+# it. terraform/gcp/guardrails/versions.tf states the rule at length: versions.tf pins 6.50.0,
+# .terraform.lock.hcl carries the provider's HASHES, so a re-published 6.50.0 would fail
+# verification rather than install quietly.
+#
+# Two of the four states did not have one committed when this check was written - the GKE cluster
+# state, missing since the day it was created, and the secret backend, missing because the output
+# that reminds you to commit it only exists in the guardrail state. A rule stated in a comment and
+# enforced nowhere is a rule that is true of whichever file someone remembered.
+#
+# `git ls-files` rather than `test -f`: the question is whether it is in the REPOSITORY, not
+# whether it is on this machine. A lock file only appears after `terraform init`, so a fresh
+# clone has none on disk and that is exactly the case the commit protects.
+if command -v git >/dev/null 2>&1 && [ -d .git ]; then
+  missing=''
+  for d in $(grep -rl 'required_providers' terraform --include='*.tf' 2>/dev/null \
+             | xargs -r -n1 dirname | sort -u); do
+    git ls-files --error-unmatch "$d/.terraform.lock.hcl" >/dev/null 2>&1 \
+      || missing="$missing $d"
+  done
+  if [ -z "$missing" ]; then
+    ok 'all provider lock files are in Git'
+  else
+    for d in $missing; do printf '    %s/.terraform.lock.hcl is not committed\n' "$d"; done
+    bad 'commit them - and note they can only be generated where terraform init has run'
+    printf '      %sfor d in%s; do git add "$d/.terraform.lock.hcl"; done%s\n' \
+      "$c_dim" "$missing" "$c_off"
+  fi
+else
+  skip 'not a git checkout, skipped'
+fi
+
 step 'The GCP secret backend agrees with cluster.json and with its Terraform'
 # Exactly the same shape of problem as the check above, one substrate over, and the same honest
 # trade: Argo CD renders a Helm chart from Git and cannot reach into clusters/gcp/cluster.json, so
