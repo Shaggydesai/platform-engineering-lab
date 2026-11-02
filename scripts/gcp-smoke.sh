@@ -170,8 +170,14 @@ fi
 note ''
 note 'WHAT THIS DOES NOT PROVE: that a policy actually blocks a packet. It reads the cluster'
 note "configuration, which is one step better than reading our own manifest and one step worse"
-note 'than a probe. `make netpol-check` is the probe, and it has no GCP counterpart yet because'
-note 'there is no tenant on this cluster to write policies about.'
+note 'than a probe. `make netpol-check` is the probe, and it has no GCP counterpart yet.'
+note ''
+note 'IT IS NO LONGER BLOCKED, which is a change from when this note was written: there IS a'
+note 'tenant on this cluster now, so there is something to write policies about. What is still'
+note 'missing is the one rule that cannot be written once for three substrates - "allow the'
+note 'ingress layer in" - because the source is Cilium Envoy presenting as reserved:host'
+note 'on-prem and a Google-owned range here. Porting netpol-check is now a real task rather'
+note 'than a dependency.'
 
 # ---------------------------------------------------------------- 3. metrics, and whose it is
 step "metrics work, and we did NOT install the thing that provides them"
@@ -537,8 +543,51 @@ else
   else
     bad 'some tenant pods are not Running:'
     printf '%s\n' "$pending"
-    note 'if the Secret above is missing, that is the cause and not capacity - a pod whose'
-    note 'secretKeyRef names a missing Secret stays Pending and looks like a scheduling problem'
+
+    # THE SCHEDULER ALREADY SAYS WHY, so read it rather than making a human run `describe`.
+    #
+    # The first version of this check printed the list and a guess ("if the Secret above is
+    # missing, that is the cause and not capacity"). On its first real run the Secret was fine and
+    # the cause was capacity - and establishing that took a round trip to ask for `kubectl
+    # describe`. The message was sitting in the pod's PodScheduled condition the whole time.
+    #
+    # The scheduler writes things like "0/2 nodes are available: 2 Insufficient cpu", which names
+    # the resource AND the node count. That is the whole diagnosis in one line.
+    note ''
+    note 'why, according to the scheduler:'
+    $K -n "$TNS" get pods -o json 2>/dev/null \
+      | jq -r '.items[]
+               | select(.status.phase != "Running" and .status.phase != "Succeeded")
+               # `. as $p` is load-bearing. Written without it, as
+               #   [ .status.conditions[]... ] | first // ([.status.containerStatuses...] | first)
+               # the `//` binds INSIDE the pipe, so the second branch indexes the ARRAY the first
+               # branch built rather than the pod - "Cannot index array with string status" - and
+               # jq abandons that item. The pods it dropped were exactly the ones whose reason is
+               # in containerStatuses rather than in a condition, i.e. "secret not found": the
+               # single most diagnostic message, silently missing.
+               | . as $p
+               | [$p.metadata.name,
+                  (([$p.status.conditions[]? | select(.type=="PodScheduled") | .message] | first)
+                   // ([$p.status.containerStatuses[]?.state.waiting.message] | first)
+                   // "no reason recorded yet")]
+               | @tsv' 2>/dev/null \
+      | sort -u -k2 \
+      | while IFS=$'\t' read -r pn reason; do note "  $pn"; note "      $reason"; done
+
+    # AND THE NUMBERS, because "Insufficient cpu" invites the question immediately.
+    #
+    # e2-medium is a SHARED-CORE machine type: nominally 2 vCPU, and GKE's allocatable is closer
+    # to one. Two of them is therefore about half the CPU an arithmetic estimate from "2 vCPU x 2
+    # nodes" predicts - which is how ADR-0016's capacity estimate came to be wrong.
+    note ''
+    note 'allocatable vs requested, per node:'
+    $K get nodes -o json 2>/dev/null \
+      | jq -r '.items[] | [.metadata.name, .status.allocatable.cpu, .status.allocatable.memory] | @tsv' \
+      | while IFS=$'\t' read -r nn ncpu nmem; do
+          req=$($K describe node "$nn" 2>/dev/null \
+                | awk '/Allocated resources/,/Events|^$/' | awk '/cpu  *[0-9]/{print $2" cpu, "$4" (pct)"; exit}')
+          note "  $nn  allocatable ${ncpu} cpu / ${nmem}   requested ${req:-unknown}"
+        done
   fi
 
   # THE STORAGE DIFFERENCE, read back rather than asserted. On-prem this volume is a directory on
@@ -552,8 +601,35 @@ else
     note 'a network Persistent Disk, not a directory on a node: it detaches from a failed node'
     note 'and reattaches elsewhere, which platform-local on-prem cannot do at any price'
     note 'it is also billed while it exists - make gcp-down takes it, make cost-check checks'
+  elif [[ "$pvc_ph" == "Pending" ]]; then
+    # PENDING IS USUALLY A CONSEQUENCE HERE, NOT A FAULT, and reporting it as a second failure is
+    # what this check did on its first real run: six tenant pods Pending and the PVC Pending were
+    # counted as two findings when they were one.
+    #
+    # GKE's default StorageClass uses volumeBindingMode: WaitForFirstConsumer - the volume is not
+    # provisioned until a pod that mounts it is SCHEDULED, so that the disk is created in the zone
+    # the pod landed in. A pod that cannot schedule therefore leaves its claim Pending forever,
+    # and the claim is downstream of the pod rather than beside it.
+    #
+    # The on-prem default (local-path) does the same thing for the same reason, which is why this
+    # never looked like a separate problem there: the pods always scheduled.
+    mongo_phase=$($K -n "$TNS" get pod shopverse-mongodb-0 \
+                  -o jsonpath='{.status.phase}' 2>/dev/null || true)
+    binding=$($K get storageclass "${pvc_sc:-}" \
+              -o jsonpath='{.volumeBindingMode}' 2>/dev/null || true)
+    if [[ "$mongo_phase" != "Running" && "$binding" == "WaitForFirstConsumer" ]]; then
+      note "MongoDB's volume is Pending, and that is DOWNSTREAM of the pod, not a second fault"
+      note "StorageClass ${pvc_sc:-<unnamed>} is WaitForFirstConsumer, so the disk is not created"
+      note "until shopverse-mongodb-0 is scheduled - and it is $mongo_phase. Fix the scheduling"
+      note 'and the volume binds on its own; nothing is wrong with storage.'
+    else
+      bad "MongoDB's volume is Pending on StorageClass ${pvc_sc:-<unnamed>}"
+      note "binding mode: ${binding:-unknown}, and shopverse-mongodb-0 is ${mongo_phase:-absent}"
+      note 'With the pod Running, or an Immediate binding mode, Pending is a provisioning failure:'
+      note "  kubectl --context $CTX -n $TNS describe pvc"
+    fi
   elif [[ -n "$pvc_ph" ]]; then
-    bad "MongoDB's volume is $pvc_ph, not Bound"
+    bad "MongoDB's volume is $pvc_ph, which is neither Bound nor Pending"
   elif $K -n "$TNS" get statefulset shopverse-mongodb >/dev/null 2>&1; then
     # The StatefulSet exists, so its volumeClaimTemplate should have produced a PVC. Absent here
     # is a failure, not a "yet" - and the likeliest cause on this substrate is a StorageClass
@@ -570,12 +646,18 @@ else
     | { column -t 2>/dev/null || cat; }
 
   note ''
-  note 'WHAT THIS CANNOT CHECK, and it is the larger half: whether the storefront SERVES.'
+  note 'WHAT THIS STILL CANNOT CHECK, and it is the larger half: whether the storefront SERVES.'
   note '`make shopverse-check` registers a user, fills a cart, checks out, deletes MongoDB and'
-  note 'confirms the order survived - over HTTPS through the on-prem Gateway, with the platform'
-  note 'CA. There is no Gateway on this cluster and no ingress, on purpose: an Ingress object'
-  note 'here WOULD work and would bill a Google load balancer by the hour (ADR-0003). Until that'
-  note 'decision is made, the storefront is reached the same way Argo CD is:'
+  note 'confirms the order survived.'
+  note ''
+  note 'IT IS NO LONGER BLOCKED ON A DECISION - this note used to say there was no Gateway and no'
+  note 'ingress here, which stopped being true the moment ADR-0021 shipped. The Gateway exists,'
+  note 'the hostnames resolve through it, and `make gcp-ca` exports the CA that verifies it. What'
+  note 'shopverse-check still hardcodes is the on-prem nodes.json and the on-prem CA path, so'
+  note 'porting it is a real task rather than a dependency.'
+  note ''
+  note 'Meanwhile, against the Gateway:'
+  note '  make gcp-address        prints a curl line per hostname, CA and --resolve included'
   note "  kubectl --context $CTX -n $TNS port-forward svc/shopverse-frontend 8081:80"
 fi
 
