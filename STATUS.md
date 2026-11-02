@@ -93,14 +93,10 @@ re-apply is gone.
 
 ## The next action
 
-**Delete the orphaned disk first — it is billing right now.** Nothing else in this repository is
-costing money, and that one is:
-
-```bash
-gcloud compute disks delete pvc-5f355018-5202-48c0-bca3-0809b8e9aec8 \
-  --zone=asia-south1-a --project=platform-eng-lab-261031
-make cost-check          # should report nothing billable except the 1 Secret Manager version
-```
+**Spend is back to ₹0.** The orphaned disk was deleted on 2026-11-02 and `make cost-check` reports
+`nothing billable` in both projects, with the one deliberate standing resource at 1 of 6 free
+Secret Manager versions. **It also says what it did not check** — AWS, whose CLI is not configured
+— which is the shape ADR-0003 asked for rather than a gap.
 
 **Module 08 is done.** Proven on a live cluster, not inferred: 8 Applications Synced/Healthy, all
 8 tenant pods Running on `e2-standard-2`, MongoDB's volume Bound on a Persistent Disk, the six
