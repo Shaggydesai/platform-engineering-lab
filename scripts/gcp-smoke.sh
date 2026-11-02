@@ -61,6 +61,28 @@ kubectl config get-contexts -o name | grep -qx "$CTX" \
 
 K="kubectl --context $CTX"
 
+# The CA that verifies this Gateway, and it is the GCP one on purpose.
+#
+# `make onprem-ca` writes .cache/platform-ca.crt; this cluster's cert-manager generated its own
+# unrelated self-signed root, exported by `make gcp-ca`. Pointing curl at the wrong one produces a
+# verification error that reads like a broken certificate rather than the wrong CA.
+CA_FILE=.cache/gcp-platform-ca.crt
+
+# AND THIS SCRIPT FETCHES IT RATHER THAN ASKING FOR IT.
+#
+# The first version warned "no CA file, run make gcp-ca" - a check that ends in a round trip to a
+# human for data it can read itself, which is a shape already named in this project's parking lot.
+# It has a kubeconfig and the Secret is right there. So it exports the CA if the file is absent
+# or empty, and only gives up - with a reading of WHY - if cert-manager has not issued the root.
+probe_ca() {
+  [[ -s "$CA_FILE" ]] && return 0
+  mkdir -p "$(dirname "$CA_FILE")"
+  $K -n cert-manager get secret platform-ca-tls \
+     -o jsonpath='{.data.ca\.crt}' 2>/dev/null | base64 -d > "$CA_FILE" 2>/dev/null || true
+  [[ -s "$CA_FILE" ]] || { rm -f "$CA_FILE"; return 1; }
+  return 0
+}
+
 project=$(jq -r '.project_id' "$CFG")
 zone=$(jq -r '.zone' "$CFG")
 want_nodes=$(jq -r '.nodes.count' "$CFG")
@@ -405,72 +427,114 @@ if ! $K -n platform-ingress get gateway platform >/dev/null 2>&1; then
     note 'MINUTES to provision, which is longer than anything Cilium does on-prem'
   fi
 else
-  # ASSERT THE OUTCOME, NOT THE SCHEMA, and this is a correction of my own check rather than a
-  # refinement of it.
+  # WAIT FOR IT, because this is the slowest thing on this substrate and it had no wait at all.
   #
-  # The first version read .status.conditions[?(@.type=="Programmed")].status and FAILED the run
-  # when it was absent - on a cluster where the same check, two lines later, reported an allocated
-  # address and two live Google forwarding rules. A load balancer that does not exist does not get
-  # an address and does not bill. So the Gateway was working and the check said otherwise.
+  # THE BUG THIS FIXES, and the first diagnosis of it was wrong, which is the part worth keeping.
   #
-  # ABSENT IS NOT FALSE. That is the same distinction gcp-guardrails-verify exists to make - "I
-  # could not look" is not "it is missing" - arriving in a third place. Gateway API v1 defines
-  # `Programmed`, and an implementation is not obliged to have written it yet; GKE's controller
-  # may report `Ready`, the older condition, or put the detail on the listener instead.
+  # The check read `Programmed` and reported `<absent>` as a failure. I concluded the condition
+  # name was the problem - that GKE wrote `Ready` instead - and committed that explanation. Three
+  # minutes later the same Gateway reported, in full:
   #
-  # A FALSE NEGATIVE IS NOT HARMLESS just because it errs toward alarm: it sends someone to debug
-  # a working load balancer, which is the mirror image of the failure shape this project tracks
-  # and costs the same hour.
+  #     Scheduled=True  Accepted=True  Programmed=True  Ready=True
+  #     networking.gke.io/GatewayHealthy=True
   #
-  # So: the ADDRESS is the assertion, because with addressFrom: provider there is nowhere else for
-  # one to come from and the cloud does not allocate one for a Gateway it has not programmed.
-  # Conditions are read as EXPLANATION, preferring Programmed, falling back to Ready, and saying
-  # plainly when an implementation writes neither.
-  gw_class=$($K -n platform-ingress get gateway platform \
-             -o jsonpath='{.spec.gatewayClassName}' 2>/dev/null || true)
-  gw_addr=$($K -n platform-ingress get gateway platform \
-            -o jsonpath='{.status.addresses[0].value}' 2>/dev/null || true)
-  gw_conds=$($K -n platform-ingress get gateway platform -o json 2>/dev/null \
-             | jq -r '[.status.conditions[]? | "\(.type)=\(.status)"] | join(" ")' || true)
-  gw_bad=$($K -n platform-ingress get gateway platform -o json 2>/dev/null \
+  # The name was right. THE GATEWAY WAS STILL PROVISIONING. A global Application Load Balancer
+  # takes minutes - a fact written in this script's own notes, two sections above, by me - and the
+  # check then read a transient state once and called it a verdict.
+  #
+  # That is the Module 07 lesson verbatim, from the parking-lot entry about the External Secrets
+  # store read during its exponential backoff: "a retrying operator and a broken one look
+  # identical in a single read", which cost an hour. Every other slow thing here has a wait - the
+  # root Application retries 30 times, eso-check waits 150s - and the slowest one had none.
+  #
+  # So it waits. And the SECOND diagnosis being right does not retire the first lesson: "absent is
+  # not False" still holds below, because an implementation genuinely may not write a condition
+  # the spec defines, and a false negative sends someone to debug a working load balancer.
+  # AND IT WAITS FOR THE RIGHT SIGNAL, which the first version of this wait did not.
+  #
+  # THIRD CORRECTION, and this one is measured rather than reasoned. The wait below originally
+  # polled for the ADDRESS, on the argument that "with addressFrom: provider the cloud is the only
+  # possible source of an address, and it does not allocate one for a Gateway it has not
+  # programmed". That argument is FALSE, and the run that shipped it says so in its own output:
+  #
+  #     [fail] Gateway is Programmed=<absent>
+  #     [ ok ] the cloud allocated 34.36.43.255
+  #
+  # The address was there. Programmed was not. GKE reserves the IP early and sets Programmed when
+  # the URL map, target proxy and forwarding rule are actually in place, so an address is the
+  # FIRST step of provisioning, not the last - which makes it the one signal guaranteed to appear
+  # before the thing being waited for. Waiting on it is waiting on nothing.
+  #
+  # So the wait polls the conditions and stops when Programmed or Ready reports True.
+  #
+  # IT DOES NOT FAST-FAIL on a False condition, deliberately, and that is the expensive-looking
+  # choice. GKE publishes Programmed=False with reason Pending while it works, so a fast-fail on
+  # "any condition False" would fail a Gateway that is merely provisioning - the exact trap the
+  # External Secrets note describes, re-laid one layer down. The reasons that mean "a human must
+  # act" could be listed instead, but I would be guessing the strings, and a guessed list that is
+  # wrong fails healthy clusters silently. A broken Gateway therefore costs the full deadline
+  # once; a healthy one costs one API call.
+  gw_wait=300
+  gw_json=''
+  gw_conds=''
+  gw_bad=''
+  for _ in $(seq 1 $((gw_wait / 10))); do
+    gw_json=$($K -n platform-ingress get gateway platform -o json 2>/dev/null || true)
+    if [[ -n "$gw_json" ]]; then
+      gw_conds=$(printf '%s' "$gw_json" \
+                 | jq -r '[.status.conditions[]? | "\(.type)=\(.status)"] | join(" ")')
+      case "$gw_conds" in *Programmed=True*|*Ready=True*) break ;; esac
+    fi
+    sleep 10
+  done
+  gw_addr=$(printf '%s' "$gw_json" | jq -r '.status.addresses[0].value // ""' 2>/dev/null || true)
+  gw_class=$(printf '%s' "$gw_json" | jq -r '.spec.gatewayClassName // ""' 2>/dev/null || true)
+  gw_bad=$(printf '%s' "$gw_json" \
            | jq -r '[.status.conditions[]? | select(.status != "True")
-                     | "\(.type)=\(.status) \(.reason // ""): \(.message // "")"] | join("; ")' || true)
+                     | "\(.type)=\(.status) \(.reason // ""): \(.message // "")"] | join("; ")' \
+           2>/dev/null || true)
+
+  # TWO INDEPENDENT SIGNALS, and a verdict only where they agree or something is explicitly False.
+  #
+  # A condition explicitly False after the deadline is a finding. A condition merely MISSING is
+  # not - that lesson survives the correction above, because an implementation may genuinely never
+  # write a condition the spec defines, and failing on its absence sends someone to debug a
+  # working load balancer. Missing-but-addressed is therefore a warning, not a failure.
+
+  case "$gw_conds" in
+    *Programmed=True*)
+      ok "Gateway is Programmed   class $gw_class"
+      note 'Accepted and Programmed are different claims: the first means a controller read the'
+      note 'object, the second means a load balancer exists. Only the second serves traffic.' ;;
+    *Ready=True*)
+      ok "Gateway reports Ready   class $gw_class"
+      note 'this implementation writes Ready, the older spelling, rather than Gateway API v1'"'"'s'
+      note 'Programmed - which is why neither name alone is asserted here.' ;;
+    *)
+      if [[ -n "$gw_bad" ]]; then
+        bad "the Gateway is not programmed after ${gw_wait}s: $gw_bad"
+        note 'that is a condition the controller set to False on purpose, with a reason - so it'
+        note 'is a state it intends to stay in, not provisioning. Start from the message above.'
+      elif [[ -n "$gw_addr" ]]; then
+        warn "neither Programmed nor Ready is True after ${gw_wait}s, and no condition is False"
+        note 'an address exists, so something was provisioned. ABSENT IS NOT FALSE: this is a'
+        note 'warning rather than a failure because an implementation may never write either'
+        note 'condition, and failing on that sends someone to debug a working load balancer.'
+        note "  kubectl --context $CTX -n platform-ingress describe gateway platform"
+      else
+        bad "no address and no Programmed/Ready condition after ${gw_wait}s"
+        note 'conditions reported: '"${gw_conds:-none}"
+        note "  kubectl --context $CTX -n platform-ingress describe gateway platform"
+      fi ;;
+  esac
 
   if [[ -n "$gw_addr" ]]; then
-    ok "Gateway has an address: $gw_addr   class $gw_class"
-    note 'With addressFrom: provider the cloud is the only source of that - so an address in'
-    note 'status means a load balancer was actually created, not merely requested.'
+    ok "the cloud allocated $gw_addr"
     note 'EPHEMERAL: a different one next session. On-prem this is a pinned configuration choice'
     note '(ADR-0013); here it is an allocation, and reserving one bills while unattached.'
+    note 'It is also NOT evidence that the load balancer works - GKE reserves the IP first and'
+    note 'programs the data path afterwards, which is what the wait above exists to survive.'
     note '  make gcp-address    the current one, and the curl lines to match'
-  else
-    bad 'the Gateway has no address in status'
-    note 'with addressFrom: provider there is nowhere else for one to come from, so this means'
-    note 'the cloud has not created a load balancer. A global ALB takes MINUTES - re-run before'
-    note 'concluding, then:'
-    note "  kubectl --context $CTX -n platform-ingress describe gateway platform"
-  fi
-
-  # Now the conditions, as explanation. A condition explicitly False is a finding whether or not
-  # an address exists; a condition merely missing is not.
-  if [[ -n "$gw_bad" ]]; then
-    bad "a Gateway condition is not True: $gw_bad"
-  elif [[ -n "$gw_conds" ]]; then
-    ok "conditions: $gw_conds"
-    case "$gw_conds" in
-      *Programmed=True*) : ;;
-      *Ready=True*)
-        note 'note the condition name: this implementation reports Ready, the older spelling, and'
-        note 'not Gateway API v1'"'"'s Programmed. Asserting one name across implementations is what'
-        note 'made this check fail on a working Gateway.' ;;
-      *)
-        note 'neither Programmed nor Ready is True here, and the address above is what says the'
-        note 'load balancer exists. Worth one look at `describe gateway` to see what this'
-        note 'implementation does report.' ;;
-    esac
-  else
-    warn 'the Gateway reports no conditions at all'
-    note 'unusual rather than wrong - the address above is the load-bearing signal'
   fi
 
   # THE ADDRESS IS ALSO THE BILL, so say the number rather than leaving it to be remembered.
@@ -487,9 +551,103 @@ else
     fi
   fi
 
+  # DID THE GATEWAY ACCEPT THE ROUTES, or do the objects merely exist?
+  #
+  # The previous version of this check counted HTTPRoute OBJECTS and printed "2 HTTPRoute(s)
+  # attached" - a word it had not checked. On 2026-11-02 that line was green while BOTH hostnames
+  # returned 404 through the load balancer.
+  #
+  # 404 and 502 say different things here, and the difference is most of the diagnosis. A 502
+  # means Google matched a rule and the backend behind it failed. A 404 means NO RULE MATCHED:
+  # the request reached the load balancer and was answered by its default backend, so the route
+  # never became a URL-map rule at all. Counting objects cannot tell those apart; it reports the
+  # same "2" in both cases, and in the case where the Gateway is missing entirely it reports 2 as
+  # well, because HTTPRoutes are perfectly happy to exist with no parent.
+  #
+  # The Gateway publishes the number that answers it - .status.listeners[].attachedRoutes - and
+  # the controller computes that, not us. Each route also publishes, per parent, whether it was
+  # Accepted and whether its backendRefs ResolvedRefs. Those are the two questions.
+  #
+  # This is the third place in this project where a check counted what exists instead of asking
+  # whether it took effect, after the Vault unseal count and the Argo CD context list.
+  #
+  # attachedRoutes is deliberately NOT compared against the object count: a route attached to both
+  # the HTTP and HTTPS listener is counted by each, so the sum is not the number of routes and an
+  # equality test would fail on a correct cluster. What is asserted is that some listener has a
+  # non-zero count, and that no route reports a condition that is False.
+  # THE GATEWAY IS RE-READ HERE, and that is not a contradiction of the note above about not
+  # re-reading the address. "Is it programmed" and "did routes attach" are different questions
+  # with different answers at the same instant: the wait above returns the moment Programmed
+  # first goes True, and at that instant attachedRoutes is routinely still 0 - the routes attach
+  # seconds to a minute later. Reading them out of that snapshot would report 0 on a cluster
+  # that attached them correctly, which is the false negative from the top of this section with
+  # a different field in it.
   routes=$($K get httproute -A --no-headers 2>/dev/null | grep -c . || true)
+  attached_max=0
+  listeners=''
+  for _ in $(seq 1 9); do
+    gw_now=$($K -n platform-ingress get gateway platform -o json 2>/dev/null || true)
+    [[ -z "$gw_now" ]] && break
+    attached_max=$(printf '%s' "$gw_now" \
+                   | jq -r '[.status.listeners[]?.attachedRoutes // 0] | max // 0' 2>/dev/null || echo 0)
+    listeners=$(printf '%s' "$gw_now" \
+                | jq -r '.status.listeners[]? | "    \(.name)  port \(.port)  attachedRoutes=\(.attachedRoutes // 0)"' \
+                2>/dev/null || true)
+    (( attached_max > 0 )) && break
+    (( routes == 0 )) && break
+    sleep 10
+  done
+  route_bad=$($K get httproute -A -o json 2>/dev/null | jq -r '
+                .items[]
+                | .metadata.namespace as $ns | .metadata.name as $n
+                | (.status.parents // []) as $ps
+                | if ($ps | length) == 0
+                  then "\($ns)/\($n): no parent status at all - no controller ever claimed it"
+                  else ($ps[]
+                        | select([(.conditions // [])[] | select(.status != "True")] | length > 0)
+                        | "\($ns)/\($n) -> \(.parentRef.name): "
+                          + ([(.conditions // [])[] | select(.status != "True")
+                              | "\(.type)=\(.status) \(.reason // "")"] | join(", ")))
+                  end' 2>/dev/null || true)
+
+  if (( routes == 0 )); then
+    warn 'no HTTPRoutes exist'
+    note 'they render from gitops/charts/platform-ingress/templates/httproutes.yaml, in the same'
+    note 'chart as the Gateway - so if the Gateway is there and these are not, a values guard is'
+    note 'turning them off. Check routes.* in gitops/environments/gcp/platform-ingress.yaml.'
+  elif [[ -n "$route_bad" ]]; then
+    bad "an HTTPRoute was not accepted by the Gateway:"
+    printf '%s\n' "$route_bad" | sed 's/^/           /'
+    note ''
+    note 'THIS IS WHAT A 404 THROUGH THE LOAD BALANCER LOOKS LIKE FROM THE CLUSTER SIDE. The'
+    note 'object exists, the controller read it and refused it, and nothing was written into'
+    note 'the URL map - so Google answers with its default backend.'
+    note 'The usual causes, in the order worth checking:'
+    note '  NotAllowedByListeners  the listener allowedRoutes does not permit the route namespace'
+    note '                         - these routes live in argocd and shopverse-prod, the Gateway'
+    note '                           in platform-ingress, so every attachment here is cross-namespace'
+    note '  NoMatchingParent       parentRef name/namespace/sectionName does not name this Gateway'
+    note '  NoMatchingListenerHostname  the route hostname is outside the listener hostname'
+    note '  BackendNotFound        ResolvedRefs - the Service named does not exist in that namespace'
+  elif (( attached_max == 0 )); then
+    bad "every route reports accepted, and no listener has a single attached route"
+    note 'the routes are satisfied and the Gateway disagrees, which is the one combination that'
+    note 'cannot be read off either object alone. attachedRoutes is the controller'"'"'s own count,'
+    note 'so this is the controller saying it wrote nothing into the load balancer.'
+    note "  kubectl --context $CTX -n platform-ingress get gateway platform -o yaml"
+  else
+    ok "routes are attached to the listeners, by the Gateway's own count"
+    printf '%s\n' "$listeners"
+    note ''
+    note 'attachedRoutes is computed by the controller. A route object existing proves only that'
+    note 'kubectl accepted a file; this number is the Gateway agreeing to serve it.'
+    note ''
+    note 'A 404 through the load balancer WITH this green is a different problem: Google programs'
+    note 'the URL map after the Gateway reports, and propagation runs minutes behind. Re-curl'
+    note 'before debugging. A 502 here is the backend, not the routing.'
+  fi
+
   if (( routes > 0 )); then
-    ok "$routes HTTPRoute(s) attached"
     printf '\n'
     $K get httproute -A -o custom-columns='NS:.metadata.namespace,NAME:.metadata.name,HOSTS:.spec.hostnames' \
       --no-headers 2>/dev/null | sed 's/^/    /'
@@ -497,8 +655,81 @@ else
     note 'Those objects are IDENTICAL to the on-prem ones - same namespace, same backend, same'
     note 'port, attached to a Gateway with a different implementation underneath. Nothing in'
     note 'gitops/charts/platform-ingress/templates/httproutes.yaml is substrate-aware.'
+  fi
+
+  # AND NOW ASK THE LOAD BALANCER, which is the only check in this section that is not inference.
+  #
+  # Everything above reads Kubernetes objects: a Gateway that says it is programmed, listeners
+  # that say routes are attached, routes that say they were accepted. On 2026-11-02 every one of
+  # those was green and both hostnames returned 404. That is the whole recurring failure of this
+  # project in one section - a check that confirms a request was recorded rather than that it took
+  # effect - so the section now ends by sending a packet.
+  #
+  # It retries, because Google programs the URL map AFTER the Gateway reports Programmed and
+  # propagation runs minutes behind. A single 404 here is not a verdict either.
+  #
+  # ONE DEADLINE SHARED BY ALL HOSTNAMES, not a fresh one per hostname. Per-host retries would
+  # multiply: two broken names at 120s each is four minutes, on top of the Gateway wait, and the
+  # second name is not waiting for anything the first did not already wait through. What is being
+  # waited on is ONE url map propagating, so there is one clock.
+  if [[ -z "$gw_addr" ]]; then
+    : # nothing to curl at; the missing address was already reported above
+  elif ! command -v curl >/dev/null 2>&1; then
+    warn 'curl is not installed, so nothing here sent a packet through the load balancer'
+  elif ! probe_ca; then
+    warn "could not obtain the cluster CA, so TLS to the Gateway cannot be verified"
+    note 'the Gateway presents a certificate from this cluster'"'"'s own self-signed root, which no'
+    note 'system trust store knows, and cert-manager'"'"'s platform-ca-tls Secret is where that root'
+    note 'lives. If that Secret is missing, the Certificate never issued and the Gateway has no'
+    note 'usable certificate either - which is a finding about cert-manager, not about curl.'
+    note "  kubectl --context $CTX -n cert-manager get certificate,secret | grep platform-ca"
   else
-    warn 'no HTTPRoutes'
+    hosts=$($K get httproute -A -o json 2>/dev/null \
+            | jq -r '.items[].spec.hostnames[]?' 2>/dev/null | sort -u || true)
+    if [[ -z "$hosts" ]]; then
+      warn 'no route hostnames to probe'
+    else
+      probe_deadline=$((SECONDS + 150))
+      while read -r host; do
+        [[ -z "$host" ]] && continue
+        code=''
+        while :; do
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+                 --cacert "$CA_FILE" --resolve "$host:443:$gw_addr" \
+                 "https://$host/" 2>/dev/null || true)
+          # Break on a definite answer. A 404, a 5xx and a dead connection are all retried: the
+          # first is propagation, the second can be a NEG whose health check has not passed yet,
+          # and the third is the load balancer not yet answering on the address it was given.
+          case "$code" in 2??|3??|401|403) break ;; esac
+          (( SECONDS >= probe_deadline )) && break
+          sleep 10
+        done
+        case "$code" in
+          2??|3??|401|403)
+            ok "https://$host/ answered $code through the load balancer" ;;
+          404)
+            bad "https://$host/ still answers 404 after the propagation window"
+            note 'TLS completed, so the listener and its certificate are fine - the 404 came from'
+            note 'Google, not from an application. It means the URL map has no host rule matching'
+            note 'this name. With the route checks above green, the remaining suspect is the URL'
+            note 'map itself, so look at what Google actually programmed:'
+            note "  gcloud compute url-maps list --project=$project"
+            note "  gcloud compute url-maps describe <name> --project=$project" ;;
+          50?)
+            bad "https://$host/ answered $code - the load balancer matched a rule and the backend did not serve"
+            note 'this is the OPPOSITE finding from a 404 and much better news: the routing works.'
+            note 'A 502 here is usually the health check failing on the backend NEG, which GKE'
+            note 'derives from the Service - so the Service, its ports and its readiness probe:'
+            note "  kubectl --context $CTX get events -A --field-selector type=Warning | tail" ;;
+          000|'')
+            bad "https://$host/ did not complete a connection"
+            note 'no HTTP status at all, so this is TLS or reachability rather than routing. Run it'
+            note 'by hand to see the actual error - `make gcp-address` prints the exact line.' ;;
+          *)
+            warn "https://$host/ answered $code, which this check has no reading for" ;;
+        esac
+      done <<< "$hosts"
+    fi
   fi
 fi
 

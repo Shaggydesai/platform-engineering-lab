@@ -168,6 +168,58 @@ are different claims — the first means a controller saw the object, the second
 balancer exists — and a Gateway can sit `Accepted=True, Programmed=False` indefinitely serving
 nothing. That is the Gateway API form of the failure ADR-0016 named for the Ingress object.
 
+### Correction, 2026-11-02: that section was wrong three times, and the third fix is the one that matters
+
+It shipped asserting `Programmed`, reported `Programmed=<absent>` on a cluster whose load balancer
+was working, and got two explanations in a row before the right one.
+
+1. **"The condition name is wrong — GKE writes `Ready` instead."** Committed as `f87f66d`. False.
+   The same Gateway reported `Scheduled=True Accepted=True Programmed=True Ready=True
+   networking.gke.io/GatewayHealthy=True` three minutes later. The name was always right.
+2. **"The address is the assertion, because the cloud does not allocate one for a Gateway it has
+   not programmed."** Also false, and disproved by the output of the run that shipped it:
+   `[fail] Gateway is Programmed=<absent>` two lines above `[ ok ] the cloud allocated
+   34.36.43.255`. **GKE reserves the IP at the start of provisioning and sets `Programmed` at the
+   end**, so an address is the earliest signal available and therefore the one guaranteed to
+   appear before the thing being waited for. A wait on it is a wait on nothing.
+3. **The real cause: there was no wait.** A global Application Load Balancer takes minutes. The
+   check read a transient state once and called it a verdict — the second instance of that exact
+   shape, after the External Secrets store read during its exponential backoff. The script now
+   polls the conditions until `Programmed` or `Ready` reports `True`, up to 300s.
+
+Two things are kept from the wrong answers, because they are true independently of them.
+**Absent is not False**: an implementation may never write a condition the spec defines, so
+neither-written-after-the-deadline is a warning while an explicit `False` is a failure. And a
+**false negative is not the harmless direction to err** — it sends someone to debug a working
+load balancer, which costs the same hour as the mirror-image bug.
+
+### What a live cluster established, 2026-11-02
+
+- **`gke-l7-global-external-managed` does accept a `certificateRefs` Secret from cert-manager.**
+  Previously listed as documented-but-unseen. `curl --cacert .cache/gcp-platform-ca.crt` against
+  the Gateway returned an HTTP status rather than a certificate error, which means the handshake
+  completed against the self-signed root — so Google ingested the Secret and served it.
+- **`make lint` renders `platform-ingress (gcp)`**, so the `addressFrom` branching and its guards
+  are exercised. That gap is closed.
+- **Both hostnames returned 404, and 404 is a different finding from 502.** A 502 means Google
+  matched a URL-map rule and the backend behind it failed; a **404 means no rule matched** — the
+  request reached the load balancer and was answered by its default backend, so the route never
+  became a rule. The section's HTTPRoute check could not tell those apart, because it counted
+  HTTPRoute *objects* and called the number "attached": a word it had not checked. HTTPRoutes are
+  perfectly happy to exist with no parent, so that count reads the same whether the routes are
+  serving, refused, or pointed at a Gateway that does not exist.
+- **The Gateway publishes the number that answers it:** `.status.listeners[].attachedRoutes`,
+  computed by the controller. The check now reads that, plus each route's per-parent `Accepted`
+  and `ResolvedRefs` conditions, and it re-reads the Gateway to do so — "is it programmed" and
+  "did routes attach" are different questions with different answers at the same instant, and at
+  the moment `Programmed` first goes `True` the attached count is routinely still 0.
+- **And the section now ends by sending a packet.** Everything above it reads Kubernetes objects,
+  and on 2026-11-02 every one of those was green while nothing served. The probe curls each route
+  hostname through the allocated address with the cluster CA, retries against one shared deadline
+  because the URL map propagates behind the Gateway's own status, and reports 2xx/3xx as working,
+  404 as routing, 5xx as the backend, and no connection at all as neither. **This is the first
+  check in this repository's cloud path that is not inference.**
+
 **A session now costs slightly more**, and the number should be said: a forwarding rule is roughly
 $0.025/hour, so ~₹2/hour on top of the ~₹3/hour for two spot nodes, two external IPs and 64 GB of
 pd-standard. An hour-long session is ~₹5 against ₹28,257 of trial credit. **It is also the first
@@ -177,21 +229,23 @@ remembering to run one command.
 **What is NOT verified, and this time the list is short but includes the render itself.** None of
 this has run. Specifically:
 
-- **The chart has not been rendered.** `helm` cannot be installed in the environment this was
-  written in — `get.helm.sh` is not reachable and npm's `helm-binary` package is a 1.7 KB
-  downloader for it — so the new `addressFrom` branching and guards are unexercised. `make lint`
-  renders every chart against every environment that deploys it, and now includes
-  `platform-ingress (gcp)`, so **the first `make lint` on the laptop is what proves the template**.
-  That is a real gap, stated rather than hidden: three of the last session's bugs were in checks
+- ~~**The chart has not been rendered.**~~ **VERIFIED 2026-11-02** — `make lint` renders
+  `platform-ingress (gcp)` clean on the laptop, so the `addressFrom` branching and its two
+  refusal guards are exercised. The gap was real while it lasted: `helm` cannot be installed in
+  the environment this was written in (`get.helm.sh` is not reachable and npm's `helm-binary`
+  package is a 1.7 KB downloader for it), and three of the previous session's bugs were in checks
   that had never been run.
 - That `gateway_api_config` is an in-place update rather than a replacement. It does not much
   matter — the cluster is destroyed every session — but a plan saying `forces replacement` is
   worth reading rather than approving.
-- That `gke-l7-global-external-managed` accepts a `certificateRefs` Secret from cert-manager. It
-  is documented to; it has not been seen to.
-- That the HTTPRoute to `shopverse-frontend:8080` works through a Google ALB, which inserts a
-  health check the on-prem path does not have. **A failing health check is the most likely single
-  cause of a Programmed Gateway that returns 502**, and the backend is nginx serving `/`.
+- ~~That `gke-l7-global-external-managed` accepts a `certificateRefs` Secret from cert-manager.~~
+  **VERIFIED 2026-11-02** — the handshake completed against the exported CA, as recorded above.
+- That the HTTPRoute to `shopverse-frontend:8080` **serves** through a Google ALB, which inserts a
+  health check the on-prem path does not have. Still open, and the 404 above is not evidence
+  either way: a 404 is answered *before* any backend is consulted, so nothing has yet reached the
+  health check. **A failing health check is the most likely single cause of a Programmed Gateway
+  that returns 502**, and the backend is nginx serving `/` — so a 502 on the next run would be
+  progress, not a regression.
 - That `make shopverse-check` passes against it. It still has no GCP counterpart: it wants the CA
   and the hostnames, which now both exist here, so porting it is the obvious next piece of work
   and is no longer blocked on a decision.

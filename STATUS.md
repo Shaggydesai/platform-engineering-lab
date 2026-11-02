@@ -35,11 +35,13 @@ and verified**. The tenant and the ingress decision are **written but never run*
 | **GCP secret backend** | **APPLIED and verified, 2026-11-01.** `terraform/gcp/secrets` — a service account, `secretAccessor` **on the secret not the project**, a Workload Identity binding, and ONE Secret Manager secret holding all six credentials as JSON. All six seeded and hash-matched on the round trip; `make gcp-secrets-verify` passes 5/5. **This is the first GCP resource that deliberately stays up between sessions**, at ₹0 |
 | **The portability claim, settled** | ShopVerse's own ExternalSecret uses **one `remoteKey` + six `property` lookups**, so the tenant's manifest is identical on both substrates and ONE value differs: `shopverse/prod` → `shopverse-prod`. The slash is the whole difference, forced by Secret Manager IDs matching `[A-Za-z0-9_-]+` (ADR-0018 amendment) |
 | **GCP secret cost** | **₹0, at one version of six free.** Secret Manager bills $0.06/version/month above six; one JSON secret uses one. Watched in **two** places now: `gcp-secrets-verify` fails at seven, and `make cost-check` counts versions per project **and account-wide** — because 4 + 4 across two projects is 8 against a billing-account quota and every per-project line would read clean. **Disabling a version is not enough — it must be destroyed** |
-| **ShopVerse on GKE** | **run, and it failed usefully.** `resource :Namespace is not permitted in project tenants` — a tenant may not create its own namespace, and `CreateNamespace=true` had been asking for exactly that on BOTH substrates since Module 06. It never failed on-prem because `make shopverse-secret` created the namespace by hand first. **Fixed on both**: the namespace is a platform-owned manifest in sync wave -20, no finalizer, `prune: false`. Not yet re-run (ADR-0016 correction) |
+| **ShopVerse on GKE** | **run, and it failed usefully.** `resource :Namespace is not permitted in project tenants` — a tenant may not create its own namespace, and `CreateNamespace=true` had been asking for exactly that on BOTH substrates since Module 06. It never failed on-prem because `make shopverse-secret` created the namespace by hand first. **Fixed on both**: the namespace is a platform-owned manifest in sync wave -20, no finalizer, `prune: false`. **Re-run 2026-11-02: it works** — the namespace carries `argocd.argoproj.io/tracking-id` starting `tenant-namespaces:`, and `shopverse` is Synced/Healthy. A manual step was masking a design error, and removing the manual step is what found it |
 | **An on-prem hole this exposed** | `shopverse-prod` on the laptop has been **unmanaged by Argo CD for five modules** — created by hand, never in Git, a quiet ADR-0002 Rule 3 violation. A namespace is invisible once it exists, so there was no symptom. The next on-prem sync adopts it |
-| **ShopVerse on GKE, as written** | **written, never run.** Same chart, same commit, same seven images; `gitops/environments/gcp/shopverse.yaml` + `gitops/clusters/gcp/apps/shopverse.yaml` + a third seam file. **Four values differ and two of them are the same text** — `ingress: false` is a no-op on-prem and a standing charge here; `storageClass: ""` is a node-local directory there and a network Persistent Disk here (ADR-0016 amendment) |
+| **ShopVerse on GKE, as written** | **run and working, 2026-11-02** — all 8 pods Running across both nodes, the volume Bound on `standard-rwo`, the six keys delivered by External Secrets. Same chart, same commit, same seven images; `gitops/environments/gcp/shopverse.yaml` + `gitops/clusters/gcp/apps/shopverse.yaml` + a third seam file. **Four values differ and two of them are the same text** — `ingress: false` is a no-op on-prem and a standing charge here; `storageClass: ""` is a node-local directory there and a network Persistent Disk here (ADR-0016 amendment) |
 | **The `tenants` AppProject** | **travelled unedited.** Its destinations name `shopverse-*` and the in-cluster address, so the boundary ports: no cluster-scoped resources, no ResourceQuota/LimitRange/NetworkPolicy even in the tenant's own namespace |
-| **GCP ingress** | **written, never run** (ADR-0021). GKE Gateway API, class `gke-l7-global-external-managed`, TLS from `platform-ca`, both HTTPRoutes on. **Same Gateway, same listeners, same routes as on-prem — two values differ**: the GatewayClass, and where the address comes from |
+| **GCP ingress** | **run; the load balancer serves TLS, the routing does not work yet** (ADR-0021). Gateway `Programmed=True`, address allocated, two forwarding rules billing, and **a Google ALB verifiably accepts a cert-manager Secret** — `curl --cacert` completed its handshake. But both hostnames answer **404**, which means Google matched no URL-map rule and the routes never became rules. **Same Gateway, same listeners, same routes as on-prem — two values differ**: the GatewayClass, and where the address comes from |
+| **The check was the bug, three times** | `[fail] Gateway is Programmed=<absent>` on a working load balancer — this project's **first false negative**. Diagnosis 1 ("GKE writes `Ready`") was disproved by `Programmed=True` three minutes later; diagnosis 2 ("the address is the assertion") was disproved by the same run's own output, since GKE reserves the IP *first* and programs the data path after. The real cause: **no wait**, a transient state read once — second instance after the ESO store in backoff. And `[ ok ] 2 HTTPRoute(s) attached` counted **objects**, not `.status.listeners[].attachedRoutes`: third instance of counting what exists instead of asking whether it took effect |
+| **`make gcp-smoke` now sends a packet** | it waits 300s for `Programmed`/`Ready`, reads the controller's own `attachedRoutes` and each route's `Accepted`/`ResolvedRefs` reasons, then **curls each hostname** through the address with the cluster CA (which it exports itself rather than telling you to run `make gcp-ca`). 2xx/3xx working, **404 routing, 5xx backend** — the first check in the cloud path that is not inference |
 | **The address is an allocation** | On-prem `.200` is a *choice* written in nodes.json. On GKE the LB is **given** an address, a different one each session, and pinning it means reserving a static IP that GCP bills **while unattached** — so the address moves and the names follow it. `make gcp-address` |
 | **The one ordering with money on it** | A GKE Gateway creates Google LB resources **Terraform never made and has no record of**. `make gcp-down` now deletes the ingress Application and waits for the forwarding rule to go **before** destroying the cluster — because destroying the cluster first removes the controller that would clean up. It proceeds anyway on timeout, in red, and `cost-check` lists them |
 | **GCP session cost** | **~₹5/hour** now: ~₹3 for 2 spot nodes + 2 external IPs + 64 GB pd-standard, plus ~₹2 for the load balancer's forwarding rule |
@@ -89,37 +91,48 @@ re-apply is gone.
 
 ## The next action
 
-**One cluster session, and it is the one that finishes Module 08.** Everything for the module is
-now written; nothing since last night's run has touched a cluster. The secret backend is already
-applied and stays up at ₹0, so this starts at `gcp-up`:
+**One cluster session, and it has one open question: why both hostnames return 404.** Everything
+else in Module 08 has now run on a live cluster — 8 Applications Synced/Healthy, all 8 tenant pods
+Running on `e2-standard-2`, MongoDB's volume Bound on a Persistent Disk, the six keys written by
+External Secrets through Workload Identity, the namespace adopted by Argo CD, the Gateway
+`Programmed=True` with an allocated address and two HTTPRoutes. What does not work is the last
+hop: `curl` to `shopverse.platform.local` and `argocd.platform.local` both answer **404**.
 
 ```bash
 git pull
-make lint                 # FIRST - it is what renders platform-ingress (gcp), which I could not
-make gcp-up               # the cluster now also enables Gateway API. READ the plan once.
-make gcp-kubeconfig
+make lint
+make gcp-up               # READ the plan once
+make gcp-kubeconfig       # DO NOT SKIP - gcp-smoke cannot reach the cluster without it
 make gcp-argocd
-make gitops-status CTX=gcp-platform    # wait for 7 apps; the Gateway takes MINUTES
-make gcp-address          # the address the cloud chose, and the curl lines to match
-make gcp-smoke
-make gcp-down && make cost-check       # the ingress now comes down BEFORE the cluster
+make gitops-status CTX=gcp-platform    # wait for 8 apps; the Gateway takes MINUTES
+make gcp-smoke                         # this is the diagnostic now - it waits, then curls
+make gcp-down && make cost-check       # the ingress comes down BEFORE the cluster
 ```
 
-**Run `make lint` before anything else.** `helm` cannot be installed in the environment the chart
-change was written in, so the new `gateway.addressFrom` branching has never been rendered. Lint
-renders every chart against every environment that deploys it and now includes
-`platform-ingress (gcp)` — it is the only thing standing between a template typo and a cluster.
+**`make gcp-smoke` is the whole of this run.** Three things it does that it did not do last time,
+each because it got the previous answer wrong:
 
-**What this run settles**, which is everything left on three ADRs' unverified lists:
+1. **It waits for the Gateway** — up to 300s on the conditions, breaking on `Programmed=True`.
+   The previous version read a transient state once and failed a working load balancer, and the
+   two diagnoses before that one were both wrong (ADR-0021's correction section, parking lot).
+2. **It asks the controller whether the routes attached**, via
+   `.status.listeners[].attachedRoutes` and each route's `Accepted`/`ResolvedRefs` reasons. The
+   old check counted HTTPRoute *objects* and printed "attached", which reads the same whether the
+   routes are serving, refused, or parented to nothing.
+3. **It sends a packet.** A `curl` per hostname through the allocated address with the cluster CA,
+   retried against one shared deadline because the URL map propagates behind the Gateway's own
+   status. 2xx/3xx is working, **404 is routing, 5xx is the backend** — and that distinction is
+   the diagnosis, because a 404 is answered before any backend is consulted.
 
-- the namespace fix (ADR-0016's correction) — the tenant should now sync
-- the last ESO unknown — whether gcpsm resolves `property` against a JSON payload, which only a
-  resolving ExternalSecret can answer
-- the whole of ADR-0021: that the Gateway programs, that a Google ALB accepts a cert-manager
-  Secret, and that an HTTPRoute to `shopverse-frontend:8080` survives the ALB's health check —
-  **the most likely single cause of a Programmed Gateway returning 502**
+**A 502 on this run would be progress**, not a regression: it would mean the URL map matched and
+the ALB's health check is failing on the NEG, which is a backend problem with a different fix.
 
-Cost ~**₹5/hour** now, the load balancer included. Expect ~15 minutes of waiting.
+**The suspects for the 404, in order:** URL-map propagation lag, since the failing curls ran ~3
+minutes after `Programmed` went True; then `sectionName: https` or a listener-hostname mismatch
+against `*.platform.local`; then `allowedRoutes.namespaces.from: All`, which the chart does set —
+so that one would be GKE disagreeing with the manifest rather than the manifest being wrong.
+
+Cost ~**₹5/hour**, the load balancer included. Expect ~15 minutes of waiting.
 
 ### And on-prem, whenever those VMs are next up
 
@@ -133,12 +146,24 @@ That closes the parking-lot entry about a namespace nothing in Git has managed f
 
 ### Also still open in Module 08
 
-- **ShopVerse on GKE**, which External Secrets above unblocks. It is also what makes the
-  NetworkPolicy fix provable: `ADVANCED_DATAPATH` is confirmed by reading the control plane, but
-  no packet has been blocked on this cluster, because there is no tenant to write a policy about.
-- **Ingress.** No Application, on purpose: a `type=LoadBalancer` Service here bills monthly, which
-  ADR-0003 forbids leaving running. GKE Gateway is a different implementation of the same contract
-  and deserves its own module rather than a corner of this one.
+- ~~**ShopVerse on GKE.**~~ **DONE 2026-11-02** — all 8 pods Running, the volume Bound, the six
+  keys delivered. What it unblocked rather than finished is the NetworkPolicy proof: there is now
+  a tenant to write a policy about, so **`make netpol-check` has a GCP counterpart to port** —
+  `ADVANCED_DATAPATH` is still confirmed only by reading the control plane, and no packet has been
+  blocked on this cluster. The one rule that cannot be written once for three substrates is "allow
+  the ingress layer in", because the source is Cilium Envoy as `reserved:host` on-prem and a
+  Google-owned range here.
+- ~~**Ingress.**~~ **DONE, with the last hop open** — ADR-0021 shipped a GKE Gateway rather than a
+  `type=LoadBalancer` Service, which is what keeps ADR-0003 satisfied: the forwarding rule bills
+  hourly while it exists, so `make gcp-down` deletes the Application and waits for the rules to go
+  *before* destroying the cluster. The Gateway programs and serves TLS from the cluster's own CA;
+  what does not work is routing, and that is the 404 above.
+- **`make shopverse-check` has no GCP counterpart.** It hardcodes the on-prem `nodes.json` and the
+  on-prem CA path, both of which now have GCP equivalents (`clusters/gcp/cluster.json`,
+  `.cache/gcp-platform-ca.crt`), so porting it is a real task. It is also the only thing that would
+  prove the storefront *serves* rather than merely answers — it registers a user, fills a cart,
+  checks out, deletes MongoDB and confirms the order survived. **Blocked on the 404**, since every
+  step of it is an HTTP request through the Gateway.
 - **The ACME ClusterIssuer is cancelled, not deferred.** The overlay promised publicly trusted
   certificates via DNS-01 against Cloud DNS. That needs a public zone (~$0.20/month — a standing
   charge ADR-0003 forbids) and a domain this project does not own. cert-manager is installed and
