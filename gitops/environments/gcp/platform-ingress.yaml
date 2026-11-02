@@ -1,27 +1,130 @@
-# Ingress, gcp — everything off.
+# Ingress, gcp. The same Gateway, the same listeners, the same HTTPRoutes - a different
+# implementation underneath and a different relationship to its own address.
 #
-# Not "not yet configured": off on purpose, and the overlay exists saying so rather than being
-# absent, so that a missing file never has to be read as either.
+# THIS FILE REVERSES WHAT IT USED TO SAY, and the old text is worth quoting because the reason it
+# was wrong is the useful part:
 #
-# On GKE a type=LoadBalancer Service is fulfilled by a Google network load balancer, which the cloud
-# provisions and announces itself. An address pool here would claim addresses the provider also
-# believes it owns, and L2 announcements would ARP for them on a network that does not carry
-# L2 between nodes in the first place.
+#     "Ingress, gcp - everything off. Not 'not yet configured': off on purpose [...] On GKE a
+#      type=LoadBalancer Service is fulfilled by a Google network load balancer, which the cloud
+#      provisions and announces itself. An address pool here would claim addresses the provider
+#      also believes it owns [...]"
 #
-# This is the point of the three-substrate comparison in ADR-0001, and the most useful thing in
-# this file is the contrast: on-prem, getting one address to answer took a pool, an announcement
-# policy, a beta feature and an ADR. Here it is a field on a Service - and the bill arrives
-# monthly, which is why ADR-0003 forbids leaving one running.
+# Everything in that paragraph is still true and none of it was an argument for having no ingress.
+# It was an argument against the on-prem MECHANISM - the LB-IPAM pool and the L2 announcement -
+# which stay off below. The Gateway, which is the actual contract, ports (ADR-0021).
+#
+# WHAT IS IDENTICAL TO ON-PREM, and it is more than expected: the Gateway object, both listeners,
+# the wildcard hostname, TLS terminating at the Gateway with a cert-manager Certificate from
+# `platform-ca`, `allowedRoutes.namespaces.from: All`, and every HTTPRoute including the tenant's.
+# The GatewayClass and where the address comes from are the only two things that differ.
+
+# ---------------------------------------------------------------- the on-prem mechanism, off
 loadBalancer:
+  # No address pool. The cloud owns its own addresses, and a pool here would claim ones the
+  # provider also believes it owns.
   enabled: false
+
 l2:
+  # No ARP announcement. The provider announces its own load balancer, and L2 between nodes may
+  # not exist in the first place.
   enabled: false
+
+# ---------------------------------------------------------------- the Gateway, on
 gateway:
-  enabled: false
+  enabled: true
+
+  # GKE'S GLOBAL EXTERNAL APPLICATION LOAD BALANCER, and the choice between this and the regional
+  # class is the one decision in this file that is not forced.
+  #
+  #   gke-l7-global-external-managed     chosen. A global anycast frontend, no extra VPC resource.
+  #   gke-l7-regional-external-managed   rejected, and NOT for performance: a regional external
+  #                                      ALB requires a PROXY-ONLY SUBNET in the VPC - a second
+  #                                      subnet with purpose REGIONAL_MANAGED_PROXY - and without
+  #                                      it the Gateway is accepted and never programs. The subnet
+  #                                      itself is free; it is one more thing that must exist, in
+  #                                      a resource whose `purpose` field is easy to get wrong,
+  #                                      and its absence is a classic "the Gateway never came up"
+  #                                      cause.
+  #
+  # Fewer moving parts wins on a substrate that is rebuilt every session. The trade is honest and
+  # small: a global forwarding rule and a regional one are billed in the same band, and nothing
+  # here measures latency.
+  className: gke-l7-global-external-managed
+
+  # PROVIDER, not pinned - the single most interesting line in this file.
+  #
+  # On-prem an address is a CONFIGURATION CHOICE: ADR-0013 picked 192.168.100.200 out of a range
+  # this project owns, wrote it in nodes.json, and it does not move between rebuilds. Here it is
+  # an ALLOCATION: the load balancer is given a public address when it is created, a DIFFERENT one
+  # each session, and reports it back in `status.addresses`.
+  #
+  # Pinning it would mean reserving a static external address - which GCP bills while it is NOT
+  # attached to anything, i.e. in exactly the state this lab spends most of its life in. ADR-0003
+  # forbids a standing charge however small, so the address moves and the name follows it:
+  #
+  #     make gcp-address      prints the current one and the hosts lines to match
+  #
+  # The chart refuses the incoherent combinations: "provider" with an address set is rejected at
+  # render time rather than silently ignored by the cloud.
+  addressFrom: provider
+
+  hostname: "gw.platform.local"
+  wildcardHostname: "*.platform.local"
+
+# ---------------------------------------------------------------- TLS, and a reversal
 certificate:
-  enabled: false
+  # ON, from `platform-ca` - the same self-signed root the on-prem cluster uses, and a REVERSAL of
+  # what gitops/environments/gcp/cert-manager.yaml originally planned.
+  #
+  # That file said this substrate would use an ACME ClusterIssuer with DNS-01 against Cloud DNS,
+  # and get publicly trusted certificates no browser has to be told about. It cannot: DNS-01 needs
+  # a public DNS zone (a Cloud DNS managed zone is a standing charge, which ADR-0003 forbids
+  # outright) and a domain this project does not own. That was recorded as cancelled rather than
+  # deferred in ADR-0018's amendment.
+  #
+  # So the honest options for TLS here were: a self-signed root, or no TLS at all.
+  #
+  # Self-signed wins, and the reason is the contract rather than the cryptography. With it, TLS
+  # terminates at the Gateway on BOTH substrates, the Certificate object is identical, the renewal
+  # path is identical, and the one difference is who has imported the CA. Without it, the GCP
+  # Gateway would be HTTP-only and "the platform terminates TLS at the edge" would be true in one
+  # place and false in another - which is exactly the kind of quiet divergence ADR-0001 exists to
+  # catch.
+  #
+  # WHAT IT COSTS, stated rather than glossed: a browser pointed at this load balancer gets a
+  # certificate warning, from a public address. That is the honest consequence of a private CA and
+  # not a misconfiguration - `make gcp-ca` exports the root so curl can verify it. A publicly
+  # trusted certificate on this substrate needs a domain name, and buying one is a decision about
+  # money rather than about Kubernetes.
+  enabled: true
+  issuerName: platform-ca
+
+# ---------------------------------------------------------------- the routes
+#
+# BOTH ON, and the tenant's route is the one that matters: it is the same HTTPRoute, in the same
+# namespace, pointing at the same service on the same port, attached to a Gateway with a different
+# implementation. Nothing in gitops/charts/platform-ingress/templates/httproutes.yaml is
+# substrate-aware.
 routes:
   argocd:
-    enabled: false
+    enabled: true
+    hostname: "argocd.platform.local"
+    namespace: argocd
+    routeName: argocd-server
+    serviceName: argocd-server
+    servicePort: 80
+    gatewayName: platform
+    gatewayNamespace: platform-ingress
+
   shopverse:
-    enabled: false
+    enabled: true
+    hostname: "shopverse.platform.local"
+    # The namespace the platform GRANTED the tenant (ADR-0016's correction) - a route must live
+    # beside its backend, or its backendRef crosses namespaces and needs a ReferenceGrant.
+    namespace: shopverse-prod
+    serviceName: shopverse-frontend
+    # 8080, not 80. Every service in the tenant's chart listens on 8080, hardcoded in its own
+    # template rather than taken from values.
+    servicePort: 8080
+    gatewayName: platform
+    gatewayNamespace: platform-ingress

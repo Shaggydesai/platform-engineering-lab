@@ -37,7 +37,10 @@ and verified**. The tenant and the ingress decision are **written but never run*
 | **An on-prem hole this exposed** | `shopverse-prod` on the laptop has been **unmanaged by Argo CD for five modules** — created by hand, never in Git, a quiet ADR-0002 Rule 3 violation. A namespace is invisible once it exists, so there was no symptom. The next on-prem sync adopts it |
 | **ShopVerse on GKE, as written** | **written, never run.** Same chart, same commit, same seven images; `gitops/environments/gcp/shopverse.yaml` + `gitops/clusters/gcp/apps/shopverse.yaml` + a third seam file. **Four values differ and two of them are the same text** — `ingress: false` is a no-op on-prem and a standing charge here; `storageClass: ""` is a node-local directory there and a network Persistent Disk here (ADR-0016 amendment) |
 | **The `tenants` AppProject** | **travelled unedited.** Its destinations name `shopverse-*` and the in-cluster address, so the boundary ports: no cluster-scoped resources, no ResourceQuota/LimitRange/NetworkPolicy even in the tenant's own namespace |
-| **GCP storefront** | **not reachable, on purpose.** An Ingress object here WOULD work and would bill a Google load balancer by the hour. Port-forward until the ingress decision is made — ADR-0003 forbids *leaving* an LB running, not creating one |
+| **GCP ingress** | **written, never run** (ADR-0021). GKE Gateway API, class `gke-l7-global-external-managed`, TLS from `platform-ca`, both HTTPRoutes on. **Same Gateway, same listeners, same routes as on-prem — two values differ**: the GatewayClass, and where the address comes from |
+| **The address is an allocation** | On-prem `.200` is a *choice* written in nodes.json. On GKE the LB is **given** an address, a different one each session, and pinning it means reserving a static IP that GCP bills **while unattached** — so the address moves and the names follow it. `make gcp-address` |
+| **The one ordering with money on it** | A GKE Gateway creates Google LB resources **Terraform never made and has no record of**. `make gcp-down` now deletes the ingress Application and waits for the forwarding rule to go **before** destroying the cluster — because destroying the cluster first removes the controller that would clean up. It proceeds anyway on timeout, in red, and `cost-check` lists them |
+| **GCP session cost** | **~₹5/hour** now: ~₹3 for 2 spot nodes + 2 external IPs + 64 GB pd-standard, plus ~₹2 for the load balancer's forwarding rule |
 | **GCP idempotency** | **established, 2026-11-01.** Two consecutive `make gcp-argocd` runs: `ok=24 changed=2`, then **`ok=22 changed=0`**. The gate every other module passed now holds on this substrate too |
 | **Workload Identity** | **works.** The ServiceAccount carries the annotation and `ClusterSecretStore/vault-backend` is Ready — which settled three of ADR-0018's four unknowns at once, including the subtle one (Helm ignores an unknown values path silently, so "I set it" and "it took effect" needed a cluster to distinguish) |
 | **GCP costs while up** | **~₹3/hour** — 2 spot nodes, 2 external IPv4, 64 GB pd-standard. ~₹70 if left overnight. `make gcp-down` ends it; `make cost-check` proves it |
@@ -84,33 +87,47 @@ re-apply is gone.
 
 ## The next action
 
-**One cluster session, which now settles everything written since the last one.** The secret
-backend is applied and ₹0 and stays up, so this starts at `gcp-up`:
+**One cluster session, and it is the one that finishes Module 08.** Everything for the module is
+now written; nothing since last night's run has touched a cluster. The secret backend is already
+applied and stays up at ₹0, so this starts at `gcp-up`:
 
 ```bash
-make gcp-up && make gcp-kubeconfig
-make gcp-argocd           # and AGAIN, to see changed=0 - the gate ADR-0020 left open
-make gcp-smoke            # Layer 2, the WI annotation, the store, AND the tenant
-make gcp-down && make cost-check
+git pull
+make lint                 # FIRST - it is what renders platform-ingress (gcp), which I could not
+make gcp-up               # the cluster now also enables Gateway API. READ the plan once.
+make gcp-kubeconfig
+make gcp-argocd
+make gitops-status CTX=gcp-platform    # wait for 7 apps; the Gateway takes MINUTES
+make gcp-address          # the address the cloud chose, and the curl lines to match
+make gcp-smoke
+make gcp-down && make cost-check       # the ingress now comes down BEFORE the cluster
 ```
 
-**Read `gcp-smoke`'s output in order, because the order is the diagnosis.** It checks the
-ClusterSecretStore and the six-key Secret *before* it looks at pods — a tenant pod whose
-`secretKeyRef` names a missing Secret stays Pending and reads exactly like a capacity problem on
-two e2-medium nodes.
+**Run `make lint` before anything else.** `helm` cannot be installed in the environment the chart
+change was written in, so the new `gateway.addressFrom` branching has never been rendered. Lint
+renders every chart against every environment that deploys it and now includes
+`platform-ingress (gcp)` — it is the only thing standing between a template typo and a cluster.
 
-**The four things only a cluster can settle** (ADR-0018's amendment lists them): that the gcpsm
-provider resolves `property` against a JSON payload; that `clusterLocation` accepts a zone; that
-the Workload Identity binding resolves; and — the subtle one — that the overlay's
-`serviceAccount.annotations` path reaches the subchart at all. The ESO chart's own values file
-warns that **Helm silently ignores an unknown values path**, so a wrong path renders a valid
-ServiceAccount with no annotation, Workload Identity is simply off, and the symptom is a 403 that
-reads like a missing IAM role. `make gcp-smoke` reads the annotation off the live ServiceAccount,
-which is the only thing that can tell "I set it" from "it took effect".
+**What this run settles**, which is everything left on three ADRs' unverified lists:
 
-Cost: roughly **₹3–6** for an hour-ish sitting (2 spot nodes, 2 external IPv4, 64 GB
-pd-standard), against ₹28,257 of trial credit. Measured over two full build/destroy cycles on
-2026-11-01. The secret backend itself is ₹0 and stays up between sessions.
+- the namespace fix (ADR-0016's correction) — the tenant should now sync
+- the last ESO unknown — whether gcpsm resolves `property` against a JSON payload, which only a
+  resolving ExternalSecret can answer
+- the whole of ADR-0021: that the Gateway programs, that a Google ALB accepts a cert-manager
+  Secret, and that an HTTPRoute to `shopverse-frontend:8080` survives the ALB's health check —
+  **the most likely single cause of a Programmed Gateway returning 502**
+
+Cost ~**₹5/hour** now, the load balancer included. Expect ~15 minutes of waiting.
+
+### And on-prem, whenever those VMs are next up
+
+```bash
+make onprem-argocd        # tenant-namespaces adopts shopverse-prod
+make smoke                # now 8 checks - the 8th is the adoption
+```
+
+That closes the parking-lot entry about a namespace nothing in Git has managed for five modules.
+`make smoke` fails loudly if the adoption has not happened, which is the point.
 
 ### Also still open in Module 08
 

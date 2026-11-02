@@ -417,6 +417,53 @@ gcp-up: _no-stray-flags _gcp-preflight ## Build the zonal GKE cluster (REFUSES w
 
 .PHONY: gcp-down
 gcp-down: _no-stray-flags _gcp-preflight ## Destroy the GKE cluster, then prove nothing is left
+# THE INGRESS COMES DOWN FIRST, AND THIS IS THE ONE ORDERING IN THIS REPOSITORY WITH MONEY ON IT.
+#
+# The Gateway is reconciled by the GKE controller into a Google global external Application Load
+# Balancer - a forwarding rule, a target proxy, a URL map, a backend service, a health check and
+# a NEG per backend. TERRAFORM DID NOT CREATE ANY OF THEM AND HAS NO RECORD OF THEM. Destroying
+# the cluster destroys the controller that owns them, which is the opposite of destroying them:
+# the thing that would clean up is removed first, and GKE's cluster-delete cleanup is documented
+# as best-effort for load balancers rather than guaranteed.
+#
+# So: delete the Application, let its finalizer cascade to the Gateway, and WAIT for GCP to
+# report the forwarding rule gone. Then destroy the cluster. ADR-0021.
+#
+# This is deliberately best-effort and non-fatal. A cluster that is already gone, a kubeconfig
+# that no longer resolves, or an Argo CD that was never installed must not stop a teardown -
+# refusing to destroy a billable cluster because a cleanup step could not run would be the exact
+# inversion of the point. Whatever happens here, cost-check below is the actual answer.
+	@set -u; \
+	if kubectl config get-contexts -o name 2>/dev/null | grep -qx gcp-platform \
+	   && kubectl --context gcp-platform -n argocd get application platform-ingress >/dev/null 2>&1; then \
+	  printf '==> taking the load balancer down BEFORE the cluster\n'; \
+	  printf '    the Gateway is a Google load balancer that terraform never created, so\n'; \
+	  printf '    destroying the cluster first removes the controller that would clean it up\n\n'; \
+	  kubectl --context gcp-platform -n argocd delete application platform-ingress \
+	    --wait=true --timeout=180s 2>&1 | sed 's/^/    /' || \
+	    printf '    %bcould not delete the Application - continuing, cost-check is the check%b\n' '\033[33m' '\033[0m'; \
+	  proj=$$(jq -r '.project_id' clusters/gcp/cluster.json); \
+	  printf '\n    waiting for the forwarding rule to disappear from GCP\n'; \
+	  gone=no; \
+	  for i in $$(seq 1 30); do \
+	    n=$$(timeout 30 gcloud compute forwarding-rules list --project="$$proj" \
+	           --format='value(name)' 2>/dev/null | grep -c . || true); \
+	    if [ "$$n" = "0" ]; then gone=yes; break; fi; \
+	    printf '    %s forwarding rule(s) still there (%ss)\n' "$$n" "$$((i * 10))"; \
+	    sleep 10; \
+	  done; \
+	  if [ "$$gone" = yes ]; then \
+	    printf '    %bno forwarding rules left - the load balancer is gone%b\n\n' '\033[32m' '\033[0m'; \
+	  else \
+	    printf '\n    %bforwarding rules are STILL present after 5 minutes%b\n' '\033[31m' '\033[0m'; \
+	    printf '    Destroying the cluster now may ORPHAN them, and an orphaned forwarding rule\n'; \
+	    printf '    is billed hourly forever. cost-check at the end of this run will list them\n'; \
+	    printf '    with the command to remove each one. DO NOT skip reading it.\n\n'; \
+	  fi; \
+	else \
+	  printf '==> no platform-ingress Application to take down first\n'; \
+	  printf '    %snothing created a load balancer, so there is nothing to orphan%s\n\n' '' ''; \
+	fi
 	@cd $(GCP_TF) && terraform destroy
 # cost-check runs REGARDLESS of what destroy reported, which is the point of having it.
 # `terraform destroy` succeeding means Terraform removed what it knew about - it says nothing
@@ -537,6 +584,70 @@ gcp-secrets-destroy: _no-stray-flags _gcp-preflight ## Destroy the secret backen
 	@printf 'this disk. That is recoverable (reseed, and let ShopVerse build a fresh database) but\n'
 	@printf 'it is NOT recoverable if anything on GKE is holding data you want to keep.\n\n'
 	@cd $(GCP_SECRETS_TF) && terraform destroy
+
+.PHONY: gcp-address
+gcp-address: ## What address did the cloud give the Gateway, and the hosts lines to match
+# ON-PREM THIS TARGET WOULD BE POINTLESS, which is the whole content of ADR-0021's address
+# finding. There the address is written in clusters/onprem/nodes.json, pinned in the overlay, and
+# `make hosts` writes it from the file. It is a configuration choice and it does not move.
+#
+# Here it is an ALLOCATION: the load balancer is given a public address when it is created, a
+# different one every session, and the only place that fact exists is the live Gateway's status.
+# Pinning it would mean reserving a static address, which GCP bills while unattached - so the
+# address moves and the name follows it.
+#
+# THE HOSTNAMES COME FROM THE GCP OVERLAY, not from clusters/onprem/nodes.json. The first version
+# of this target read the on-prem file - the names are currently the same on both substrates, so
+# it would have worked and been wrong, which is the same category error that moved the Argo CD
+# pins to clusters/platform.json. A GCP target that reads an on-prem file is one divergence away
+# from printing instructions for the wrong cluster.
+	@set -eu; \
+	addr=$$(kubectl --context gcp-platform -n platform-ingress get gateway platform \
+	          -o jsonpath='{.status.addresses[0].value}' 2>/dev/null || true); \
+	if [ -z "$$addr" ]; then \
+	  printf '\033[33mthe Gateway has no address yet\033[0m\n\n'; \
+	  prog=$$(kubectl --context gcp-platform -n platform-ingress get gateway platform \
+	            -o jsonpath='{.status.conditions[?(@.type=="Programmed")].status}/{.status.conditions[?(@.type=="Programmed")].message}' 2>/dev/null || true); \
+	  printf 'Programmed: %s\n\n' "$${prog:-(no Gateway object at all)}"; \
+	  printf 'A global load balancer takes MINUTES to provision, not seconds - longer than\n'; \
+	  printf 'anything Cilium does on-prem. If it stays empty:\n'; \
+	  printf '  kubectl --context gcp-platform -n platform-ingress describe gateway platform\n'; \
+	  printf '  make gitops-status CTX=gcp-platform\n'; \
+	  exit 1; \
+	fi; \
+	printf 'Gateway address  \033[36m%s\033[0m\n\n' "$$addr"; \
+	printf 'It is EPHEMERAL - a different one next session (ADR-0021). The names are stable, so\n'; \
+	printf 'point them at it. In WSL:\n\n'; \
+	for h in $$(yq -r '[.gateway.hostname] + [.routes[].hostname] | .[] | select(. != null and . != "")' \
+	              gitops/environments/gcp/platform-ingress.yaml); do \
+	  printf '    %s  %s\n' "$$addr" "$$h"; \
+	done; \
+	printf '\n  sudo sed -i "/platform.local/d" /etc/hosts   # the on-prem lines point elsewhere\n'; \
+	printf '  # then append the lines above\n\n'; \
+	printf '%bOr skip the hosts file entirely, which is what I would do:%b\n' '\033[2m' '\033[0m'; \
+	printf '  make gcp-ca\n'; \
+	for h in $$(yq -r '[.routes[].hostname] | .[] | select(. != null and . != "")' \
+	              gitops/environments/gcp/platform-ingress.yaml); do \
+	  printf '  curl -sS --cacert .cache/gcp-platform-ca.crt --resolve %s:443:%s https://%s -o /dev/null -w "%%{http_code}\\n"\n' "$$h" "$$addr" "$$h"; \
+	done
+
+.PHONY: gcp-ca
+gcp-ca: ## Export the GKE cluster's internal CA so curl can verify the Gateway
+# A SECOND, DIFFERENT CA, and the file name says so on purpose.
+#
+# `make onprem-ca` writes .cache/platform-ca.crt. This writes .cache/gcp-platform-ca.crt, because
+# the two clusters each run their own cert-manager and each generated its own self-signed root
+# (ADR-0011's design, applied twice). Same chart, same ClusterIssuer name, same wildcard - two
+# unrelated keys. Using the wrong file produces a verification error that reads like a broken
+# certificate rather than the wrong CA.
+	@mkdir -p .cache
+	@kubectl --context gcp-platform -n cert-manager get secret platform-ca-tls \
+	  -o jsonpath='{.data.ca\.crt}' | base64 -d > .cache/gcp-platform-ca.crt
+	@printf 'wrote .cache/gcp-platform-ca.crt\n\n'
+	@openssl x509 -in .cache/gcp-platform-ca.crt -noout -subject -enddate | sed 's/^/    /'
+	@printf '\nThis is NOT the same CA as .cache/platform-ca.crt. Two clusters, two roots.\n'
+	@printf 'A browser pointed at this Gateway will warn, from a public address, and that is the\n'
+	@printf 'honest consequence of a private CA rather than a misconfiguration (ADR-0021).\n'
 
 .PHONY: gcp-smoke
 gcp-smoke: ## Read back what the GKE cluster actually is (nodes, datapath, metrics, the seam)

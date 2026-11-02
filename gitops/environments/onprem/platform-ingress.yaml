@@ -21,7 +21,18 @@ l2:
 
 gateway:
   enabled: true
+
+  # PINNED, which on this substrate costs nothing. ADR-0013 picked .200 out of a pool this
+  # project owns, and the address is therefore a configuration choice: it is written here, the
+  # workstation's hosts file points at it, and it does not move between rebuilds.
+  #
+  # Stated explicitly even though it is the chart's default, because the GCP overlay says
+  # `provider` and the pair of files is where the difference is legible. That difference is
+  # sharper than it looks - on GKE an address is an ALLOCATION, and pinning one means reserving
+  # a static address that GCP bills while unattached (ADR-0021).
+  addressFrom: pinned
   address: "192.168.100.200"
+
   hostname: "gw.platform.local"
   wildcardHostname: "*.platform.local"
 

@@ -1,0 +1,99 @@
+# Ingress for the GKE cluster: the Gateway, its serving certificate from the internal CA, and the
+# two HTTPRoutes. No address pool and no L2 announcement - the cloud owns its own addresses.
+#
+# Layer 3 (ADR-0002), and the layer boundary moved compared to on-prem in a way worth naming.
+# There, the CAPABILITY this depends on is Cilium's `gatewayAPI` and `l2announcements`, set in a
+# Helm value and applied by Ansible - Layer 1, because a value that changes how the CNI behaves
+# cannot be owned by the thing that needs the CNI working. Here the capability is
+# `gateway_api_config` on the cluster resource, set by Terraform - Layer 0. Same seam, one layer
+# further away from us, which is what "managed" keeps meaning on this substrate.
+#
+# THIS APPLICATION COSTS MONEY WHILE IT EXISTS, and it is the only one in this repository that
+# does. The Gateway is reconciled into a Google global external Application Load Balancer: a
+# forwarding rule, a target proxy, a URL map, a backend service, a health check and a network
+# endpoint group per backend. The forwarding rule is billed hourly.
+#
+# ADR-0003 forbids LEAVING a load balancer running, not creating one, so a session-scoped Gateway
+# is within the rules. What makes that true is the teardown ORDER, not good intentions: those
+# resources are created by the GKE controller, not by Terraform, so `terraform destroy` has no
+# record of them. `make gcp-down` deletes this Application and waits for the load balancer to go
+# before touching the cluster, and `make cost-check` lists forwarding rules precisely because this
+# is the shape of thing that gets orphaned (ADR-0021).
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-ingress
+  namespace: argocd
+  finalizers:
+    # THE FINALIZER IS LOAD-BEARING HERE IN A WAY IT IS NOT ELSEWHERE, and it is the opposite of
+    # the tenant-namespaces decision next door.
+    #
+    # There, the finalizer is deliberately absent because deleting a Namespace destroys everything
+    # inside it. Here it is deliberately present because deleting this Application MUST cascade:
+    # the Gateway is what the GKE controller watches, so removing the Gateway is what removes the
+    # load balancer. An orphaned Gateway object would keep a billed forwarding rule alive while
+    # looking, in Argo CD, like nothing is deployed.
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+
+  sources:
+    - repoURL: https://github.com/Shaggydesai/platform-engineering-lab.git
+      targetRevision: main
+      path: gitops/charts/platform-ingress
+      helm:
+        valueFiles:
+          - values.yaml
+          - $values/gitops/environments/gcp/platform-ingress.yaml
+
+    - repoURL: https://github.com/Shaggydesai/platform-engineering-lab.git
+      targetRevision: main
+      ref: values
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: platform-ingress
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      # CreateNamespace is fine HERE and was the bug in the tenant Application, which is worth
+      # keeping straight because the option is identical and the answer is not.
+      #
+      # This Application is in the `platform` project, whose clusterResourceWhitelist permits
+      # every cluster-scoped kind - so it may create its own namespace. The tenant is in
+      # `tenants`, which blacklists them all, and that is why the tenant's namespace is granted
+      # by a platform-owned manifest instead (ADR-0016's correction).
+      #
+      # The distinction is not about namespaces. It is about which project an Application sits in,
+      # and therefore what it is allowed to be.
+      - CreateNamespace=true
+    retry:
+      # The Certificate in wave 0 has to be issued before the Gateway in wave 1 is applied.
+      #
+      # And then the Gateway itself takes MINUTES rather than seconds on this substrate: Google
+      # has to provision a global load balancer, which is a slower thing than Cilium writing a
+      # Service. Argo CD will report the Application Healthy once the Gateway is Programmed; the
+      # retry budget here is for the sync, not for that wait.
+      limit: 10
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 5m
+
+  # No ignoreDifferences, and the reason differs from on-prem's.
+  #
+  # There, the Gateway's status is written by Cilium's operator and the Service it creates is a
+  # child object Cilium owns, so there is nothing for Argo CD to fight over. Here the GKE
+  # controller writes status and creates no Kubernetes child at all - the load balancer lives in
+  # GCP, outside the API server entirely. So there is even less to diff.
+  #
+  # WHAT TO WATCH FOR INSTEAD: the GKE Gateway controller adds annotations to the Gateway
+  # (networking.gke.io/*) recording the GCP resources it created. Those are status-like data in a
+  # metadata field, which is exactly the shape that produced the phantom seam diff on
+  # root-onprem.yaml. If a permanent OutOfSync appears on this Gateway, this comment is the first
+  # place to look, and the fix is a narrow ignoreDifferences naming those annotation keys - with
+  # the reason attached, never a blanket one.

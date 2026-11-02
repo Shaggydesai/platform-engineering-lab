@@ -33,11 +33,11 @@ cleanup() {
 trap cleanup EXIT
 kubectl create ns "$NS" >/dev/null
 
-echo "1/7 nodes Ready"
+echo "1/8 nodes Ready"
 kubectl wait --for=condition=Ready nodes --all --timeout=60s >/dev/null
 kubectl get nodes -o wide
 
-echo "2/7 scheduling on every node"
+echo "2/8 scheduling on every node"
 for n in $(kubectl get nodes -o jsonpath='{.items[*].metadata.name}'); do
   kubectl -n "$NS" run "p-${n##*-}" --image=nicolaka/netshoot --restart=Never \
     --overrides="{\"spec\":{\"nodeName\":\"$n\",\"tolerations\":[{\"operator\":\"Exists\"}]}}" \
@@ -45,7 +45,7 @@ for n in $(kubectl get nodes -o jsonpath='{.items[*].metadata.name}'); do
 done
 kubectl -n "$NS" wait --for=condition=Ready pod --all --timeout=120s >/dev/null
 
-echo "3/7 pod-to-pod across nodes (every ordered pair)"
+echo "3/8 pod-to-pod across nodes (every ordered pair)"
 # EVERY pair, not one. The first version of this test pinged pods[0] -> pods[1], which on a
 # three-node cluster happened to be control-plane -> worker, and never touched the
 # worker-to-worker path where real traffic actually lives. A tunnel can be broken in one
@@ -77,11 +77,11 @@ else
   echo "    $pairs of $pairs paths work"
 fi
 
-echo "4/7 cluster DNS"
+echo "4/8 cluster DNS"
 kubectl -n "$NS" exec "${pods[0]}" -- nslookup kubernetes.default.svc.cluster.local >/dev/null
 echo "    resolves"
 
-echo "5/7 Service routing"
+echo "5/8 Service routing"
 kubectl -n "$NS" create deploy web --image=nginx:alpine --replicas=2 >/dev/null
 kubectl -n "$NS" expose deploy web --port=80 >/dev/null
 kubectl -n "$NS" rollout status deploy/web --timeout=120s >/dev/null
@@ -119,7 +119,7 @@ probe backend  "http://$backend"
 probe clusterip "http://$clusterip"
 probe dns      "http://web.$NS.svc.cluster.local"
 
-echo "6/7 NodePort from every node"
+echo "6/8 NodePort from every node"
 # Added after a cluster passed all five checks above with NO NodePort implementation
 # whatsoever. kube-proxy had been deleted while every Cilium agent was still running
 # kubeProxyReplacement: false, so nothing served NodePort, externalIPs, HostPort, or
@@ -167,7 +167,7 @@ done < <(kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.
 echo "    $np_ok of $np_total nodes serve the NodePort"
 [[ $np_ok -eq $np_total ]]
 
-echo "7/7 LoadBalancer address, announced on the node network"
+echo "7/8 LoadBalancer address, announced on the node network"
 # Deliberately separate from the Gateway, and this ordering is the point.
 #
 # A Cilium Gateway's address goes through THREE things: LB-IPAM allocates it, the L2
@@ -226,6 +226,56 @@ else
       false
     fi
   fi
+fi
+
+echo
+echo "8/8 the tenant namespace is MANAGED, not merely present"
+# A RESOURCE EXISTING IS NOT THE SAME AS A RESOURCE BEING MANAGED, and nothing in this repository
+# checked that difference until 2026-11-01.
+#
+# `shopverse-prod` on this cluster was created BY HAND in Module 06 - `make shopverse-secret`
+# applied a Secret into it, which created the namespace as a side effect, before Argo CD ever
+# needed it. It was therefore not in Git and not managed by anything for five modules: a silent
+# violation of ADR-0002 Rule 3, with no symptom at all, because a namespace looks identical
+# whoever made it.
+#
+# It was found from the other substrate. On GKE there is no hand-made Secret - that is the entire
+# point of the GCP secret backend - so Argo CD had to create the namespace itself, and the
+# `tenants` AppProject correctly refused: a Namespace is cluster-scoped and a tenant may not
+# create one. The namespace is now granted by a platform-owned Application instead (ADR-0016's
+# 2026-11-01 correction), and THIS CHECK IS WHAT CONFIRMS THE ADOPTION ACTUALLY HAPPENED HERE.
+#
+# Argo CD records ownership in an ANNOTATION rather than a label on this platform, deliberately:
+# argocd-values.yaml sets application.resourceTrackingMethod to annotation, because the older
+# label-based default truncates at Kubernetes' 63-character limit and can make two resources look
+# like they belong to the same Application (ADR-0009 Decision 4).
+TENANT_NS=shopverse-prod
+if ! kubectl get ns "$TENANT_NS" >/dev/null 2>&1; then
+  # Not a failure of this cluster: the tenant is a Module 06 deliverable and `make smoke` is a
+  # Module 02 one, so a cluster rebuilt from scratch legitimately has no tenant yet.
+  printf '    %-28s %s\n' "skipped" "no $TENANT_NS namespace - the tenant is not deployed"
+else
+  owner=$(kubectl get ns "$TENANT_NS" \
+          -o jsonpath='{.metadata.annotations.argocd\.argoproj\.io/tracking-id}' 2>/dev/null || true)
+  case "$owner" in
+    tenant-namespaces:*)
+      printf '    %-28s %s\n' "managed by Argo CD" "$owner"
+      ;;
+    '')
+      printf '    %-28s %s\n' "owner" "NONE - nothing in Git manages this namespace"
+      printf '    %s\n' "This is the hole ADR-0016's correction fixed, still open on THIS cluster."
+      printf '    %s\n' "The fix is in Git and this cluster has not synced it yet:"
+      printf '    %s\n' "      make onprem-argocd       # applies the seam, which brings the platform root"
+      printf '    %s\n' "      make gitops-status       # tenant-namespaces should go Synced"
+      printf '    %s\n' "The first sync is an ADOPTION: it adds labels and touches nothing inside."
+      false
+      ;;
+    *)
+      printf '    %-28s %s\n' "owner" "$owner (expected tenant-namespaces)"
+      printf '    %s\n' "Managed, but by something other than the platform grant. Worth a look."
+      false
+      ;;
+  esac
 fi
 
 echo

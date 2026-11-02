@@ -1,13 +1,34 @@
 {{- if .Values.gateway.enabled }}
-{{- if not .Values.gateway.address }}
-{{- fail "gateway.enabled is true but gateway.address is empty - a Gateway whose address moves is worse than one with no name pointed at it" }}
+{{- if not (has .Values.gateway.addressFrom (list "pinned" "provider")) }}
+{{- fail (printf "gateway.addressFrom must be \"pinned\" or \"provider\", got %q" .Values.gateway.addressFrom) }}
+{{- end }}
+{{- if and (eq .Values.gateway.addressFrom "pinned") (not .Values.gateway.address) }}
+{{- fail "gateway.addressFrom is \"pinned\" but gateway.address is empty - a Gateway whose address moves is worse than one with no name pointed at it" }}
+{{- end }}
+{{- if and (eq .Values.gateway.addressFrom "provider") .Values.gateway.address }}
+{{- fail "gateway.addressFrom is \"provider\" but gateway.address is set - one of those is a lie, and the cloud will ignore the address" }}
 {{- end }}
 # The Gateway itself.
 #
-# Cilium's operator reconciles this into a type=LoadBalancer Service, which LB-IPAM gives an
-# address and the L2 policy announces. Three objects and two controllers between this file and
+# ON-PREM, Cilium's operator reconciles this into a type=LoadBalancer Service, which LB-IPAM gives
+# an address and the L2 policy announces. Three objects and two controllers between this file and
 # a packet, which is why each of them is verified separately in the runbook rather than as one
 # "is the Gateway up" question.
+#
+# ON GKE, the GKE Gateway controller reconciles it into a Google load balancer. The chain is
+# shorter to describe and longer to own: a forwarding rule, a target proxy, a URL map, a backend
+# service, a health check and a network endpoint group per backend - none of which Terraform
+# created and none of which `terraform destroy` is guaranteed to remove (ADR-0021).
+#
+# WHERE THE ADDRESS COMES FROM IS THE DIFFERENCE, and it is a sharper one than it looks. On-prem
+# an address is a CONFIGURATION CHOICE: ADR-0013 picked .200 out of a pool this project owns, and
+# pinning it costs nothing. On GKE it is an ALLOCATION: the load balancer is given a public
+# address when it is created, a different one each time, and pinning it means RESERVING a static
+# address - which GCP bills while it is not attached to anything, so ADR-0003 forbids it outright.
+#
+# So `addressFrom` is not a style flag. It says which of those two worlds the environment is in,
+# and the guards above refuse the two incoherent combinations rather than letting one of them
+# silently win.
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
 metadata:
@@ -21,6 +42,7 @@ metadata:
 spec:
   gatewayClassName: {{ .Values.gateway.className | quote }}
 
+  {{- if eq .Values.gateway.addressFrom "pinned" }}
   # Pinned, LB-IPAM aware, and the supported way to do this. The older
   # io.cilium/lb-ipam-ips annotation under spec.infrastructure.annotations has the same effect
   # and takes PRECEDENCE over this field where both are set - Cilium's own docs show
@@ -29,6 +51,13 @@ spec:
   addresses:
     - type: IPAddress
       value: {{ .Values.gateway.address | quote }}
+  {{- else }}
+  # NO addresses BLOCK. The provider allocates one and reports it back in status, so the only
+  # way to learn it is to ask the live object - which is what `make gcp-address` does.
+  #
+  # Omitted rather than written as an empty list: `addresses: []` is a Gateway that requests zero
+  # addresses, which is a different statement from one that expresses no preference.
+  {{- end }}
 
   listeners:
     - name: http

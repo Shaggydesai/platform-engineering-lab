@@ -22,8 +22,26 @@ l2:
 
 gateway:
   enabled: false
+  # The GatewayClass, which is the implementation. `cilium` on-prem;
+  # `gke-l7-regional-external-managed` on GKE, where it is a Google load balancer. The Gateway,
+  # the listeners and every HTTPRoute are identical either way - which is the strongest single
+  # result ADR-0001 has produced, and the reason this is a value rather than two charts.
   className: cilium
-  # Pinned, and must fall inside the pool above.
+
+  # WHERE THE ADDRESS COMES FROM: "pinned" or "provider". No default, deliberately - a wrong
+  # guess here is a Gateway that either demands an address the cloud will not honour or accepts
+  # one it was supposed to pin.
+  #
+  #   pinned     the environment chooses the address, and it must fall inside the pool above.
+  #              On-prem that costs nothing: ADR-0013 picked .200 out of a range this project
+  #              owns.
+  #   provider   the cloud allocates one, a different one each time, and reports it in status.
+  #              Pinning it would mean RESERVING a static address, which GCP bills while
+  #              unattached - so ADR-0003 forbids it and the name moves instead.
+  #
+  # The template refuses both incoherent combinations: "pinned" with no address, and "provider"
+  # with one.
+  addressFrom: pinned
   address: ""
   # The Gateway's own name - what the certificate used to be issued for, and still the name the
   # Gateway answers on with no route attached.

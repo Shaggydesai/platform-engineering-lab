@@ -14,13 +14,29 @@
 # the one this repository keeps finding in its own notes: a plan recorded as a decision because
 # it was plausible.
 #
-# So cert-manager IS installed here (gitops/clusters/gcp/platform/cert-manager.yaml) and issues
-# nothing. The ACME issuer is parked with its price attached rather than written as a to-do.
+# UPDATED 2026-11-02: platformPKI is now ON, and this file no longer claims the cluster has no
+# certificate authority of its own. ACME being impossible left two options for TLS at the edge -
+# a self-signed root, or no TLS - and self-signed wins on the CONTRACT rather than on the
+# cryptography: with it, TLS terminates at the Gateway on both substrates, the Certificate object
+# is identical and the renewal path is identical. Without it, "the platform terminates TLS at the
+# edge" would be true on the laptop and false in the cloud, which is the quiet divergence ADR-0001
+# exists to catch. The cost is a browser warning from a public address, which is the honest
+# consequence of a private CA (ADR-0021).
 #
-# The contrast with on-prem remains the clearest statement of what gitops/environments is for:
-# the same component, the same chart, one path segment different, a completely different trust
-# model - on-prem a self-signed root that a human has to distribute, here no authority at all.
+# AND THE CONTRAST THIS FILE USED TO DRAW IS GONE, which is worth saying rather than deleting.
+#
+# It read: "a completely different trust model - on-prem a self-signed root that a human has to
+# distribute, here no authority at all." The second half is no longer true, and the first half is
+# now true of BOTH: the same self-signed root, the same distribution problem, the same chart, the
+# same values.
+#
+# So this file is the overlay that turned out to need the least, and that is a result rather than
+# an anticlimax. The place the two substrates genuinely diverge is not the certificate authority -
+# it is the ADDRESS the certificate is presented on (ADR-0021: a choice on-prem, an allocation in
+# the cloud) and whether anybody outside the lab can reach it.
 cert-manager: {}
 
 platformPKI:
-  enabled: false
+  # ON, as of ADR-0021. It was false for as long as this substrate had nothing that presented a
+  # certificate; the Gateway presents one, and the only issuer available within ₹0 is our own.
+  enabled: true

@@ -348,6 +348,82 @@ else
   esac
 fi
 
+# ---------------------------------------------------------------- 5b. the Gateway
+step "ingress: is there a Gateway, and did the cloud give it an address?"
+if ! $K -n platform-ingress get gateway platform >/dev/null 2>&1; then
+  ing_app=$($K -n argocd get application platform-ingress \
+            -o jsonpath='{.status.sync.status}' 2>/dev/null || true)
+  if [[ "$ing_app" == "Synced" ]]; then
+    bad 'the platform-ingress Application is Synced but there is no Gateway'
+    note 'Synced means Argo CD believes the cluster matches Git. Check the render:'
+    note '  make gitops-render CHART=platform-ingress ENV=gcp'
+  else
+    warn "no Gateway yet (platform-ingress Application: ${ing_app:-absent})"
+    note 'it is in sync wave 1, after the Certificate - and a global load balancer takes'
+    note 'MINUTES to provision, which is longer than anything Cilium does on-prem'
+  fi
+else
+  # PROGRAMMED IS THE ONLY CONDITION THAT MEANS ANYTHING HERE. `Accepted` says the API server
+  # took the object and a controller recognised it; a Gateway can sit Accepted=True and
+  # Programmed=False indefinitely with no load balancer behind it. That distinction is the
+  # Gateway API equivalent of the failure ADR-0016 named for the Ingress object - accepted and
+  # serving nothing.
+  prog=$($K -n platform-ingress get gateway platform \
+         -o jsonpath='{.status.conditions[?(@.type=="Programmed")].status}' 2>/dev/null || true)
+  gw_class=$($K -n platform-ingress get gateway platform \
+             -o jsonpath='{.spec.gatewayClassName}' 2>/dev/null || true)
+  gw_addr=$($K -n platform-ingress get gateway platform \
+            -o jsonpath='{.status.addresses[0].value}' 2>/dev/null || true)
+
+  if [[ "$prog" == "True" ]]; then
+    ok "Gateway Programmed, class $gw_class"
+  else
+    msg=$($K -n platform-ingress get gateway platform \
+          -o jsonpath='{.status.conditions[?(@.type=="Programmed")].message}' 2>/dev/null || true)
+    bad "Gateway is Programmed=${prog:-<absent>}: ${msg:-no message}"
+    note 'Accepted and Programmed are different claims - the first means a controller saw it,'
+    note 'the second means a load balancer exists. Only the second serves traffic.'
+  fi
+
+  if [[ -n "$gw_addr" ]]; then
+    ok "the cloud allocated $gw_addr"
+    note 'EPHEMERAL - a different address next session. On-prem this is a pinned configuration'
+    note 'choice (ADR-0013); here it is an allocation, and reserving one bills while unattached'
+    note '  make gcp-address    the current one, and the hosts lines to match'
+  else
+    bad 'the Gateway has no address in status'
+    note 'with addressFrom: provider there is nowhere else for it to come from'
+  fi
+
+  # THE ADDRESS IS ALSO THE BILL, so say the number rather than leaving it to be remembered.
+  # A forwarding rule is the billed object; the rest of the load balancer is free.
+  if frules=$(gcloud compute forwarding-rules list --project="$project" \
+                --format='value(name)' 2>/dev/null); then
+    n_fr=$(printf '%s\n' "$frules" | grep -c . || true)
+    if (( n_fr > 0 )); then
+      note ''
+      note "$n_fr Google forwarding rule(s) exist, and they are BILLED HOURLY while they do."
+      note 'ADR-0003 forbids LEAVING one running, not creating one - which is why make gcp-down'
+      note 'deletes this Application and waits for them to go BEFORE destroying the cluster.'
+      note 'Terraform never created them and has no record of them (ADR-0021).'
+    fi
+  fi
+
+  routes=$($K get httproute -A --no-headers 2>/dev/null | grep -c . || true)
+  if (( routes > 0 )); then
+    ok "$routes HTTPRoute(s) attached"
+    printf '\n'
+    $K get httproute -A -o custom-columns='NS:.metadata.namespace,NAME:.metadata.name,HOSTS:.spec.hostnames' \
+      --no-headers 2>/dev/null | sed 's/^/    /'
+    note ''
+    note 'Those objects are IDENTICAL to the on-prem ones - same namespace, same backend, same'
+    note 'port, attached to a Gateway with a different implementation underneath. Nothing in'
+    note 'gitops/charts/platform-ingress/templates/httproutes.yaml is substrate-aware.'
+  else
+    warn 'no HTTPRoutes'
+  fi
+fi
+
 # ---------------------------------------------------------------- 6. the tenant
 step "the tenant: did the credentials arrive, and did anything schedule?"
 TNS=shopverse-prod

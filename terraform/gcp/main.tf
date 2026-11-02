@@ -96,6 +96,27 @@ resource "google_container_cluster" "platform" {
   # which is why it is going in now, between a destroy and the next create, rather than later.
   datapath_provider = "ADVANCED_DATAPATH"
 
+  # GATEWAY API, which GKE does not install unless asked. Without this block there are no
+  # gateway.networking.k8s.io CRDs and no GKE Gateway controller, so a Gateway object cannot even
+  # be applied - and the error names an unknown kind, which reads like a chart problem.
+  #
+  # The same shape as ADR-0012 Decision 2 on-prem, one layer up: Cilium's gatewayAPI.enabled does
+  # nothing at all unless the CRDs already exist, and an operator that starts without them comes
+  # up cleanly with Gateway support silently off. Here the CRDs are Google's to install, and this
+  # is the switch.
+  #
+  # CHANNEL_STANDARD is the v1 API (Gateway, HTTPRoute, ReferenceGrant) - the same versions the
+  # on-prem cluster gets from the pinned bundle in clusters/onprem/nodes.json. CHANNEL_EXPERIMENTAL
+  # would add TCPRoute and TLSRoute, which nothing here uses.
+  #
+  # ON AN EXISTING CLUSTER this is an update rather than a replacement, as far as I can establish -
+  # and it does not much matter either way here, because this cluster is destroyed at the end of
+  # every session. If a plan ever says `forces replacement` for this field, that is the moment to
+  # read it rather than to type yes.
+  gateway_api_config {
+    channel = "CHANNEL_STANDARD"
+  }
+
   networking_mode = "VPC_NATIVE"
   ip_allocation_policy {
     cluster_secondary_range_name  = "pods"
