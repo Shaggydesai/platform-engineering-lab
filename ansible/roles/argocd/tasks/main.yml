@@ -145,6 +145,59 @@
     success_msg: "{{ argocd_kube_context }} found in {{ argocd_kubeconfig }}"
   run_once: true
 
+- name: Does that context actually reach a working API server?
+  # A CONTEXT EXISTING IS NOT A CONTEXT THAT WORKS, and the check above only establishes the
+  # first. This was found on gcp-smoke rather than here, but the blind spot was identical: the
+  # role would have passed its context assertion and then tried to install Argo CD through a
+  # context pointing at a cluster that no longer exists.
+  #
+  # The state is entirely predictable rather than exotic. `make gcp-down` followed by `make
+  # gcp-up` destroys and recreates the cluster; the kubectl context survives both, under the same
+  # name, often pointing at the same endpoint address, holding the OLD cluster's CA. kubectl then
+  # connects to the right address and rejects the certificate.
+  #
+  # /readyz rather than `get nodes`: it is the API server's own readiness endpoint, needs no RBAC
+  # beyond authenticating, and answers before any workload exists - which matters because this
+  # runs against a cluster with nothing on it yet.
+  ansible.builtin.command: >-
+    kubectl --context {{ argocd_kube_context }} get --raw /readyz
+  delegate_to: localhost
+  run_once: true
+  become: false
+  environment:
+    KUBECONFIG: "{{ argocd_kubeconfig }}"
+  register: argocd_readyz
+  changed_when: false
+  failed_when: false
+  # RETRY THE TRANSIENT CASE AND NOT THE DETERMINISTIC ONE.
+  #
+  # A cluster that has just been created can take a moment to answer, so a connection refused or
+  # a timeout is worth retrying. A certificate error is not: a wrong CA will be wrong in sixty
+  # seconds too, and the first version of this spent a minute establishing that. Six attempts at
+  # ten seconds is a real minute on exactly the failure that is already decided.
+  #
+  # So the until condition stops on success OR on an error that cannot improve.
+  until: >-
+    argocd_readyz.rc == 0
+    or (argocd_readyz.stderr | default('')) is search('x509|certificate|Unauthorized|forbidden')
+  retries: 6
+  delay: 10
+
+- name: The API server behind that context must answer
+  ansible.builtin.assert:
+    that: argocd_readyz.rc == 0
+    fail_msg: >-
+      {{ argocd_kube_context }} exists in {{ argocd_kubeconfig }} but its API server did not
+      answer /readyz after {{ argocd_readyz.attempts | default('several') }} attempts:
+      {{ (argocd_readyz.stderr | default('') | trim) or (argocd_readyz.msg | default('no output') | trim) }}
+      ---
+      IF THE CLUSTER WAS JUST RECREATED, this is a stale context rather than a broken cluster:
+      the context keeps its name and its old CA while the cluster behind it is new. For GCP,
+      `make gcp-kubeconfig` rewrites it. For on-prem, the control_plane role re-fetches
+      admin.conf, so `make onprem-up TAGS=control-plane` does.
+    success_msg: "the API server behind {{ argocd_kube_context }} answers /readyz"
+  run_once: true
+
 # ---------------------------------------------------------------------------- install
 - name: Add the Argo CD chart repository
   ansible.builtin.command: helm repo add argo https://argoproj.github.io/argo-helm

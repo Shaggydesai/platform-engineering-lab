@@ -72,8 +72,44 @@ printf '  context %s   project %s   zone %s\n' "$CTX" "$project" "$zone"
 
 # ---------------------------------------------------------------- 1. the nodes
 step "the nodes, and the one that is not there"
-if ! nodes_json=$($K get nodes -o json 2>&1); then
-  bad "cannot reach the cluster: $(printf '%s' "$nodes_json" | head -1)"
+# STDERR SEPARATELY FROM STDOUT, and the reason is a message this script actually printed:
+#
+#     [fail] cannot reach the cluster: {
+#
+# `2>&1` merged them and `head -1` took the first line - and `kubectl -o json` had already emitted
+# an opening brace to stdout before failing, so the real error was discarded and replaced with a
+# brace. The same mistake `cost-check` was fixed for: stdout is the ANSWER, stderr is WHY THERE IS
+# NO ANSWER, and merging them loses whichever matters.
+k_err=$(mktemp); trap 'rm -f "$k_err"' EXIT
+if ! nodes_json=$($K get nodes -o json 2>"$k_err"); then
+  err=$(cat "$k_err")
+  bad "cannot reach the cluster"
+  printf '%s\n' "$err" | head -3 | sed 's/^/           /'
+
+  # A STALE CONTEXT IS THE LIKELY CAUSE AND IS ENTIRELY PREDICTABLE, so name it rather than
+  # leaving a certificate error to be interpreted.
+  #
+  # `make gcp-down` followed by `make gcp-up` destroys and recreates the cluster. The kubectl
+  # context SURVIVES both, under the same name, often pointing at the same endpoint address - and
+  # holding the OLD cluster's CA. kubectl then connects to the right address and rejects the
+  # certificate, which reads like a network or permissions problem.
+  #
+  # This is the same lesson as the tenant namespace one in a different shape: a context EXISTING
+  # is not a context that WORKS. Both this script and the argocd role used to check only the
+  # first.
+  case "$err" in
+    *x509*|*"certificate"*|*"Unauthorized"*|*"credential"*|*"no such host"*|*"refused"*|*"i/o timeout"*)
+      note ''
+      note 'THAT LOOKS LIKE A STALE CONTEXT, which is what a destroy-and-recreate always leaves:'
+      note 'the context keeps its name and its old CA while the cluster behind it is new.'
+      note '  make gcp-kubeconfig'
+      ;;
+    *)
+      note ''
+      note 'If the cluster was just recreated, the context still holds the previous CA:'
+      note '  make gcp-kubeconfig'
+      ;;
+  esac
   note 'everything below depends on this, so the rest is skipped'
   exit 1
 fi
