@@ -405,36 +405,72 @@ if ! $K -n platform-ingress get gateway platform >/dev/null 2>&1; then
     note 'MINUTES to provision, which is longer than anything Cilium does on-prem'
   fi
 else
-  # PROGRAMMED IS THE ONLY CONDITION THAT MEANS ANYTHING HERE. `Accepted` says the API server
-  # took the object and a controller recognised it; a Gateway can sit Accepted=True and
-  # Programmed=False indefinitely with no load balancer behind it. That distinction is the
-  # Gateway API equivalent of the failure ADR-0016 named for the Ingress object - accepted and
-  # serving nothing.
-  prog=$($K -n platform-ingress get gateway platform \
-         -o jsonpath='{.status.conditions[?(@.type=="Programmed")].status}' 2>/dev/null || true)
+  # ASSERT THE OUTCOME, NOT THE SCHEMA, and this is a correction of my own check rather than a
+  # refinement of it.
+  #
+  # The first version read .status.conditions[?(@.type=="Programmed")].status and FAILED the run
+  # when it was absent - on a cluster where the same check, two lines later, reported an allocated
+  # address and two live Google forwarding rules. A load balancer that does not exist does not get
+  # an address and does not bill. So the Gateway was working and the check said otherwise.
+  #
+  # ABSENT IS NOT FALSE. That is the same distinction gcp-guardrails-verify exists to make - "I
+  # could not look" is not "it is missing" - arriving in a third place. Gateway API v1 defines
+  # `Programmed`, and an implementation is not obliged to have written it yet; GKE's controller
+  # may report `Ready`, the older condition, or put the detail on the listener instead.
+  #
+  # A FALSE NEGATIVE IS NOT HARMLESS just because it errs toward alarm: it sends someone to debug
+  # a working load balancer, which is the mirror image of the failure shape this project tracks
+  # and costs the same hour.
+  #
+  # So: the ADDRESS is the assertion, because with addressFrom: provider there is nowhere else for
+  # one to come from and the cloud does not allocate one for a Gateway it has not programmed.
+  # Conditions are read as EXPLANATION, preferring Programmed, falling back to Ready, and saying
+  # plainly when an implementation writes neither.
   gw_class=$($K -n platform-ingress get gateway platform \
              -o jsonpath='{.spec.gatewayClassName}' 2>/dev/null || true)
   gw_addr=$($K -n platform-ingress get gateway platform \
             -o jsonpath='{.status.addresses[0].value}' 2>/dev/null || true)
-
-  if [[ "$prog" == "True" ]]; then
-    ok "Gateway Programmed, class $gw_class"
-  else
-    msg=$($K -n platform-ingress get gateway platform \
-          -o jsonpath='{.status.conditions[?(@.type=="Programmed")].message}' 2>/dev/null || true)
-    bad "Gateway is Programmed=${prog:-<absent>}: ${msg:-no message}"
-    note 'Accepted and Programmed are different claims - the first means a controller saw it,'
-    note 'the second means a load balancer exists. Only the second serves traffic.'
-  fi
+  gw_conds=$($K -n platform-ingress get gateway platform -o json 2>/dev/null \
+             | jq -r '[.status.conditions[]? | "\(.type)=\(.status)"] | join(" ")' || true)
+  gw_bad=$($K -n platform-ingress get gateway platform -o json 2>/dev/null \
+           | jq -r '[.status.conditions[]? | select(.status != "True")
+                     | "\(.type)=\(.status) \(.reason // ""): \(.message // "")"] | join("; ")' || true)
 
   if [[ -n "$gw_addr" ]]; then
-    ok "the cloud allocated $gw_addr"
-    note 'EPHEMERAL - a different address next session. On-prem this is a pinned configuration'
-    note 'choice (ADR-0013); here it is an allocation, and reserving one bills while unattached'
-    note '  make gcp-address    the current one, and the hosts lines to match'
+    ok "Gateway has an address: $gw_addr   class $gw_class"
+    note 'With addressFrom: provider the cloud is the only source of that - so an address in'
+    note 'status means a load balancer was actually created, not merely requested.'
+    note 'EPHEMERAL: a different one next session. On-prem this is a pinned configuration choice'
+    note '(ADR-0013); here it is an allocation, and reserving one bills while unattached.'
+    note '  make gcp-address    the current one, and the curl lines to match'
   else
     bad 'the Gateway has no address in status'
-    note 'with addressFrom: provider there is nowhere else for it to come from'
+    note 'with addressFrom: provider there is nowhere else for one to come from, so this means'
+    note 'the cloud has not created a load balancer. A global ALB takes MINUTES - re-run before'
+    note 'concluding, then:'
+    note "  kubectl --context $CTX -n platform-ingress describe gateway platform"
+  fi
+
+  # Now the conditions, as explanation. A condition explicitly False is a finding whether or not
+  # an address exists; a condition merely missing is not.
+  if [[ -n "$gw_bad" ]]; then
+    bad "a Gateway condition is not True: $gw_bad"
+  elif [[ -n "$gw_conds" ]]; then
+    ok "conditions: $gw_conds"
+    case "$gw_conds" in
+      *Programmed=True*) : ;;
+      *Ready=True*)
+        note 'note the condition name: this implementation reports Ready, the older spelling, and'
+        note 'not Gateway API v1'"'"'s Programmed. Asserting one name across implementations is what'
+        note 'made this check fail on a working Gateway.' ;;
+      *)
+        note 'neither Programmed nor Ready is True here, and the address above is what says the'
+        note 'load balancer exists. Worth one look at `describe gateway` to see what this'
+        note 'implementation does report.' ;;
+    esac
+  else
+    warn 'the Gateway reports no conditions at all'
+    note 'unusual rather than wrong - the address above is the load-bearing signal'
   fi
 
   # THE ADDRESS IS ALSO THE BILL, so say the number rather than leaving it to be remembered.
