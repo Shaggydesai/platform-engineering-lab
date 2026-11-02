@@ -590,8 +590,14 @@ else
     [[ -z "$gw_now" ]] && break
     attached_max=$(printf '%s' "$gw_now" \
                    | jq -r '[.status.listeners[]?.attachedRoutes // 0] | max // 0' 2>/dev/null || echo 0)
+    # The port comes from .spec.listeners, joined by name. .status.listeners carries name,
+    # supportedKinds, attachedRoutes and conditions - and NOT port, which the first version of
+    # this line read anyway and printed as "port null" on a correct cluster. Small, and the same
+    # error as everything else in this section: reading a field without checking it is there.
     listeners=$(printf '%s' "$gw_now" \
-                | jq -r '.status.listeners[]? | "    \(.name)  port \(.port)  attachedRoutes=\(.attachedRoutes // 0)"' \
+                | jq -r '(reduce (.spec.listeners[]? | {(.name): .port}) as $p ({}; . + $p)) as $ports
+                         | .status.listeners[]?
+                         | "    \(.name)  port \($ports[.name] // "?")  attachedRoutes=\(.attachedRoutes // 0)"' \
                 2>/dev/null || true)
     (( attached_max > 0 )) && break
     (( routes == 0 )) && break

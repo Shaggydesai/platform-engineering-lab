@@ -464,6 +464,65 @@ gcp-down: _no-stray-flags _gcp-preflight ## Destroy the GKE cluster, then prove 
 	  printf '==> no platform-ingress Application to take down first\n'; \
 	  printf '    %snothing created a load balancer, so there is nothing to orphan%s\n\n' '' ''; \
 	fi
+# AND THE DISKS, which is the SAME ordering bug one object over, found by cost-check on 2026-11-02.
+#
+# That run destroyed the cluster cleanly and left `pvc-5f355018-...` behind: a 5 GB Persistent Disk,
+# unattached, billing. ADR-0021 fixed the ordering for the load balancer and did not generalise it,
+# so the rule it discovered got applied once rather than understood.
+#
+# The shape is identical. The PD CSI driver deletes the disk when the PVC is deleted, because the
+# StorageClass reclaim policy is Delete - but destroying the cluster removes that driver, so the
+# disk outlives the only thing that would have removed it. Terraform never created it and has no
+# record of it, which is why `Destroy complete! Resources: 4 destroyed` was true and incomplete.
+#
+# THE EXTRA WRINKLE IS WHOSE PVC IT IS, and it is nobody's in the GitOps sense. MongoDB's PVC comes
+# from the StatefulSet's volumeClaimTemplate, so Argo CD never created it and will not prune it;
+# deleting the Application removes the StatefulSet and deliberately leaves the data behind. On a
+# cluster about to be destroyed that guarantee is exactly backwards.
+#
+# So: delete the tenant Applications, which stops the pods holding the pvc-protection finalizer,
+# then delete the PVCs, then WAIT for GCP to report no unattached disks. Best-effort and non-fatal,
+# like the block above: cost-check at the end is the actual answer.
+	@set -u; \
+	if kubectl config get-contexts -o name 2>/dev/null | grep -qx gcp-platform \
+	   && kubectl --context gcp-platform -n argocd get applications >/dev/null 2>&1; then \
+	  tapps=$$(kubectl --context gcp-platform -n argocd get applications \
+	             -o jsonpath='{range .items[?(@.spec.project=="tenants")]}{.metadata.name}{"\n"}{end}' \
+	             2>/dev/null | grep -c . || true); \
+	  pvcs=$$(kubectl --context gcp-platform get pvc -A --no-headers 2>/dev/null | grep -c . || true); \
+	  if [ "$$tapps" != "0" ] || [ "$$pvcs" != "0" ]; then \
+	    printf '==> taking the tenant PVCs down BEFORE the cluster\n'; \
+	    printf '    a StatefulSet volumeClaimTemplate PVC is owned by nothing in Git, and the CSI\n'; \
+	    printf '    driver that deletes its Persistent Disk dies with the cluster (ADR-0021)\n\n'; \
+	    kubectl --context gcp-platform -n argocd get applications \
+	      -o jsonpath='{range .items[?(@.spec.project=="tenants")]}{.metadata.name}{"\n"}{end}' \
+	      2>/dev/null | grep . | while read -r a; do \
+	        kubectl --context gcp-platform -n argocd delete application "$$a" \
+	          --wait=true --timeout=120s 2>&1 | sed 's/^/    /' || true; \
+	      done; \
+	    kubectl --context gcp-platform delete pvc -A --all \
+	      --wait=true --timeout=180s 2>&1 | sed 's/^/    /' || \
+	      printf '    %bcould not delete every PVC - continuing, cost-check is the check%b\n' '\033[33m' '\033[0m'; \
+	    proj=$$(jq -r '.project_id' clusters/gcp/cluster.json); \
+	    printf '\n    waiting for the Persistent Disks to disappear from GCP\n'; \
+	    gone=no; \
+	    for i in $$(seq 1 18); do \
+	      n=$$(timeout 30 gcloud compute disks list --project="$$proj" \
+	             --filter='-users:*' --format='value(name)' 2>/dev/null | grep -c . || true); \
+	      if [ "$$n" = "0" ]; then gone=yes; break; fi; \
+	      printf '    %s unattached disk(s) still there (%ss)\n' "$$n" "$$((i * 10))"; \
+	      sleep 10; \
+	    done; \
+	    if [ "$$gone" = yes ]; then \
+	      printf '    %bno unattached disks left%b\n\n' '\033[32m' '\033[0m'; \
+	    else \
+	      printf '\n    %bunattached disks are STILL present%b\n' '\033[31m' '\033[0m'; \
+	      printf '    cost-check at the end lists each with its remove command. DO NOT skip it.\n\n'; \
+	    fi; \
+	  else \
+	    printf '==> no tenant Applications and no PVCs - nothing to orphan a disk\n\n'; \
+	  fi; \
+	fi
 	@cd $(GCP_TF) && terraform destroy
 # cost-check runs REGARDLESS of what destroy reported, which is the point of having it.
 # `terraform destroy` succeeding means Terraform removed what it knew about - it says nothing

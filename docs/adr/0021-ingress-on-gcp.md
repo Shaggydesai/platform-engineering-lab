@@ -213,12 +213,42 @@ load balancer, which costs the same hour as the mirror-image bug.
   and `ResolvedRefs` conditions, and it re-reads the Gateway to do so — "is it programmed" and
   "did routes attach" are different questions with different answers at the same instant, and at
   the moment `Programmed` first goes `True` the attached count is routinely still 0.
+- **RESOLVED the same day: the 404 was propagation.** The next run, with nothing changed but the
+  clock, returned **200 from both hostnames**. Google programs the URL map behind its own
+  `Programmed` status, and the failing curls had run ~3 minutes after it went True. `sectionName:
+  https` is vindicated too: the http listener reports `attachedRoutes=0` and the https listener
+  `attachedRoutes=2`, which is the pin doing exactly what the chart comment claims — without it a
+  route would attach to port 80 as well and serve the application unencrypted with no error
+  anywhere. **The lesson is not "wait longer":** the only check that could tell propagation from
+  misconfiguration was the one that sent a packet, and every object-reading check stayed green
+  through the whole failure.
 - **And the section now ends by sending a packet.** Everything above it reads Kubernetes objects,
   and on 2026-11-02 every one of those was green while nothing served. The probe curls each route
   hostname through the allocated address with the cluster CA, retries against one shared deadline
   because the URL map propagates behind the Gateway's own status, and reports 2xx/3xx as working,
   404 as routing, 5xx as the backend, and no connection at all as neither. **This is the first
   check in this repository's cloud path that is not inference.**
+
+### The ordering rule was applied once rather than understood, 2026-11-02
+
+This ADR's central decision is that **a Google object created by a controller inside the cluster
+must be removed while that controller is still alive.** It wrote that down for forwarding rules and
+stopped there. Six hours later `cost-check` found a 5 GB Persistent Disk — MongoDB's volume —
+unattached and billing, immediately after `Destroy complete! Resources: 4 destroyed`. That message
+was true and incomplete: Terraform removed what it knew about, and the disk was never in its state.
+
+Same shape, one object over. The PD CSI driver deletes the disk when the PVC is deleted, and
+destroying the cluster removes the driver first. The extra wrinkle is **whose PVC it is: nobody's,
+in the GitOps sense.** It comes from the StatefulSet's `volumeClaimTemplate`, so Argo CD never
+created it and will not prune it — deleting the Application removes the StatefulSet and
+deliberately leaves the data behind, which is right everywhere except on a cluster about to be
+destroyed.
+
+`make gcp-down` now deletes the tenant Applications, then every PVC, then waits for GCP to report
+no unattached disks, before `terraform destroy`. **The generalisation, stated rather than left to
+be rediscovered: this applies to every in-cluster-created cloud object, and Module 09 meets it
+again as AWS ELBs and EBS volumes.** `cost-check` is the only thing that can say whether the
+ordering worked, and it found both.
 
 **A session now costs slightly more**, and the number should be said: a forwarding rule is roughly
 $0.025/hour, so ~₹2/hour on top of the ~₹3/hour for two spot nodes, two external IPs and 64 GB of
