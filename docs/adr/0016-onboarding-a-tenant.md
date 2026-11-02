@@ -293,6 +293,35 @@ Dataplane V2's agent, and then eight tenant pods. The arithmetic says it fits. A
 a measurement, and `Pending` is what a wrong one looks like — which is also what a missing Secret
 looks like, hence the ordering above.
 
+> **Measured 2026-11-02: that estimate was wrong by 2.05×, and the paragraph above is left
+> standing because the way it was wrong is the lesson.**
+>
+> ```
+> allocatable   940m x 2 = 1880m          (estimated 1930m x 2 = 3860m)
+> requested     939m (99%) + 931m (99%)
+> headroom      10m
+> ```
+>
+> Six of eight tenant pods stayed `Pending` with *"0/2 nodes are available: 2 Insufficient cpu"*,
+> and MongoDB's PVC stayed `Pending` behind them because GKE's default StorageClass is
+> `WaitForFirstConsumer` — a consequence, not a second fault.
+>
+> **The arithmetic was fine. The input was not.** `e2-medium` is a **shared-core** machine type:
+> listed as 2 vCPU, with **one guaranteed** and the second as burst — and the scheduler does not
+> schedule against burst capacity. So GKE reports 940m allocatable, and "2 vCPU × 2 nodes" was
+> never the number. Memory was never the problem: 76% and 68%.
+>
+> The nodes are `e2-standard-2` now (2 dedicated vCPU, ~1930m allocatable). What was deliberately
+> **not** done is shrinking the tenant's requests to fit: that makes the workload fit the cluster
+> rather than the cluster fit the workload, and ends with everything BestEffort and nothing
+> predictable. The tenant stays the same chart at the same commit on both substrates, because that
+> is the measurement.
+>
+> **And the comparison worth keeping:** on-prem is 3 × 2 **dedicated** vCPU from libvirt, about
+> 6 vCPU of schedulable capacity. The GKE cluster had 1.88. **The laptop was bigger than the
+> cloud** — which is not an argument about clouds, it is an argument about reading the machine
+> type rather than the marketing number.
+
 ## Correction, 2026-11-01 — a tenant may not create its own namespace
 
 The amendment above said the `tenants` AppProject travelled unedited and left it there. It did

@@ -526,11 +526,19 @@ else
     note "the chart's ExternalSecret asks for [$want_keys]"
   fi
 
-  # PENDING IS THE SIGNAL ON THIS SUBSTRATE, and it is worth saying why rather than just
-  # checking it. Two e2-medium spot nodes is about 3.8 allocatable vCPU and 5.6 GiB across the
-  # pair, carrying Argo CD, cert-manager, External Secrets, GKE's own system pods and Dataplane
-  # V2's agent - and then eight tenant pods. The estimate said it fits; an estimate is not a
-  # measurement, and Pending is what a wrong one looks like.
+  # PENDING IS THE SIGNAL ON THIS SUBSTRATE, and this check has already earned its place.
+  #
+  # The comment here used to read: "Two e2-medium spot nodes is about 3.8 allocatable vCPU and
+  # 5.6 GiB across the pair [...] The estimate said it fits; an estimate is not a measurement, and
+  # Pending is what a wrong one looks like."
+  #
+  # It was wrong by 2.05x and this check is what found it. e2-medium is SHARED-CORE: 2 vCPU
+  # nominal, ONE guaranteed, and GKE reports 940m allocatable - so the pair had 1880m, not 3860m.
+  # Measured: 939m (99%) and 931m (99%) requested, 10m of headroom, six of eight tenant pods
+  # Pending. The nodes are e2-standard-2 now (clusters/gcp/cluster.json records the arithmetic).
+  #
+  # The lesson generalises past this cluster: a nominal vCPU count is not schedulable CPU, and the
+  # scheduler does not schedule against burst capacity.
   #
   # It is also what a MISSING SECRET looks like, which is why this sits under the check above:
   # a pod whose secretKeyRef names a Secret that does not exist stays Pending with
@@ -576,9 +584,8 @@ else
 
     # AND THE NUMBERS, because "Insufficient cpu" invites the question immediately.
     #
-    # e2-medium is a SHARED-CORE machine type: nominally 2 vCPU, and GKE's allocatable is closer
-    # to one. Two of them is therefore about half the CPU an arithmetic estimate from "2 vCPU x 2
-    # nodes" predicts - which is how ADR-0016's capacity estimate came to be wrong.
+    # This is the breakdown that settled the e2-medium capacity failure in one command, after a
+    # round trip to a human for `kubectl describe` that should not have been needed.
     note ''
     note 'allocatable vs requested, per node:'
     $K get nodes -o json 2>/dev/null \

@@ -109,7 +109,22 @@ enabled, the original version applied first time and looked correct. The old pro
 the bug by being well-worn, which is the same reason this project destroys and rebuilds the
 on-prem cluster rather than trusting a machine that has been fixed.
 
-### 2. Zonal, spot, two e2-medium nodes
+### 2. Zonal, spot, two nodes — `e2-standard-2` since 2026-11-02, `e2-medium` before that
+
+**The machine type changed, and the reason belongs in this decision rather than only in a
+commit.** `e2-medium` was chosen here as "small and cheap" and it is also **shared-core**: listed
+as 2 vCPU, with one guaranteed and the second as burst. GKE reports **940m** allocatable, not the
+~1930m a dedicated 2 vCPU node reports — and the scheduler does not schedule against burst
+capacity. Two of them gave 1880m, the platform plus GKE's own system pods requested 1870m of it,
+and the tenant did not fit: six of eight pods `Pending` (ADR-0016's measured amendment has the
+numbers). `e2-standard-2` is 2 dedicated vCPU and 8 GB.
+
+**Nothing about the free tier changes with it**, which is worth stating because "e2-medium" and
+"free tier" sit near each other in a lot of documentation. GKE's free tier covers the CLUSTER
+MANAGEMENT FEE for one zonal cluster; nodes are billed as ordinary compute either way, with the
+spot discount. The separate always-free compute offer is an `e2-micro` in a US region, which this
+project never used and could not run a cluster on. So the node size was always a money decision
+and never a free-tier one, and the node cost roughly doubling is the whole consequence.
 
 Zonal because the GKE free tier covers the control-plane management fee for **one zonal cluster
 per billing account per month** and does not cover a regional one. Regional also triples the
