@@ -174,10 +174,40 @@ That closes the parking-lot entry about a namespace nothing in Git has managed f
    then believed on a later read. They need a named module in `docs/roadmap.md` or they will keep
    drifting to whichever one is next.
 
-**Before AWS (Module 09): the $5 budget alarm**, which ADR-0003 requires to exist *before* the
-first cloud resource. The GCP ₹400 one exists and is verified against the API; the AWS one does
-not exist at all. That is not a suggestion in the roadmap, it is the thing standing between this
-project and a bill.
+**Module 09 has started with the guardrail, 2026-11-03 (ADR-0022).** `terraform/aws/guardrails`,
+`clusters/aws/cluster.json`, `scripts/aws-guardrails-verify.sh` and two make targets are written;
+**nothing has been applied**, because the AWS account does not exist yet. There is deliberately no
+`aws-up` and no `_aws-preflight` — a gate for a target that does not exist is dead code, and the
+gate ships with the cluster it refuses to build.
+
+```bash
+# once the account exists and `aws configure` is done (region ap-south-1):
+make aws-guardrails AWS_ALERT_EMAIL=you@example.com   # remembers it in .cache, mode 600
+make aws-guardrails-verify                            # asks the API what it HAS
+```
+
+**Four things about AWS that are not a rename of the GCP path**, all in ADR-0022:
+
+- **EKS has no free tier.** $0.10/hour per cluster the moment it exists, so ~**$0.20/hour** with two
+  spot nodes, EBS and a load balancer — about 4× a GCP session. Hence a **$5** budget: that is ~25
+  hours of cluster time, and an alarm set at $50 would never fire on a lab that runs three hours a
+  week.
+- **AWS Budgets notify NOBODY by default.** A notification with no subscriber is accepted and silent
+  forever, and looks correct in the console. So the address is required with no default, and the
+  verifier makes **three API calls where GCP needs one** — the budget, its notifications, and their
+  subscribers are three separate objects, so a check that stops at the first passes on a budget
+  that can never warn you.
+- **The free account plan has no spend cap**, and when it ends (6 months or credits gone) **AWS
+  suspends the account** — 90 days to recover, then permanent deletion. Survivable only because
+  nothing persistent lives in AWS by design.
+- **`m6a.large`, never `t3.*`.** t3 is burstable: the same silent trap as `e2-medium`, which cost
+  Module 08 a cluster rebuild and a 2.05× wrong estimate. A burstable node creates, reports Ready,
+  and then refuses to schedule — the symptom lands one layer from the cause.
+
+**And EKS cannot be zonal:** it requires subnets in two AZs, so the GKE "one zone, free management
+fee" shape has no equivalent. Nodes are pinned into the first AZ anyway, because cross-AZ traffic
+bills per GB — which means this cluster is **not** more available than the GKE one despite the
+topology suggesting it is.
 
 ## Module 07 closed, 2026-10-31
 

@@ -268,19 +268,47 @@ step 'Every Terraform state has its provider lock file committed'
 # `git ls-files` rather than `test -f`: the question is whether it is in the REPOSITORY, not
 # whether it is on this machine. A lock file only appears after `terraform init`, so a fresh
 # clone has none on disk and that is exactly the case the commit protects.
+#
+# AND A STATE THAT HAS NEVER BEEN INITIALISED IS NOT A VIOLATION, which this check originally
+# could not express. A lock file can only be produced by `terraform init`, so a state written in
+# an environment that cannot reach registry.terraform.io has none and cannot have one - which is
+# exactly the position terraform/gcp/guardrails was in for one commit, and terraform/aws/guardrails
+# is in now. Failing on it would make `make lint` red on a fresh pull for a rule the reader has no
+# way to satisfy yet, and a lint that is red for a known-acceptable reason stops being read.
+#
+# The signal is in the file: a version CONSTRAINT with a range in it (">= 5.0.0, < 6.0.0") is a
+# declaration that init has not run, because the whole point of the range is that the real version
+# is not known yet. An EXACT pin means someone read a resolution and wrote it down - at which
+# point the lock file exists on their machine and must be committed. So the rule closes itself:
+# pinning the version is what makes the missing lock a failure.
 if command -v git >/dev/null 2>&1 && [ -d .git ]; then
   missing=''
+  pending=''
   for d in $(grep -rl 'required_providers' terraform --include='*.tf' 2>/dev/null \
              | xargs -r -n1 dirname | sort -u); do
-    git ls-files --error-unmatch "$d/.terraform.lock.hcl" >/dev/null 2>&1 \
-      || missing="$missing $d"
+    git ls-files --error-unmatch "$d/.terraform.lock.hcl" >/dev/null 2>&1 && continue
+    # A range constraint anywhere in the directory's version pins: >=, <=, <, ~>, or a comma.
+    if grep -hE '^[[:space:]]*version[[:space:]]*=' "$d"/*.tf 2>/dev/null \
+       | grep -qE '(>=|<=|~>|<|,)'; then
+      pending="$pending $d"
+    else
+      missing="$missing $d"
+    fi
   done
-  if [ -z "$missing" ]; then
+  if [ -z "$missing" ] && [ -z "$pending" ]; then
     ok 'all provider lock files are in Git'
+  elif [ -z "$missing" ]; then
+    for d in $pending; do
+      printf '    %s%s still has a RANGE constraint, so no lock file is expected yet%s\n' \
+        "$c_dim" "$d" "$c_off"
+    done
+    ok 'every state with an exact version pin has its lock file committed'
+    printf '      %sthe first `terraform init` in a pending state resolves a real version: pin it\n' "$c_dim"
+    printf '      exactly in versions.tf and commit the lock, and this check starts enforcing it%s\n' "$c_off"
   else
     for d in $missing; do printf '    %s/.terraform.lock.hcl is not committed\n' "$d"; done
-    bad 'commit them - and note they can only be generated where terraform init has run'
-    printf '      %sfor d in%s; do git add "$d/.terraform.lock.hcl"; done%s\n' \
+    bad 'commit them - the version is pinned exactly, so init has run and the lock file exists'
+    printf '      %sfor d in%s; do git add -f "$d/.terraform.lock.hcl"; done%s\n' \
       "$c_dim" "$missing" "$c_off"
   fi
 else
@@ -370,6 +398,111 @@ PYCHECK
 else
   skip 'python3 missing, skipped'
 fi
+
+step 'The budget guardrails agree with the scripts that verify them'
+# A DIFFERENT KIND OF DRIFT FROM THE CHECK ABOVE, and the cheaper one to let happen.
+#
+# The budget AMOUNT and the THRESHOLDS cannot disagree between cluster.json and the Terraform,
+# because the Terraform reads cluster.json with jsondecode(file(...)). That is the design and it
+# needs no check.
+#
+# WHAT CAN DISAGREE IS THE NAME. terraform/aws/guardrails/main.tf writes the budget's name as a
+# literal, and scripts/aws-guardrails-verify.sh looks the budget up BY that name as a second
+# literal in a second file. Rename it in one place and the verifier reports "NO budget named ..."
+# about a budget that exists and is correct - then sends someone to re-apply it, which succeeds,
+# changes nothing, and leaves the check still failing. A false negative on the one gate that
+# stands between this repository and a billable cluster.
+#
+# The same shape exists on the GCP side (display_name vs the script's PREFIX), so both are checked.
+#
+# The notification SEMANTICS are checked for the same reason: the verifier asserts ACTUAL,
+# GREATER_THAN and PERCENTAGE, and it builds the --notification lookup key out of those three
+# values. If main.tf ever used FORECASTED, the lookup would find no subscribers and the script
+# would report "NO subscriber" for every threshold on a budget whose subscribers are all present.
+if command -v python3 >/dev/null 2>&1; then
+  if python3 - <<'PYCHECK'
+import re, sys
+bad = []
+
+def read(p):
+    try:
+        return open(p).read()
+    except OSError as e:
+        print('    cannot read %s: %s' % (p, e))
+        bad.append(p)
+        return ''
+
+aws_tf = read('terraform/aws/guardrails/main.tf')
+aws_sh = read('scripts/aws-guardrails-verify.sh')
+gcp_tf = read('terraform/gcp/guardrails/main.tf')
+gcp_sh = read('scripts/gcp-guardrails-verify.sh')
+
+# --- AWS: the budget name, in two files
+m = re.search(r'^\s*name\s*=\s*"([^"]+)"', aws_tf, re.M)
+tf_name = m.group(1) if m else None
+m = re.search(r'^NAME="([^"]+)"', aws_sh, re.M)
+sh_name = m.group(1) if m else None
+if not tf_name or not sh_name:
+    print('    could not find the AWS budget name in both files (tf=%r sh=%r)' % (tf_name, sh_name))
+    bad.append('aws-name-unreadable')
+elif tf_name != sh_name:
+    print('    AWS budget name differs: main.tf %r vs verify script %r' % (tf_name, sh_name))
+    bad.append('aws-name')
+
+# --- AWS: the three values that make up the verifier's notification lookup key
+for field, want in (('budget_type', 'COST'),
+                    ('time_unit', 'MONTHLY'),
+                    ('notification_type', 'ACTUAL'),
+                    ('comparison_operator', 'GREATER_THAN'),
+                    ('threshold_type', 'PERCENTAGE')):
+    m = re.search(r'^\s*%s\s*=\s*"([^"]+)"' % field, aws_tf, re.M)
+    got = m.group(1) if m else None
+    if got != want:
+        print('    terraform/aws/guardrails/main.tf %s is %r; the verifier assumes %r'
+              % (field, got, want))
+        bad.append(field)
+
+# The verifier builds its lookup key from those values; confirm it really does, so that changing
+# main.tf and this list together cannot silently leave the script behind.
+key = 'NotificationType=ACTUAL,ComparisonOperator=GREATER_THAN'
+if key not in aws_sh:
+    print('    scripts/aws-guardrails-verify.sh no longer builds its lookup key as %r' % key)
+    bad.append('aws-lookup-key')
+if 'ThresholdType=PERCENTAGE' not in aws_sh:
+    print('    scripts/aws-guardrails-verify.sh lookup key is missing ThresholdType=PERCENTAGE')
+    bad.append('aws-lookup-threshold-type')
+
+# --- AWS: both sides must read the same config file
+if 'clusters/aws/cluster.json' not in aws_sh:
+    print('    scripts/aws-guardrails-verify.sh does not read clusters/aws/cluster.json')
+    bad.append('aws-cfg-script')
+if 'clusters/aws/cluster.json' not in read('terraform/aws/guardrails/variables.tf'):
+    print('    terraform/aws/guardrails does not read clusters/aws/cluster.json')
+    bad.append('aws-cfg-tf')
+
+# --- GCP: the script matches budgets by PREFIX, so the display_name must START with it
+m = re.search(r'^PREFIX="([^"]+)"', gcp_sh, re.M)
+gcp_prefix = m.group(1) if m else None
+m = re.search(r'^\s*display_name\s*=\s*"([^"]+)"', gcp_tf, re.M)
+gcp_display = m.group(1) if m else None
+if not gcp_prefix or not gcp_display:
+    print('    could not find the GCP budget name in both files (tf=%r sh=%r)'
+          % (gcp_display, gcp_prefix))
+    bad.append('gcp-name-unreadable')
+elif not gcp_display.startswith(gcp_prefix):
+    print('    GCP display_name %r does not start with the verifier PREFIX %r'
+          % (gcp_display, gcp_prefix))
+    bad.append('gcp-name')
+
+sys.exit(1 if bad else 0)
+PYCHECK
+  then ok 'budget names and notification semantics match on both substrates'
+  else bad 'fix the mismatch above - a renamed budget makes the gate fail on a correct guardrail'
+  fi
+else
+  skip 'python3 missing, skipped'
+fi
+
 
 step 'Optional linters, where installed'
 

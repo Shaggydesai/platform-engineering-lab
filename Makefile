@@ -18,7 +18,8 @@ ENV ?= onprem
 # This is a prerequisite rather than the first line of each recipe because prerequisites are
 # built before the recipe runs, which is the whole point.
 # Every variable this Makefile understands on the command line. Anything else is a typo.
-KNOWN_VARS := TAGS ARGS CHART ENV CTX STORE_NAME PROBE_NS VAULT_NS VAULT_POD VAULT_KEYS
+KNOWN_VARS := TAGS ARGS CHART ENV CTX STORE_NAME PROBE_NS VAULT_NS VAULT_POD VAULT_KEYS \
+              AWS_ALERT_EMAIL
 
 .PHONY: _no-stray-flags
 _no-stray-flags:
@@ -365,6 +366,94 @@ gcp-guardrails-verify: ## Read the budget back from the API and check it MATCHES
 # version only listed the budgets that existed and passed if there were any, which against a real
 # account with two pre-existing ₹2500 budgets would have passed with ours missing entirely.
 	@bash scripts/gcp-guardrails-verify.sh
+
+# ---------------------------------------------------------------------------- AWS (Module 09)
+#
+# THE GUARDRAIL ARRIVES BEFORE THE SUBSTRATE, which is the whole of ADR-0003 Decision 3 applied to
+# a cloud this repository has not built in yet. There is deliberately no `aws-up` here and no
+# `_aws-preflight` either: a gate for a target that does not exist is dead code that rots, and the
+# gate belongs in the same change as the cluster it refuses to build. What exists today is the
+# alarm and the check that reads it back, both of which are usable against an empty account.
+#
+# AND THE REASON THIS MATTERS MORE ON AWS THAN ON GCP, recorded here because it is a money fact
+# rather than a design preference: EKS has no free tier. GKE gives one zonal cluster's management
+# fee for free; an EKS control plane is $0.10/hour from the moment it exists, so roughly $0.20/hour
+# with two spot nodes, EBS and a load balancer. On the AWS free account plan there is also NO spend
+# cap available - the limit that actually pauses resources requires the paid plan - so this budget
+# alerts and stops nothing. `make aws-down` will be the control; this is what tells you it was
+# forgotten.
+
+AWS_GUARDRAIL_TF := terraform/aws/guardrails
+AWS_ALERT_FILE   := .cache/aws-alert-email
+
+.PHONY: aws-guardrails
+aws-guardrails: _no-stray-flags ## ADR-0003 gate - the $5 budget alarm, BEFORE any AWS resource
+# A SEPARATE STATE AND A SEPARATE TARGET from the cluster, for the reason the GCP equivalent above
+# states: `terraform apply` creates in dependency order and nothing would make a budget come
+# first, so a cluster could exist for the length of a failed apply with no alarm watching it.
+#
+# ONE EMAIL ADDRESS IS REQUIRED, and that is the AWS-specific part. Cloud Billing emails the
+# billing account's admins by default, so the GCP guardrail can be applied with no recipient
+# configured and still reach a human. AWS BUDGETS NOTIFY NOBODY: a notification with an empty
+# subscriber list is accepted by the API and silent forever. So a missing address has to fail here
+# rather than produce a budget that exists and watches nothing.
+#
+# The address is taken as a PLAIN STRING and wrapped into Terraform's list type here, deliberately.
+# `TF_VAR_alert_emails` is a `list(string)`, so setting it by hand means exporting JSON
+# (`'["you@example.com"]'`) - and an unquoted or single-element-without-brackets value fails inside
+# Terraform with a type error about the variable, which reads like a bug in this repository.
+#
+# It is kept OUT OF GIT in .cache/ (gitignored), the same arrangement as the GCP billing account
+# ID: this repository is public, and an address in a public repository is an address in a scraper's
+# list.
+	@set -eu; \
+	command -v jq >/dev/null || { printf '\033[31mjq not installed\033[0m\n  make tools\n'; exit 1; }; \
+	command -v aws >/dev/null || { \
+	  printf '\033[31mthe AWS CLI is not installed\033[0m\n\n'; \
+	  printf 'Install it, then configure credentials for the account this lab uses:\n'; \
+	  printf '  aws configure        # region: %s\n' "$$(jq -r '.region' clusters/aws/cluster.json)"; \
+	  exit 1; }; \
+	if ! acct=$$(aws sts get-caller-identity --query Account --output text 2>/dev/null); then \
+	  printf '\033[31mthe AWS CLI has no working credentials\033[0m\n\n'; \
+	  printf 'There are no access keys in this repository and there will not be - the same rule\n'; \
+	  printf 'ADR-0018 enforced for GCP when it refused to download a service-account key. Run:\n\n'; \
+	  printf '  aws configure        # region: %s\n' "$$(jq -r '.region' clusters/aws/cluster.json)"; \
+	  exit 1; \
+	fi; \
+	email="$${AWS_ALERT_EMAIL:-}"; \
+	if [ -z "$$email" ] && [ -r $(AWS_ALERT_FILE) ]; then \
+	  email=$$(cat $(AWS_ALERT_FILE)); \
+	  printf 'alert address read from %s\n' '$(AWS_ALERT_FILE)'; \
+	fi; \
+	if [ -z "$$email" ]; then \
+	  printf '\033[31mno alert email address\033[0m\n\n'; \
+	  printf 'AWS Budgets notify NOBODY by default, so a budget without a subscriber is a\n'; \
+	  printf 'guardrail that cannot warn you - and it looks correct in the console. Set one:\n\n'; \
+	  printf '  make aws-guardrails AWS_ALERT_EMAIL=you@example.com\n\n'; \
+	  printf 'It is remembered in %s (gitignored) so the next run needs no argument.\n' '$(AWS_ALERT_FILE)'; \
+	  exit 1; \
+	fi; \
+	printf '\n'; \
+	printf '  account   %s\n' "$$acct"; \
+	printf '  region    %s   \033[2m(immaterial - Budgets is account-scoped)\033[0m\n' "$$(jq -r '.region' clusters/aws/cluster.json)"; \
+	printf '  budget    %s %s, thresholds %s\n' \
+	  "$$(jq -r '.budget.currency' clusters/aws/cluster.json)" \
+	  "$$(jq -r '.budget.amount_usd' clusters/aws/cluster.json)" \
+	  "$$(jq -c '[.budget.thresholds[] * 100]' clusters/aws/cluster.json)"; \
+	printf '  alerts    %s\n\n' "$$email"; \
+	mkdir -p .cache; \
+	printf '%s' "$$email" > $(AWS_ALERT_FILE); \
+	chmod 600 $(AWS_ALERT_FILE); \
+	TF_VAR_alert_emails=$$(jq -nc --arg e "$$email" '[$$e]'); export TF_VAR_alert_emails; \
+	cd $(AWS_GUARDRAIL_TF) && terraform init -input=false && terraform apply
+
+.PHONY: aws-guardrails-verify
+aws-guardrails-verify: ## Read the budget back from the API and check it MATCHES cluster.json
+# Three questions the GCP equivalent asks in two, because AWS splits them across three API calls:
+# does our budget exist at the amount cluster.json names, are the thresholds on ACTUAL spend, and
+# IS ANYONE SUBSCRIBED. The third has no GCP counterpart and is the one that decides whether this
+# guardrail can warn you at all.
+	@bash scripts/aws-guardrails-verify.sh
 
 GCP_TF := terraform/gcp
 
