@@ -119,15 +119,27 @@ before diagnosing it right** — twice over on the Gateway, committing the first
 fix that actually worked in every case was to stop reading objects and ask the system: curl the
 load balancer, ask GCP for the disks.
 
-### Next: on-prem, whenever those VMs are up
+### ~~Next: on-prem~~ DONE 2026-11-04
 
-```bash
-make onprem-argocd        # tenant-namespaces adopts shopverse-prod
-make smoke                # now 8 checks - the 8th is the adoption
+```
+8/8 the tenant namespace is MANAGED, not merely present
+    managed by Argo CD   tenant-namespaces:/Namespace:argocd/shopverse-prod
 ```
 
-That closes the parking-lot entry about a namespace nothing in Git has managed for five modules.
-`make smoke` fails loudly if the adoption has not happened, which is the point.
+`make onprem-argocd` ran `changed=0` — the same `ansible/roles/argocd` the GKE cluster uses
+(ADR-0020) — `tenant-namespaces` synced, and `make smoke` passes **all 8 checks** including the new
+one. 3 nodes Ready, 6 of 6 pod-to-pod paths, DNS, Service routing, the NodePort from every node,
+and the LoadBalancer at `192.168.100.201` announced by `k8s-w01`.
+
+**That closes the hole ADR-0016's correction found.** `shopverse-prod` was created by hand by
+`make shopverse-secret` in Module 06 and had been unmanaged by Argo CD for five modules — an
+ADR-0002 Rule 3 violation with no symptom, because a namespace looks identical whoever made it. It
+only surfaced because removing `CreateNamespace=true` on GCP made the tenant fail loudly, and the
+manual step that had been masking the same design error on-prem was then visible.
+
+**Both substrates now grant the namespace from the same platform-owned manifest**, sync wave -20,
+no finalizer, `prune: false` — and neither can regress silently, because `make smoke` and
+`make gcp-smoke` both fail on a namespace without the tracking annotation.
 
 ### What Module 08 leaves behind
 
