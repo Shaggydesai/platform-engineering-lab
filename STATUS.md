@@ -182,37 +182,43 @@ gate ships with the cluster it refuses to build.
 
 **The account exists as of 2026-11-04** — free account plan, $100 of credits, free access ending
 2027-05-04. The first session was signed in as root, which is where every AWS account starts and
-is not where any of this should run from (ADR-0023).
+is not where any of this should run from. Two days of identity design later, it turned out this
+account does not have a root user at all (ADR-0024, superseding ADR-0023).
 
 ```bash
-# 1. PROBE THE ACCOUNT FIRST. Clicking "Security credentials" redirects to the signup
-#    page, which means this may be the NEW sign-up experience where there is no root user,
-#    IAM users are programmatic-only, and MFA lives at https://settings.aws.com
-#    (ADR-0023's amendment). The probe is read-only and answers which path is available:
-#      -> open CloudShell, then clone the repo and run:
-#         bash scripts/aws-account-probe.sh
+# 1. MFA on the Builder ID.  DONE 2026-11-04 (TOTP).
+#    https://settings.aws.com -> Manage security and sign-in -> Security -> Register device
+#    NOT the IAM console: on this account type that redirects to the signup page.
 
-# 2. THEN, if the probe says a classic root user and IAM are available, still in CloudShell:
-git clone https://github.com/Shaggydesai/platform-engineering-lab
-cd platform-engineering-lab && bash scripts/aws-bootstrap-identity.sh
+# 2. Credentials - 12 hours, through the browser, NO access key anywhere:
+aws login --profile platform-lab
+export AWS_PROFILE=platform-lab        # add to ~/.bashrc
+aws sts get-caller-identity            # expect assumed-role/..., not user/...
 
-# 3. The script prints four steps: a password and MFA device for the new user, ONE access key
-#    created by hand, two CLI profiles, and a check that `aws sts get-caller-identity` returns
-#    the ROLE's arn rather than the user's.
+# 3. Read back what the account actually permits (read-only):
+bash scripts/aws-account-probe.sh
 
-# 4. Then, on the laptop:
-export AWS_PROFILE=platform-lab
+# 4. Then the guardrail ADR-0003 requires before anything billable:
 make aws-guardrails AWS_ALERT_EMAIL=you@example.com   # remembers it in .cache, mode 600
 make aws-guardrails-verify                            # asks the API what it HAS
 ```
 
-**IAM Identity Center is NOT available on the free account plan**, and neither is Organizations —
-AWS lists both as not supported. So `aws sso login`, the direct analogue of
-`gcloud auth application-default login`, is off the table. The replacement (ADR-0023) is an
-almost-powerless IAM user that may do exactly one thing — assume an admin role whose trust policy
-requires a **recent** MFA code. The long-lived key on the laptop is therefore not a credential for
-anything on its own. **`make aws-guardrails` refuses to run as root** and warns if it is running as
-a bare IAM user rather than an assumed role, which in practice means `AWS_PROFILE` is unset.
+**This account is "Sign up for AWS (new)", which is a different product wearing the same name.**
+There is no root user — sign-in is an **AWS Builder ID**. The **IAM console, CloudShell and
+Security credentials all redirect** to `signup/incomplete`. IAM Identity Center and Organizations
+are both on AWS's not-supported list for the free plan.
+
+**And none of that matters, because `aws login` already does what ADR-0018 asked for:** short-lived
+credentials obtained through a browser session that is itself MFA-protected, renewed on demand,
+with nothing long-lived on the laptop to leak. It is a closer match to
+`gcloud auth application-default login` than the IAM-user-plus-MFA-role scheme ADR-0023 spent a day
+building — which is now deleted, with the reasoning kept.
+
+**Do not click "Upgrade plan."** It would restore IAM, Identity Center and Organizations; it is
+**irreversible** and makes the account liable for charges above the credit balance. None of it is
+needed. The one thing the paid plan genuinely has — a spend limit that *pauses* resources rather
+than only alerting — stays a known gap (ADR-0022 Decision 4), covered by `make aws-down` and
+`make cost-check`.
 
 **Four things about AWS that are not a rename of the GCP path**, all in ADR-0022:
 

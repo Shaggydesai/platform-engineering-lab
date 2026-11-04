@@ -1,7 +1,20 @@
 # ADR-0023: operating AWS without Identity Center, and never as root
 
-**Status:** Accepted
+**Status:** **SUPERSEDED by ADR-0024, 2026-11-04 — the same day it was accepted.**
 **Date:** 2026-11-04
+
+> **Read ADR-0024 first.** This document designs an IAM user and an MFA-gated admin role for an
+> account that turned out to have neither IAM console access nor CloudShell, and that already
+> provides short-lived browser-obtained credentials through `aws login` — the exact thing this
+> ADR was reconstructing by hand.
+>
+> It is kept, rather than deleted, because the reasoning is worth more than the artefact and a
+> repository that quietly removes its wrong turns teaches nothing. `scripts/aws-bootstrap-identity.sh`
+> IS deleted: a careful, stub-tested script that cannot work on the account it was written for is
+> a trap rather than a record.
+>
+> What survives into ADR-0024 unchanged: reading `sts:GetCallerIdentity` before anything billable,
+> and refusing on a root ARN.
 **Decides:** which identity this lab builds AWS resources as, how its credentials are obtained,
 why the bootstrap is a script rather than Terraform, and why no machine in this repository ever
 creates an access key. Ports ADR-0018's "no long-lived credential on the laptop" rule to AWS.

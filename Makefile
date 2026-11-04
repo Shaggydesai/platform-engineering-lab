@@ -429,11 +429,11 @@ aws-guardrails: _no-stray-flags ## ADR-0003 gate - the $5 budget alarm, BEFORE a
 	    printf 'Root cannot be restricted by any policy: it can change the payment method, spend\n'; \
 	    printf 'the credits and close the account. A root ACCESS KEY - which is what the CLI is\n'; \
 	    printf 'using if this fired - is the one AWS credential whose leak has no recovery story,\n'; \
-	    printf 'and it should not exist at all (ADR-0023).\n\n'; \
-	    printf 'Delete it, then bootstrap the identity this lab operates as. In CloudShell,\n'; \
-	    printf 'signed in as root, so no key is ever needed:\n\n'; \
-	    printf '  git clone https://github.com/Shaggydesai/platform-engineering-lab\n'; \
-	    printf '  cd platform-engineering-lab && bash scripts/aws-bootstrap-identity.sh\n\n'; \
+	    printf 'and it should not exist at all (ADR-0024).\n\n'; \
+	    printf 'Delete the key, then get a SHORT-LIVED credential instead - 12 hours, obtained\n'; \
+	    printf 'through the browser, with nothing long-lived on this laptop to leak:\n\n'; \
+	    printf '  aws login --profile platform-lab\n'; \
+	    printf '  export AWS_PROFILE=platform-lab\n\n'; \
 	    printf 'IAM -> Users -> security credentials is where a root key is deleted:\n'; \
 	    printf '  https://console.aws.amazon.com/iam/home#/security_credentials\n'; \
 	    exit 1 ;; \
@@ -443,12 +443,13 @@ aws-guardrails: _no-stray-flags ## ADR-0003 gate - the $5 budget alarm, BEFORE a
 	  *) \
 	    printf '\033[33mthese are an IAM USER'"'"'s own credentials, not an assumed role\033[0m\n\n'; \
 	    printf '  %s\n\n' "$$arn"; \
-	    printf 'Not refused - this works, and on an account that never ran the bootstrap it is the\n'; \
-	    printf 'only thing that can. But it means the long-lived key on this laptop IS the\n'; \
-	    printf 'credential, rather than a key that can do nothing without an MFA code. If the\n'; \
-	    printf 'bootstrap has been run, this is usually AWS_PROFILE being unset:\n\n'; \
+	    printf 'Not refused - it works. But it means a LONG-LIVED ACCESS KEY on this laptop is the\n'; \
+	    printf 'credential, which is what ADR-0018 removed from the GCP path and ADR-0024 says is\n'; \
+	    printf 'unnecessary here: this account issues 12-hour credentials through the browser.\n\n'; \
+	    printf '  aws login --profile platform-lab\n'; \
 	    printf '  export AWS_PROFILE=platform-lab\n'; \
-	    printf '  aws sts get-caller-identity        # expect assumed-role/platform-lab-admin/...\n\n' ;; \
+	    printf '  aws sts get-caller-identity        # expect assumed-role/..., not user/...\n\n'; \
+	    printf 'If AWS_PROFILE is already set, this is usually an expired session - aws login again.\n\n' ;; \
 	esac; \
 	email="$${AWS_ALERT_EMAIL:-}"; \
 	if [ -z "$$email" ] && [ -r $(AWS_ALERT_FILE) ]; then \
