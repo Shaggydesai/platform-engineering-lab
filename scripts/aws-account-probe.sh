@@ -71,12 +71,22 @@ try() {
       no_ "$label"
       printf '%s\n' "$out" | head -3 | sed "s/^/           /"
       return 1 ;;
+    *OptInRequired*|*not\ subscribed\ to\ this\ service*)
+      # NOT an unknown, and not a permission problem either. This is AWS saying the ACCOUNT is
+      # not activated for the service - which on a new account means registration or payment
+      # verification has not completed, however working the console looks and however many
+      # credits the console reports.
+      no_ "$label - THE ACCOUNT IS NOT SUBSCRIBED TO THIS SERVICE"
+      printf '%s\n' "$out" | head -3 | sed "s/^/           /"
+      ACCOUNT_NOT_ACTIVATED=1
+      return 1 ;;
     *)
       unk "$label - the call failed for a reason that is not a denial"
       printf '%s\n' "$out" | head -3 | sed "s/^/           /"
       return 2 ;;
   esac
 }
+ACCOUNT_NOT_ACTIVATED=0
 
 printf '%sWhat is this AWS account, and what will it let us do?%s\n' "$c_step" "$c_off"
 printf '%sread-only: every call below is a describe, a list or a get%s\n' "$c_dim" "$c_off"
@@ -193,7 +203,11 @@ step 'can the budget guardrail be created and read? (ADR-0003 Decision 3)'
 # one gate standing between this repository and a billable cluster, a question mark that means
 # "yes" is worth three lines to avoid.
 if bud=$(aws budgets describe-budgets --account-id "$acct" --output json 2>&1); then
-  yes_ "budgets:DescribeBudgets - $(printf '%s' "$bud" | jq '.Budgets | length') budget(s) exist"
+  n_bud=$(printf '%s' "$bud" | jq '.Budgets | length' 2>/dev/null)
+  # The API returns NOTHING at all when there are no budgets, rather than an empty list, so an
+  # empty capture here means zero and not "I could not see". The first version printed
+  # "  budget(s) exist" with a hole where the number should be.
+  yes_ "budgets:DescribeBudgets - ${n_bud:-0} budget(s) exist"
 elif printf '%s' "$bud" | grep -q 'NotFoundException'; then
   yes_ 'budgets:DescribeBudgets - readable, and this account has no budgets yet'
   dim 'which is the expected state before `make aws-guardrails` has ever run'
@@ -221,7 +235,12 @@ if try 'ec2:DescribeRegions' aws ec2 describe-regions --output json; then
 fi
 
 step 'is m6a.large actually offered there? (the pin clusters/aws/cluster.json says is unverified)'
-if offers=$(aws ec2 describe-instance-type-offerings --region "$want" \
+# SKIPPED, not re-reported. The region call above already found the account unsubscribed to EC2,
+# and this is the same cause - listing it twice is the "one cause, several findings" shape that
+# this repository has caught in gcp-smoke and aws-guardrails-verify already.
+if (( ACCOUNT_NOT_ACTIVATED )); then
+  dim 'skipped - EC2 is not available to this account, which the finding above already says'
+elif offers=$(aws ec2 describe-instance-type-offerings --region "$want" \
               --filters Name=instance-type,Values=m6a.large \
               --query 'InstanceTypeOfferings[].Location' --output text 2>&1); then
   if [[ -n "$offers" && "$offers" != "None" ]]; then
@@ -237,5 +256,22 @@ else
 fi
 
 printf '\n%s%s%s\n' "$c_step" '--------------------------------------------------------------' "$c_off"
+
+# THE VERDICT, because the first version of this script had none and buried its most important
+# finding between two others. A reader should not have to notice which of eleven lines mattered.
+if (( ACCOUNT_NOT_ACTIVATED )); then
+  printf '\n%sTHIS ACCOUNT IS NOT ACTIVATED FOR EC2.%s Nothing in Module 09 can be built until it is:\n' "$c_err" "$c_off"
+  printf 'no instances, therefore no EKS nodes, therefore no cluster. A working console and a\n'
+  printf 'credit balance do not mean activation finished - OptInRequired is the API saying so.\n\n'
+  printf '  1. https://signup.aws.amazon.com/billing/signup/incomplete  -> Complete your AWS registration\n'
+  printf '  2. Check email, including spam, for anything AWS asked for\n'
+  printf '  3. Check the card for a pending ~$1 authorization. In India an international\n'
+  printf '     authorization often needs explicit approval from the bank or its app, and AWS\n'
+  printf '     activation stalls silently until it clears.\n'
+  printf '  4. Still failing 24h after sign-up: AWS Support, Account and Billing, which is free.\n\n'
+  printf '%sDo NOT click "Upgrade plan" to try to fix this%s - it is irreversible, it makes the\n' "$c_warn" "$c_off"
+  printf 'account liable for charges above the credits, and it is not what OptInRequired means.\n'
+fi
+
 printf '\nPaste this whole output back. It decides which ADR-0023 path is actually available,\n'
 printf 'and nothing here changed anything.\n'

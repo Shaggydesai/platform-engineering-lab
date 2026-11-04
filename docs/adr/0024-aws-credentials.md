@@ -98,6 +98,35 @@ ADR-0003's gate requires), which regions are enabled, and **whether `m6a.large` 
 in `ap-south-1`** — a pin `clusters/aws/cluster.json` has carried as explicitly unverified since
 ADR-0022.
 
+### Correction, measured: the registration page was not noise, and two inferences in this ADR were wrong
+
+The first live run of `scripts/aws-account-probe.sh` settled three things this document had
+reasoned its way to instead of asking:
+
+| this ADR said | the API said |
+|:--|:--|
+| the signup/incomplete page is a free-plan redirect, safe to skip | **`OptInRequired: You are not subscribed to this service`** on every EC2 call |
+| AWS manages an Organization above this account | **`AWSOrganizationsNotInUseException`** — it is a standalone account |
+| the IAM console being blocked means IAM is unavailable | `iam:ListUsers`, `ListRoles`, `ListVirtualMFADevices` all **succeed** |
+
+**The first one matters most and it was my advice that was wrong.** The registration page says
+*"either not finished registering, or your account is currently on free plan"*, and I concluded
+free-plan twice — once because credits had been granted and the console worked, once because it
+rate-limited. **A working console and a credit balance are not activation.** `OptInRequired` is the
+API stating plainly that registration has not completed, and until it does there is no EC2, so no
+EKS nodes, so no cluster. Nothing in Module 09 can be built.
+
+**The IAM one changes this ADR's reasoning without changing its decision.** ADR-0023's scheme was
+not *impossible* here, only *unnecessary* — `aws login` is still the better credential and no access
+key is still the right answer. But "IAM is unavailable" was an inference from three console
+redirects, and the API disagrees with it.
+
+**And `aws login` returns `arn:aws:iam::331970435482:root`.** Short-lived (12h) and obtained through
+an MFA-protected browser session, which is a materially different thing from a root access key on
+disk — but it is still the unrestricted principal, and `make aws-guardrails` currently refuses that
+ARN outright. **That guard is now wrong on this account**, and the distinction it needs to draw is
+between a root *session* and a root *key*. Parked until there is something to guard.
+
 **What is NOT verified:**
 
 - **That `aws login` exists in the installed CLI.** It is new; an older `aws` will answer
