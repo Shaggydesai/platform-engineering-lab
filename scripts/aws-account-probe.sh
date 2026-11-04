@@ -39,6 +39,16 @@ dim()  { printf '           %s%s%s\n' "$c_dim" "$*" "$c_off"; }
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# AWS CLI v2 PIPES OUTPUT THROUGH A PAGER, and the first run of this probe is the evidence that it
+# can reach a script: three calls came back with EMPTY output and an EMPTY error string, including
+# `budgets describe-budgets` which SUCCEEDED and then reported "" budget(s) exist. An empty capture
+# is indistinguishable from a silent API, which is the same failure this repository keeps finding
+# in its own checks - a result that cannot tell "nothing" from "I did not see".
+#
+# The pager is supposed to disengage when stdout is not a terminal. Rather than reason about when
+# that holds inside command substitution under WSL, it is turned off outright.
+export AWS_PAGER=""
+
 command -v aws >/dev/null || { echo "the AWS CLI is not on PATH - run this in CloudShell"; exit 1; }
 command -v jq  >/dev/null || { echo "jq is not on PATH - run this in CloudShell"; exit 1; }
 
@@ -59,11 +69,11 @@ try() {
   case "$out" in
     *AccessDenied*|*UnauthorizedOperation*|*not\ authorized*|*AuthorizationError*|*explicit\ deny*)
       no_ "$label"
-      dim "$(printf '%s' "$out" | head -1 | cut -c1-150)"
+      printf '%s\n' "$out" | head -3 | sed "s/^/           /"
       return 1 ;;
     *)
       unk "$label - the call failed for a reason that is not a denial"
-      dim "$(printf '%s' "$out" | head -1 | cut -c1-150)"
+      printf '%s\n' "$out" | head -3 | sed "s/^/           /"
       return 2 ;;
   esac
 }
@@ -86,8 +96,9 @@ yes_ "caller  $arn"
 
 case "$arn" in
   *:root)
-    dim 'CLASSIC ROOT USER. The account has a root user in the traditional sense, so the' ;
-    dim 'ADR-0023 bootstrap applies as written.' ;;
+    dim 'ROOT. `aws login` issues root credentials on this account - short-lived (12h) and' ;
+    dim 'obtained through an MFA-protected browser session, which is a different thing from a' ;
+    dim 'root ACCESS KEY, but still the unrestricted principal (ADR-0024).' ;;
   *:assumed-role/*)
     dim 'An assumed role. On the new sign-up experience this is normal even in the console -' ;
     dim 'the Builder ID federates into a role rather than signing in as a root user.' ;;
@@ -171,7 +182,7 @@ else
       dim 'federated and assumed-role ARNs are not always valid policy sources' ;;
     *) unk 'the simulator call failed for a reason that is not a denial' ;;
   esac
-  dim "$(printf '%s' "$sim" | head -1 | cut -c1-150)"
+  printf '%s\n' "$sim" | head -3 | sed "s/^/           /"
 fi
 
 # ---------------------------------------------------------------- 5. the guardrail
@@ -192,7 +203,7 @@ elif printf '%s' "$bud" | grep -qE 'AccessDenied|not authorized'; then
   dim 'back out of the API, not merely applied'
 else
   unk 'budgets:DescribeBudgets failed for a reason that is not a denial'
-  dim "$(printf '%s' "$bud" | head -1 | cut -c1-150)"
+  printf '%s\n' "$bud" | head -3 | sed "s/^/           /"
 fi
 
 # ---------------------------------------------------------------- 6. where things can be built
@@ -222,7 +233,7 @@ if offers=$(aws ec2 describe-instance-type-offerings --region "$want" \
   fi
 else
   unk 'could not ask about instance type offerings'
-  dim "$(printf '%s' "$offers" | head -1 | cut -c1-150)"
+  printf '%s\n' "$offers" | head -3 | sed "s/^/           /"
 fi
 
 printf '\n%s%s%s\n' "$c_step" '--------------------------------------------------------------' "$c_off"
