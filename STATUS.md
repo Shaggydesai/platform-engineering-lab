@@ -185,11 +185,14 @@ gate ships with the cluster it refuses to build.
 is not where any of this should run from (ADR-0023).
 
 ```bash
-# 1. BY HAND, IN THE CONSOLE, FIRST: MFA on the root user.
-#    Root cannot be restricted by any policy, so MFA is the whole of its defence.
-#    your name (top right) -> Security credentials -> Multi-factor authentication
+# 1. PROBE THE ACCOUNT FIRST. Clicking "Security credentials" redirects to the signup
+#    page, which means this may be the NEW sign-up experience where there is no root user,
+#    IAM users are programmatic-only, and MFA lives at https://settings.aws.com
+#    (ADR-0023's amendment). The probe is read-only and answers which path is available:
+#      -> open CloudShell, then clone the repo and run:
+#         bash scripts/aws-account-probe.sh
 
-# 2. IN CLOUDSHELL, signed in as root - so root never needs an access key at all:
+# 2. THEN, if the probe says a classic root user and IAM are available, still in CloudShell:
 git clone https://github.com/Shaggydesai/platform-engineering-lab
 cd platform-engineering-lab && bash scripts/aws-bootstrap-identity.sh
 

@@ -114,6 +114,43 @@ Reading `sts:GetCallerIdentity` costs one call and turns a convention into a mec
   silence.
 - **ARN is `:assumed-role/...`** → silent, which is the intended state.
 
+## Amendment, same day: the documentation describes two different AWS accounts
+
+Everything above was written from AWS's documentation, and the documentation uses one name for two
+products. **Clicking "Security credentials" on this account redirects to
+`signup.aws.amazon.com/billing/signup/incomplete`**, whose own text says: *"either not finished
+registering, **or your account is currently on free plan**."*
+
+| | Sign up for AWS (advanced) | **Sign up for AWS (new)** — the free plan |
+|:--|:--|:--|
+| Sign-in identity | a root user | an **AWS Builder ID**; AWS's words: *"You do not create a root user"* |
+| MFA lives at | IAM → Security credentials | **settings.aws.com** → Manage security and sign-in → Security → Register device |
+| IAM users | console **and** programmatic | *"can only be used for **programmatic access, not console access**"* |
+| Organization policies | yours | **AWS manages the SCPs and RCPs** |
+| AWS's own advice | — | *"If you need fine-grained control over your users or role-based permissions, do not use Sign up for AWS (new)"* |
+
+**This puts Decision 2's bootstrap in question, and the questionable part is a step a human
+performs.** `scripts/aws-bootstrap-identity.sh` ends by telling the operator to give `platform-lab`
+a console password and enrol its MFA device in the IAM console. On the new experience that may be
+impossible. The *design* may survive — MFA on an IAM user is an API-level fact and is separate from
+console sign-in, so `iam:CreateVirtualMFADevice` + `iam:EnableMFADevice` could still produce the
+`aws:MultiFactorAuthPresent` the trust policy needs — but **may** is doing real work in that
+sentence and nothing here has tested it.
+
+**So the next step is not another document, it is a question put to the API.**
+`scripts/aws-account-probe.sh` is read-only and reports, with three outcomes each: which identity
+shape the credentials are, whether an Organization sits above this account that it does not manage,
+whether MFA is enrolled, whether `iam:CreateUser`/`CreateRole`/`EnableMFADevice` would be permitted
+(via `simulate-principal-policy`, which answers without doing), whether Budgets is readable, and —
+while it is there — whether `m6a.large` is genuinely offered in `ap-south-1`, which
+`clusters/aws/cluster.json` has carried as an unverified pin since ADR-0022.
+
+**The lesson is the one this project keeps relearning, in a new place.** Every previous instance
+was a *check* that confirmed a request was recorded rather than that it took effect. This one is a
+*plan* built on a document that described a different product, and it would have been found by the
+first human step failing — after the IAM objects existed and the operator was three screens deep.
+**Reading a document is not a check.**
+
 ## Consequences
 
 **`make cost-check` now sweeps every enabled region, and the reason is a near miss.** The AWS half
