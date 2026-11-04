@@ -88,6 +88,15 @@ make down ENV=gcp
 make cost-check    # fails loudly if anything billable survived
 ```
 
+## Where to read
+
+| | |
+|:--|:--|
+| [docs/reading.md](docs/reading.md) | **Start here.** What to read about each technology, in the order this lab meets it, each paired with the ADR that says which question to read it for. |
+| [docs/roadmap.md](docs/roadmap.md) | The twelve modules, their deliverables, and what "done" means for each. |
+| [docs/parking-lot.md](docs/parking-lot.md) | Problems deferred and mistakes made, each with what was believed, what was true, and what it cost. |
+| [docs/runbooks/](docs/runbooks/) | How to actually do the thing, per module. |
+
 ## Decisions
 
 | ADR | Decision |

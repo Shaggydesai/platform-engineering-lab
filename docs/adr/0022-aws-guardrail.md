@@ -1,6 +1,6 @@
 # ADR-0022: the AWS guardrail, and what AWS's free plan changes about the budget
 
-**Status:** Accepted
+**Status:** Accepted, **with a correction of scope — see the amendment at the end.**
 **Date:** 2026-11-03
 **Decides:** where the AWS cost guardrail lives, what it is denominated in, why it must name a
 recipient, and the two instance-shape facts that have to be settled before a cluster is built.
@@ -176,3 +176,41 @@ account.
   in two files — which is now a lint check rather than a hope.
 - **That the alert email arrives.** The verifier confirms a subscriber *exists*, which is further
   than the GCP check can get, and an address that bounces still looks identical from the API.
+
+
+## Amendment, 2026-11-04: this ADR designed the wrong cluster for Module 09's primary path
+
+Found by reading `docs/roadmap.md` while building `docs/reading.md` — that is, by reading the plan,
+which nobody had done since Module 08 started.
+
+> **Module 09 — AWS: the self-managed environment**
+> Terraform for spot EC2 instances (no NAT gateway); Ansible reused from Module 03 to build the
+> cluster; the AWS overlay; **one EKS session for comparison**, then destroyed.
+
+**The primary AWS substrate is kubeadm on EC2**, built by the same `ansible/roles/control_plane`,
+`workers`, `cilium` and `kube_proxy_removal` that build the laptop cluster. EKS is **one comparison
+session**. This ADR designed EKS as the primary and did not mention kubeadm at all.
+
+**Why that matters beyond tidiness.** GKE already supplied the managed-control-plane contrast that
+ADR-0001 asks for; a second managed cluster measures the same axis twice. The self-managed one is
+what tests whether **Layers 0 and 1 port** — the Ansible that has only ever run against libvirt VMs
+on a laptop. That is the actual question Module 09 exists to answer, and EKS cannot answer it,
+because on EKS those four roles have nothing to do.
+
+It is also cheaper by about half: Decision 2's ~$0.20/hour is the EKS figure, and a kubeadm cluster
+on plain EC2 has no control-plane fee because the control plane is an instance you are already
+paying for.
+
+**What survives unchanged:** the $5 budget and its three thresholds, the subscriber requirement
+(Decision 3), the free-plan facts (Decision 4), `m6a.large` over any `t3.*` (Decision 5's real
+content), and public subnets with no NAT gateway (Decision 6).
+
+**What does not:** the `node_group` block in `clusters/aws/cluster.json`, which is shaped like an
+EKS managed node group; and **Decision 5's claim that two AZs are forced**, which is an EKS
+constraint on its control plane and does not bind a kubeadm cluster on plain EC2.
+
+**Second instance of this exact mistake.** `STATUS.md` already records one: a parking-lot entry
+described something as "Module 08's opening move", and that was believed on a later read when the
+roadmap said otherwise. **The roadmap is the plan; a document written later is not an amendment to
+it just because it is more recent.** Both times the fix was to go and read the roadmap, and both
+times nothing forced that.
