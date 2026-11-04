@@ -180,11 +180,36 @@ That closes the parking-lot entry about a namespace nothing in Git has managed f
 `aws-up` and no `_aws-preflight` — a gate for a target that does not exist is dead code, and the
 gate ships with the cluster it refuses to build.
 
+**The account exists as of 2026-11-04** — free account plan, $100 of credits, free access ending
+2027-05-04. The first session was signed in as root, which is where every AWS account starts and
+is not where any of this should run from (ADR-0023).
+
 ```bash
-# once the account exists and `aws configure` is done (region ap-south-1):
+# 1. BY HAND, IN THE CONSOLE, FIRST: MFA on the root user.
+#    Root cannot be restricted by any policy, so MFA is the whole of its defence.
+#    your name (top right) -> Security credentials -> Multi-factor authentication
+
+# 2. IN CLOUDSHELL, signed in as root - so root never needs an access key at all:
+git clone https://github.com/Shaggydesai/platform-engineering-lab
+cd platform-engineering-lab && bash scripts/aws-bootstrap-identity.sh
+
+# 3. The script prints four steps: a password and MFA device for the new user, ONE access key
+#    created by hand, two CLI profiles, and a check that `aws sts get-caller-identity` returns
+#    the ROLE's arn rather than the user's.
+
+# 4. Then, on the laptop:
+export AWS_PROFILE=platform-lab
 make aws-guardrails AWS_ALERT_EMAIL=you@example.com   # remembers it in .cache, mode 600
 make aws-guardrails-verify                            # asks the API what it HAS
 ```
+
+**IAM Identity Center is NOT available on the free account plan**, and neither is Organizations —
+AWS lists both as not supported. So `aws sso login`, the direct analogue of
+`gcloud auth application-default login`, is off the table. The replacement (ADR-0023) is an
+almost-powerless IAM user that may do exactly one thing — assume an admin role whose trust policy
+requires a **recent** MFA code. The long-lived key on the laptop is therefore not a credential for
+anything on its own. **`make aws-guardrails` refuses to run as root** and warns if it is running as
+a bare IAM user rather than an assumed role, which in practice means `AWS_PROFILE` is unset.
 
 **Four things about AWS that are not a rename of the GCP path**, all in ADR-0022:
 

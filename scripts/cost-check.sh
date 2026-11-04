@@ -25,9 +25,51 @@ bucket_warn=0
 sm_grand=0
 c_dim=$'\033[2m'; c_warn=$'\033[33m'; c_off=$'\033[0m'
 
+# EVERY ENABLED REGION, NOT A LIST SOMEBODY REMEMBERED - and this is the third time that lesson
+# has arrived in this repository, which is why it is now the default rather than a widening.
+#
+#   2026-10-31  cost-check looked only at the project `gcloud config` was pointed at, and the
+#               billing account turned out to be carrying ₹591 of charges in another one.
+#   2026-10-31  it covered compute and GKE, so a bucket, a KMS keyring and an Artifact Registry
+#               from an abandoned state were invisible while it printed "nothing billable".
+#   2026-11-04  the AWS sweep was `for r in ap-south-1 us-east-1`, written when ap-south-1 was
+#               the chosen region. The account's console had opened in eu-north-1, which is
+#               where a stray click would have built - and this check would have said clean.
+#
+# A SWEEP IS EXACTLY AS WIDE AS THE LIST SOMEBODY WROTE, AND NOBODY REVISITS THAT LIST. So the
+# list is not written here any more: `describe-regions` returns the ones this account has enabled,
+# and that answer changes when the account does.
+#
+# WHAT IT COSTS, said out loud because it is not free in time: ~17 regions on a new account, five
+# calls each, so 30-60 seconds. That is the price of a check that cannot be wrong about where it
+# looked, on a command that runs once at the end of a session. The configured region is swept
+# first so the interesting output appears immediately rather than after the alphabet.
 if command -v aws >/dev/null 2>&1 && aws sts get-caller-identity >/dev/null 2>&1; then
   echo "AWS"
-  for r in ap-south-1 us-east-1; do
+  home_region=$(jq -r '.region' clusters/aws/cluster.json 2>/dev/null || echo ap-south-1)
+
+  # --region on describe-regions is only the endpoint it asks; the answer is account-wide.
+  if ! all_regions=$(aws ec2 describe-regions --region "$home_region" \
+                       --query 'Regions[].RegionName' --output text 2>/dev/null); then
+    all_regions=''
+  fi
+  if [ -z "$all_regions" ]; then
+    # NOT a silent fallback to the old hardcoded pair. If the sweep could not learn where to look,
+    # that is a narrower answer than it claims to give, and ADR-0003's three-outcome rule says a
+    # partial answer is said out loud rather than read as all clear.
+    regions="$home_region"
+    printf '  %scould not list regions - sweeping %s ONLY, which is narrower than this check means to be%s\n' \
+      "$c_warn" "$home_region" "$c_off"
+    narrow=1
+  else
+    # Configured region first, then the rest, each exactly once.
+    regions="$home_region $(printf '%s\n' $all_regions | grep -vx "$home_region" | tr '\n' ' ')"
+  fi
+
+  n_reg=$(printf '%s\n' $regions | grep -c .)
+  printf '  %ssweeping %s region(s)%s\n' "$c_dim" "$n_reg" "$c_off"
+
+  for r in $regions; do
     inst=$(aws ec2 describe-instances --region "$r" \
       --filters Name=instance-state-name,Values=running,pending \
       --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null)
@@ -41,11 +83,36 @@ if command -v aws >/dev/null 2>&1 && aws sts get-caller-identity >/dev/null 2>&1
     for pair in "instances:$inst" "load-balancers:$lbs" "unattached-volumes:$vols" \
                 "nat-gateways:$nats" "eks-clusters:$eks"; do
       k=${pair%%:*}; v=${pair#*:}
-      [ -n "$v" ] && [ "$v" != "None" ] && { echo "  [$r] $k: $v"; found=1; }
+      [ -n "$v" ] && [ "$v" != "None" ] || continue
+      echo "  [$r] $k: $v"
+      found=1
+      # THE REMOVE COMMAND, because the verdict at the bottom of this script promises one ("each
+      # finding above carries its own remove command") and for AWS it was not true - a line that
+      # names a resource and leaves you to work out the call is how a finding becomes a tab left
+      # open until tomorrow. The GCP half has done this since 2026-10-31.
+      case "$k" in
+        instances)          printf '    %sremove: aws ec2 terminate-instances --region %s --instance-ids NAME%s\n' "$c_dim" "$r" "$c_off" ;;
+        load-balancers)     printf '    %sremove: aws elbv2 delete-load-balancer --region %s --load-balancer-arn ARN%s\n' "$c_dim" "$r" "$c_off" ;;
+        unattached-volumes) printf '    %sremove: aws ec2 delete-volume --region %s --volume-id NAME%s\n' "$c_dim" "$r" "$c_off" ;;
+        nat-gateways)       printf '    %sremove: aws ec2 delete-nat-gateway --region %s --nat-gateway-id NAME   %s(ADR-0003 forbids these outright)%s\n' "$c_dim" "$r" "$c_warn" "$c_off" ;;
+        eks-clusters)       printf '    %sremove: make aws-down   %s(not `aws eks delete-cluster` - the load balancers and\n' "$c_dim" "$c_warn"
+                            printf '            volumes its controllers created must go FIRST, ADR-0021)%s\n' "$c_off" ;;
+      esac
     done
   done
-  [ "$found" -eq 0 ] && echo "  clean"
-  checked=$((checked + 1))
+
+  # The EKS control plane is the one that bills whether or not anything runs on it, so it gets its
+  # own sentence rather than being one line among five. $0.10/hour is ~$2.40/day forgotten.
+  if [ "$found" -eq 0 ]; then
+    echo "  clean"
+  else
+    printf '  %san eks-clusters line is $0.10/hour on its own, before any node%s\n' "$c_dim" "$c_off"
+  fi
+  if [ "${narrow:-0}" = "1" ]; then
+    skipped="$skipped AWS-regions-beyond-$home_region"
+  else
+    checked=$((checked + 1))
+  fi
 else
   echo "AWS: cli not configured, skipped"
   skipped="$skipped AWS"

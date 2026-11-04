@@ -413,13 +413,43 @@ aws-guardrails: _no-stray-flags ## ADR-0003 gate - the $5 budget alarm, BEFORE a
 	  printf 'Install it, then configure credentials for the account this lab uses:\n'; \
 	  printf '  aws configure        # region: %s\n' "$$(jq -r '.region' clusters/aws/cluster.json)"; \
 	  exit 1; }; \
-	if ! acct=$$(aws sts get-caller-identity --query Account --output text 2>/dev/null); then \
+	if ! who=$$(aws sts get-caller-identity --output json 2>/dev/null); then \
 	  printf '\033[31mthe AWS CLI has no working credentials\033[0m\n\n'; \
 	  printf 'There are no access keys in this repository and there will not be - the same rule\n'; \
 	  printf 'ADR-0018 enforced for GCP when it refused to download a service-account key. Run:\n\n'; \
 	  printf '  aws configure        # region: %s\n' "$$(jq -r '.region' clusters/aws/cluster.json)"; \
 	  exit 1; \
 	fi; \
+	acct=$$(printf '%s' "$$who" | jq -r '.Account'); \
+	arn=$$(printf '%s' "$$who" | jq -r '.Arn'); \
+	case "$$arn" in \
+	  *:root) \
+	    printf '\033[31mthese are ROOT credentials - refusing\033[0m\n\n'; \
+	    printf '  %s\n\n' "$$arn"; \
+	    printf 'Root cannot be restricted by any policy: it can change the payment method, spend\n'; \
+	    printf 'the credits and close the account. A root ACCESS KEY - which is what the CLI is\n'; \
+	    printf 'using if this fired - is the one AWS credential whose leak has no recovery story,\n'; \
+	    printf 'and it should not exist at all (ADR-0023).\n\n'; \
+	    printf 'Delete it, then bootstrap the identity this lab operates as. In CloudShell,\n'; \
+	    printf 'signed in as root, so no key is ever needed:\n\n'; \
+	    printf '  git clone https://github.com/Shaggydesai/platform-engineering-lab\n'; \
+	    printf '  cd platform-engineering-lab && bash scripts/aws-bootstrap-identity.sh\n\n'; \
+	    printf 'IAM -> Users -> security credentials is where a root key is deleted:\n'; \
+	    printf '  https://console.aws.amazon.com/iam/home#/security_credentials\n'; \
+	    exit 1 ;; \
+	esac; \
+	case "$$arn" in \
+	  *:assumed-role/*) : ;; \
+	  *) \
+	    printf '\033[33mthese are an IAM USER'"'"'s own credentials, not an assumed role\033[0m\n\n'; \
+	    printf '  %s\n\n' "$$arn"; \
+	    printf 'Not refused - this works, and on an account that never ran the bootstrap it is the\n'; \
+	    printf 'only thing that can. But it means the long-lived key on this laptop IS the\n'; \
+	    printf 'credential, rather than a key that can do nothing without an MFA code. If the\n'; \
+	    printf 'bootstrap has been run, this is usually AWS_PROFILE being unset:\n\n'; \
+	    printf '  export AWS_PROFILE=platform-lab\n'; \
+	    printf '  aws sts get-caller-identity        # expect assumed-role/platform-lab-admin/...\n\n' ;; \
+	esac; \
 	email="$${AWS_ALERT_EMAIL:-}"; \
 	if [ -z "$$email" ] && [ -r $(AWS_ALERT_FILE) ]; then \
 	  email=$$(cat $(AWS_ALERT_FILE)); \
