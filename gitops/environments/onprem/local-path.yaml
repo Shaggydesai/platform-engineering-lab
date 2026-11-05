@@ -62,6 +62,13 @@ storageClass:
 # A tag would also be an improvement over `latest` and is NOT what this asks for: a digest is
 # the only form that cannot change under the cluster.
 #
-# helperImage:
-#   repository: docker.io/library/busybox@sha256
-#   tag: <64 hex characters, with no sha256: prefix - the chart adds the colon>
+# RESOLVED AND PINNED 2026-11-05. `scripts/image-digest.sh docker.io/library/busybox latest`
+# returned the digest below - the bytes `latest` pointed at on that day, which is the same thing
+# the Gateway API pin means by a sha256: not a version anybody chose, but the exact content that
+# was inspected. It stops moving from here.
+#
+# To move it deliberately: run that script again and replace the hex. `make lint` checks the
+# shape, so a tag pasted here by mistake fails before it reaches a cluster.
+helperImage:
+  repository: docker.io/library/busybox@sha256
+  tag: "a46257e06c82ad85242d0d38077d0a52d9896389ca60a1a59d3463db586e5fa4"

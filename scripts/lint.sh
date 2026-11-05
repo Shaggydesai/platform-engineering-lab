@@ -737,9 +737,15 @@ else
 fi
 
 step 'Any helper-image pin is a digest, not a tag'
-# WHAT THIS CHECK CLAIMS, precisely: no environment carries a MALFORMED helper-image pin. It does
-# NOT claim the image is pinned - an environment with no `helperImage` at all is using the chart's
-# default of `docker.io/library/busybox:latest`, and this prints that rather than passing over it.
+# WHAT THIS CHECK CLAIMS, precisely: every environment where local-path is actually DEPLOYED
+# pins its helper image by digest, and all of them pin the same one. Three other states are
+# printed rather than passed over - not deployed, deployed but unpinned, and pinned malformed -
+# because an `ok` that silently covers any of them is the failure most of this file guards against.
+#
+# "Deployed" is read from gitops/clusters/<env>/platform/local-path.yaml, not from the presence of
+# an overlay. The first version of this check conflated the two and reported that busybox:latest
+# was in use on aws and gcp, where the chart is not installed at all - those overlays exist to
+# say so, since GKE and EKS ship their own default StorageClass.
 #
 # The distinction is the one this repository keeps paying for: a check whose "ok" covers a case it
 # never examined. So the unpinned environments are listed every run, and the green line below says
@@ -757,8 +763,22 @@ if not files:
     print("  no local-path overlays found")
     sys.exit(2)
 
-bad, unpinned = [], []
+bad, unpinned, absent = [], [], []
 for f in files:
+    env = f.parent.name
+    # IS THE CHART EVEN DEPLOYED HERE? An overlay in gitops/environments/<env>/ is values for an
+    # Application; if gitops/clusters/<env>/platform/ has no local-path.yaml, no Application
+    # reads it and the helper image is not running on that substrate at all.
+    #
+    # The first version of this check skipped that question and reported "the chart default
+    # docker.io/library/busybox:latest is in use" for aws and gcp, where local-path is NOT
+    # deployed - GKE and EKS ship their own default StorageClass, which those two overlays say
+    # in as many words. A check that overstates what it knows is the thing this check was
+    # written to avoid, and it did it in its own first run.
+    if not pathlib.Path("gitops/clusters") .joinpath(env, "platform", "local-path.yaml").is_file():
+        absent.append(env)
+        continue
+
     try:
         doc = yaml.safe_load(f.read_text()) or {}
     except yaml.YAMLError as e:
@@ -788,9 +808,37 @@ if unpinned:
     print( "    open parking-lot item (2026-10-29). To close it:")
     print( "      scripts/image-digest.sh docker.io/library/busybox latest")
 
+# EVERY DEPLOYED ENVIRONMENT MUST PIN THE SAME BYTES, which is the half that is about this
+# project's premise rather than about supply chain. Three substrates each pinning a different
+# helper image would be three different platforms wearing one definition - and it is the kind of
+# drift nothing else here would notice, because each one would be individually valid.
+digests = {}
+for f in files:
+    env = f.parent.name
+    if env in absent:
+        continue
+    try:
+        doc = yaml.safe_load(f.read_text()) or {}
+    except yaml.YAMLError:
+        continue
+    h = (doc.get("helperImage") or {}).get("tag")
+    if h:
+        digests[env] = str(h)
+if len(set(digests.values())) > 1:
+    print("  deployed environments pin DIFFERENT helper images:")
+    for env, h in sorted(digests.items()):
+        print(f"    {env}: {h}")
+    bad.append("disagreement")
+
+if absent:
+    print(f"  not deployed, so nothing to pin: {', '.join(sorted(absent))}"
+          " (their clusters have no local-path Application)")
+if digests and not bad:
+    print(f"  pinned by digest: {', '.join(sorted(digests))}")
+
 sys.exit(1 if bad else 0)
 PYHELPER
-  then ok 'no malformed helper-image pin - any environment listed above is simply unpinned'
+  then ok 'every deployed environment pins its helper image by digest, and they agree'
   else
     rc=$?
     if [[ $rc -eq 2 ]]; then skip 'no local-path overlays - see above'
