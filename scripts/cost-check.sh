@@ -40,10 +40,17 @@ c_dim=$'\033[2m'; c_warn=$'\033[33m'; c_off=$'\033[0m'
 # list is not written here any more: `describe-regions` returns the ones this account has enabled,
 # and that answer changes when the account does.
 #
-# WHAT IT COSTS, said out loud because it is not free in time: ~17 regions on a new account, five
-# calls each, so 30-60 seconds. That is the price of a check that cannot be wrong about where it
-# looked, on a command that runs once at the end of a session. The configured region is swept
-# first so the interesting output appears immediately rather than after the alphabet.
+# AND IT RUNS THE REGIONS IN PARALLEL, because the first version did not and the user pressed
+# Ctrl-C. That is the whole justification: ~17 regions x 5 sequential calls is a minute of silence
+# with no output, on the one command that stands between this project and a surprise bill.
+#
+# A CHECK NOBODY WAITS FOR IS A CHECK THAT DOES NOT RUN, which is a worse failure than a check
+# that is wrong - a wrong check at least produces something to argue with. Every region is swept
+# in its own background subshell writing to its own file, then the files are read back in order,
+# so the wall time is one region rather than seventeen and the output order stays deterministic.
+#
+# The configured region is still listed first, so the interesting line appears at the top rather
+# than somewhere in the alphabet.
 if command -v aws >/dev/null 2>&1 && aws sts get-caller-identity >/dev/null 2>&1; then
   echo "AWS"
   home_region=$(jq -r '.region' clusters/aws/cluster.json 2>/dev/null || echo ap-south-1)
@@ -67,23 +74,39 @@ if command -v aws >/dev/null 2>&1 && aws sts get-caller-identity >/dev/null 2>&1
   fi
 
   n_reg=$(printf '%s\n' $regions | grep -c .)
-  printf '  %ssweeping %s region(s)%s\n' "$c_dim" "$n_reg" "$c_off"
+  printf '  %ssweeping %s region(s) in parallel%s\n' "$c_dim" "$n_reg" "$c_off"
+
+  aws_tmp=$(mktemp -d)
+  trap 'rm -rf "$aws_tmp"' EXIT
 
   for r in $regions; do
-    inst=$(aws ec2 describe-instances --region "$r" \
-      --filters Name=instance-state-name,Values=running,pending \
-      --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null)
-    lbs=$(aws elbv2 describe-load-balancers --region "$r" \
-      --query 'LoadBalancers[].LoadBalancerName' --output text 2>/dev/null)
-    vols=$(aws ec2 describe-volumes --region "$r" \
-      --query 'Volumes[?State==`available`].VolumeId' --output text 2>/dev/null)
-    nats=$(aws ec2 describe-nat-gateways --region "$r" \
-      --query 'NatGateways[?State==`available`].NatGatewayId' --output text 2>/dev/null)
-    eks=$(aws eks list-clusters --region "$r" --query 'clusters' --output text 2>/dev/null)
-    for pair in "instances:$inst" "load-balancers:$lbs" "unattached-volumes:$vols" \
-                "nat-gateways:$nats" "eks-clusters:$eks"; do
-      k=${pair%%:*}; v=${pair#*:}
-      [ -n "$v" ] && [ "$v" != "None" ] || continue
+    (
+      inst=$(aws ec2 describe-instances --region "$r" \
+        --filters Name=instance-state-name,Values=running,pending \
+        --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null)
+      lbs=$(aws elbv2 describe-load-balancers --region "$r" \
+        --query 'LoadBalancers[].LoadBalancerName' --output text 2>/dev/null)
+      vols=$(aws ec2 describe-volumes --region "$r" \
+        --query 'Volumes[?State==`available`].VolumeId' --output text 2>/dev/null)
+      nats=$(aws ec2 describe-nat-gateways --region "$r" \
+        --query 'NatGateways[?State==`available`].NatGatewayId' --output text 2>/dev/null)
+      eks=$(aws eks list-clusters --region "$r" --query 'clusters' --output text 2>/dev/null)
+      for pair in "instances:$inst" "load-balancers:$lbs" "unattached-volumes:$vols" \
+                  "nat-gateways:$nats" "eks-clusters:$eks"; do
+        k=${pair%%:*}; v=${pair#*:}
+        [ -n "$v" ] && [ "$v" != "None" ] || continue
+        printf '%s\t%s\n' "$k" "$v"
+      done
+    ) > "$aws_tmp/$r" 2>/dev/null &
+  done
+  wait
+
+  # Read back IN THE ORDER THE REGIONS WERE LISTED, not in the order they finished. Parallel work
+  # with non-deterministic output is how two runs of the same check disagree about nothing.
+  for r in $regions; do
+    [ -s "$aws_tmp/$r" ] || continue
+    while IFS=$'\t' read -r k v; do
+      [ -n "$k" ] || continue
       echo "  [$r] $k: $v"
       found=1
       # THE REMOVE COMMAND, because the verdict at the bottom of this script promises one ("each
@@ -98,7 +121,7 @@ if command -v aws >/dev/null 2>&1 && aws sts get-caller-identity >/dev/null 2>&1
         eks-clusters)       printf '    %sremove: make aws-down   %s(not `aws eks delete-cluster` - the load balancers and\n' "$c_dim" "$c_warn"
                             printf '            volumes its controllers created must go FIRST, ADR-0021)%s\n' "$c_off" ;;
       esac
-    done
+    done < "$aws_tmp/$r"
   done
 
   # The EKS control plane is the one that bills whether or not anything runs on it, so it gets its
