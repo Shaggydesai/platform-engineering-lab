@@ -1,0 +1,73 @@
+{{- if and .Values.tenant.enabled .Values.frontendIngress.enabled }}
+{{- if not .Values.tenant.namespace }}{{ fail "tenant.namespace is required" }}{{ end }}
+{{- if not .Values.frontendIngress.fromEntities }}{{ fail "frontendIngress.fromEntities is required - an ingress rule with no source denies the front door" }}{{ end }}
+# Who may reach the tenant's front door. THE ONE RULE IN THIS CHART THAT IS NOT PORTABLE.
+#
+# Everything else here is `networking.k8s.io/v1` and means the same thing on GKE and EKS as it
+# does on Cilium (ADR-0001's premise). This object is `cilium.io/v2`, and it has to be, which is
+# the sharpest illustration of where that premise stops: **the portable policy language covers
+# traffic between your own pods and ends exactly at the boundary where traffic enters the
+# cluster.**
+#
+# WHY PLAIN NetworkPolicy CANNOT EXPRESS THIS. Cilium's Gateway API implementation terminates TLS
+# and proxies HTTP in an Envoy that runs inside the host network namespace, so the connection the
+# frontend pod actually receives comes from the NODE, with Cilium's `reserved:host` or
+# `reserved:remote-node` identity. NetworkPolicy can select pods, namespaces and CIDRs. It has no
+# selector for "the node", and the node's address is not a stable CIDR worth writing down.
+#
+# WHY BOTH ENTITIES, which is the part that makes this correct rather than merely working:
+#
+#   host         the Envoy on the SAME node as the frontend pod. Cilium's allow-localhost
+#                default would permit this anyway, which is exactly the trap - a rule listing
+#                only `host` passes every test you run today.
+#   remote-node  the Envoy on ANY OTHER node. The L2 announcement policy (ADR-0013) elects one
+#                node to answer ARP for the Gateway's address, and that election MOVES: on a
+#                node failure the lease is taken by a survivor in about 15 seconds. The moment
+#                the announcing node is not the frontend's node, traffic arrives as
+#                remote-node - and a policy without it starts refusing the front door, 15
+#                seconds after an unrelated node died, with nothing in the application changed.
+#
+# That is why this rule was deferred rather than written quickly (parking lot, 2026-10-30): a
+# rule that is correct until a failover is worse than no rule, because by then it is trusted.
+# `make ingress-failover-check` moves the lease on purpose and proves the rule survives it.
+#
+# ON OTHER SUBSTRATES this object does not render, and the equivalent is different again: a
+# Google-owned source range on GKE (where the CiliumNetworkPolicy CRD does not even exist -
+# Dataplane V2 is managed Cilium without its CRDs), and the VPC/ENI range on EKS. The overlays
+# for both say so rather than being absent.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ .Values.tenant.instance }}-frontend-ingress
+  namespace: {{ .Values.tenant.namespace }}
+  annotations:
+    # After the egress policy (wave 6) and well after the Gateway and its routes, which are
+    # platform-ingress waves 1 and 2. Nothing here depends on that ordering for correctness;
+    # it keeps an interrupted sync from landing this before there is a front door to protect.
+    argocd.argoproj.io/sync-wave: "7"
+spec:
+  # endpointSelector, not podSelector - this is Cilium's own API. Same meaning: select the pods
+  # this policy governs, and by selecting them at all switch them to deny-by-default for the
+  # directions named below.
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Values.tenant.instance }}
+      app.kubernetes.io/name: {{ .Values.frontendIngress.name }}
+
+  # INGRESS ONLY - there is no egress stanza here, so this object says nothing about what the
+  # frontend may reach. That is the NetworkPolicy next door, and in Cilium the two are additive:
+  # a connection must be allowed by every policy that selects the endpoint for that direction.
+  ingress:
+    - fromEntities:
+        {{- range .Values.frontendIngress.fromEntities }}
+        - {{ . }}
+        {{- end }}
+      toPorts:
+        - ports:
+            {{- range .Values.frontendIngress.ports }}
+            # A STRING, deliberately: Cilium's port field is a string and an integer here is
+            # rejected by the CRD schema with a type error about the wrong field.
+            - port: {{ .port | quote }}
+              protocol: {{ .protocol | default "TCP" }}
+            {{- end }}
+{{- end }}

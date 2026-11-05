@@ -19,7 +19,7 @@ ENV ?= onprem
 # built before the recipe runs, which is the whole point.
 # Every variable this Makefile understands on the command line. Anything else is a typo.
 KNOWN_VARS := TAGS ARGS CHART ENV CTX STORE_NAME PROBE_NS VAULT_NS VAULT_POD VAULT_KEYS \
-              AWS_ALERT_EMAIL NODE
+              AWS_ALERT_EMAIL NODE CONFIRM
 
 .PHONY: _no-stray-flags
 _no-stray-flags:
@@ -1136,6 +1136,19 @@ secrets-audit: ## Is any LIVE credential findable in this repo's working tree or
 	@bash scripts/secrets-audit.sh
 
 .PHONY: netpol-check
+ingress-failover-check: ## POWERS OFF A WORKER: move the L2 lease and prove the front door still opens
+# THE ONLY DESTRUCTIVE CHECK IN THIS FILE, and it is destructive on purpose. `virsh destroy` is
+# the virtual equivalent of pulling the plug; a graceful shutdown lets Kubernetes drain the node
+# and hand the lease over tidily, and the failure worth testing is the one where nothing got to
+# say goodbye.
+#
+# It refuses to touch the control plane, restores the node on the way out whatever happened, and
+# asks for confirmation unless CONFIRM=yes. What it proves is that
+# `fromEntities: [host, remote-node]` is right: the `host` half alone passes every other test in
+# this repository while the announcer and the frontend share a node, and starts refusing the
+# front door about 15 seconds after an unrelated worker dies (ADR-0013, parking lot 2026-10-30).
+	@bash scripts/ingress-failover-check.sh
+
 netpol-check: ## Prove the tenant network policy denies something (two pods, one label apart)
 	@bash scripts/netpol-check.sh
 

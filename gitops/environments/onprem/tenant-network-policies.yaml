@@ -40,3 +40,14 @@ database:
 # database probes would have gone on passing for the wrong reason.
 egress:
   enabled: true
+
+# FRONT DOOR, added 2026-11-05, closing the parking-lot item from 2026-10-30.
+#
+# A CiliumNetworkPolicy rather than a NetworkPolicy, because the source is the node's Envoy and
+# plain NetworkPolicy has no selector for a node. The egress policy above deliberately left
+# ingress alone for exactly this reason - naming Ingress in a NetworkPolicy would have denied
+# this traffic with no way to permit it.
+#
+# Verified by MOVING THE L2 LEASE, not by curling once: `make ingress-failover-check`.
+frontendIngress:
+  enabled: true

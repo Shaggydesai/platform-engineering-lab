@@ -64,3 +64,31 @@ egress:
   #     - cidr: 203.0.113.0/24
   #       ports: [{protocol: TCP, port: 443}]
   allowCidrs: []
+
+# Who may reach the tenant's front door. OFF by default, and the only CiliumNetworkPolicy here.
+#
+# `fromEntities` carries BOTH host and remote-node, and the second one is the whole reason this
+# rule was hard. The L2 announcement lease (ADR-0013) elects one node to answer ARP for the
+# Gateway's address and that election MOVES on a node failure - so the Envoy proxying into the
+# frontend is sometimes on the frontend's own node (host) and sometimes not (remote-node). A rule
+# listing only `host` passes every test you can run while the lease happens to sit on the right
+# node, and starts refusing the front door about 15 seconds after an unrelated node dies.
+#
+# `make ingress-failover-check` moves the lease deliberately and proves the rule survives it.
+frontendIngress:
+  enabled: false
+
+  # The pod label value for the front door. On-prem this is the only backend the Gateway routes
+  # to - the HTTPRoute sends shopverse.platform.local to shopverse-frontend:8080, and the
+  # frontend proxies /api onwards inside the namespace, so api-gateway never receives external
+  # traffic and must not be listed here.
+  name: frontend
+
+  # host AND remote-node. See above; dropping remote-node is the bug this rule exists to avoid.
+  fromEntities:
+    - host
+    - remote-node
+
+  ports:
+    - port: 8080
+      protocol: TCP

@@ -106,6 +106,33 @@ else
     "$c_dim" "$OVERLAY" "$c_off"
 fi
 
+# THE FRONT DOOR, checked for the one regression that would not show up here. Removing
+# `remote-node` from this policy breaks nothing until the L2 lease next moves, and then it
+# refuses the front door ~15s after an unrelated worker dies - so every probe below would still
+# pass. `make ingress-failover-check` is the test; this is the guard against the edit.
+FRONTEND=$(yq -r '.frontendIngress.enabled // false' "$OVERLAY")
+if [[ "$FRONTEND" == "true" ]]; then
+  if ! kubectl -n "$NS" get ciliumnetworkpolicies.cilium.io "${INSTANCE}-frontend-ingress" >/dev/null 2>&1; then
+    die "$OVERLAY sets frontendIngress.enabled but there is no CiliumNetworkPolicy
+${INSTANCE}-frontend-ingress in $NS.  make gitops-refresh && make gitops-status"
+  fi
+  ents=$(kubectl -n "$NS" get ciliumnetworkpolicies.cilium.io "${INSTANCE}-frontend-ingress" \
+         -o jsonpath='{.spec.ingress[0].fromEntities}' | jq -r 'join(",")')
+  if [[ "$ents" != *remote-node* ]]; then
+    bad "${INSTANCE}-frontend-ingress allows [$ents] - remote-node is missing"
+    die "Nothing below will fail because of this. The front door keeps working until the L2
+announcement lease moves to a node that is not the frontend's, and then it stops - about 15
+seconds after an unrelated worker dies, with nothing in the application changed. That is the
+failure the entity list exists to prevent, and the only thing that demonstrates it is:
+
+  make ingress-failover-check"
+  fi
+  ok "CiliumNetworkPolicy ${INSTANCE}-frontend-ingress allows [$ents]"
+else
+  printf '    %sfrontendIngress.enabled is false - the front door accepts everything inbound%s\n' \
+    "$c_dim" "$c_off"
+fi
+
 # ---------------------------------------------------------------- 1
 step '1/5 the application still works (the allowed path, end to end)'
 if [[ -z "$HOST" || ! -f "$CA" ]]; then
