@@ -168,18 +168,31 @@ info "is the exact case the [host]-only version would have refused."
 
 # WHICH IDENTITY, because the 200 does not say. `remote-node` has been carried in fromEntities
 # as an unverified hedge since the rule was written, and this is what settles it.
+# status.phase=Running, AND IT IS NOT PEDANTRY. When phase 2 restarts the agent on this node,
+# the old pod lingers in Terminating and `items[0]` is whichever the API lists first - so this
+# can exec into a pod that is shutting down and read an empty buffer. That empty buffer then
+# reports as "the ring buffer may have rotated", which is a wrong explanation for a real
+# mechanism, and is how the first version of this phase read nothing on a working cluster.
+#
+# The restart also genuinely empties the buffer: a new agent starts with no flow history. So
+# after a restart there is nothing to read until traffic arrives, which is why this sends
+# several requests and waits rather than one and two seconds.
 AGENT=$(kubectl -n kube-system get pod -l k8s-app=cilium \
-        --field-selector "spec.nodeName=$FE_NODE" \
+        --field-selector "spec.nodeName=$FE_NODE,status.phase=Running" \
         -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
 if [[ -z "$AGENT" ]]; then
-  info "no Cilium agent on $FE_NODE - cannot read the identity"
+  info "no Running Cilium agent on $FE_NODE - cannot read the identity"
 else
-  probe >/dev/null; sleep 2
+  info "reading flows from $AGENT (the agent on the frontend's node)"
+  for _ in 1 2 3 4 5; do probe >/dev/null; done
+  sleep 5
   flows=$(kubectl -n kube-system exec "$AGENT" -- hubble observe \
-          --to-label "app.kubernetes.io/name=$FE" --last 30 2>/dev/null \
+          --to-label "app.kubernetes.io/name=$FE" --last 100 2>/dev/null \
           | grep -oE '\((ingress|host|remote-node|world|unmanaged)\)' | sort -u | tr -d '()' | tr '\n' ' ')
   if [[ -z "$flows" ]]; then
-    info "the agent on $FE_NODE reported no flows - the ring buffer may have rotated"
+    info "no flows to the frontend in $AGENT's buffer. If phase 2 restarted this agent, its"
+    info "history started empty moments ago - re-run now: the lease is already off the"
+    info "frontend's node, so this run will skip the restart and the buffer will be intact."
   else
     ok "identities arriving at the frontend: $flows"
     if [[ "$flows" == *remote-node* ]]; then
