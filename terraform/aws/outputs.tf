@@ -80,7 +80,15 @@ output "next" {
     AND THE ONE THAT ENDS THE SESSION, whatever else happens (ADR-0003 Decision 5):
 
            make aws-down
-           make cost-check
+
+    That is the whole pair: `aws-down` finishes by running `make cost-check` itself, so the
+    answer to "is anything still billing" arrives without being asked for. Running cost-check
+    again afterwards is harmless and simply prints the same sweep twice.
+
+    `cost-check` is the half that matters, because terraform can only report on what is in its
+    own state. On 2026-11-05 AWS reclaimed the three instances before this ran, so the plan was
+    `11 to destroy` rather than 14 - and the sweep across 17 regions is what confirmed that five
+    sets of spot terminations had taken their root volumes with them.
 
     This account has NO CREDITS (ADR-0003 Decision 6). ${format("~$%.2f", length(local.nodes) * 0.0352 * 3)} for a three-hour
     session is real money, and three nodes plus a load balancer left overnight is about $1.70 -

@@ -10,7 +10,9 @@ same eight roles that build the laptop's VMs took three bare EC2 instances to Ar
 Synced/Healthy in one run, `failed=0`. The six differences are written up in
 `docs/substrate-differences.md`. **Not done:** no ingress, no storage and no IRSA on that
 substrate (one missing piece, see below), the EKS comparison session, and the second consecutive
-run that would prove idempotency there.
+run that would prove idempotency there — `ap-south-1b` reclaimed instances five times in two
+hours, so what exists instead is **two independent from-scratch builds with byte-identical
+recaps**. **Teardown is proven and both substrates are at ₹0.**
 **Overall progress:** Modules 00–08 complete — 9 / 13
 
 ---
@@ -65,6 +67,7 @@ run that would prove idempotency there.
 | **AWS spot interruption** | **happened, for real, mid-session 2026-11-05 — all three instances reclaimed at once.** `terraform plan` said `3 to add, 0 to change, **0 to destroy**`, and that zero is the design working: `instance_interruption_behavior = "terminate"` plus `delete_on_termination = true` meant AWS took the root volumes with the instances. **Nothing orphaned** — ADR-0021's scenario tested by AWS rather than reasoned about |
 | **AWS identity** | **no access key exists anywhere.** `aws login` issues 12-hour browser-obtained credentials; a root access key was created once, `make aws-guardrails` **refused to run** because of it, and it was deleted. ADR-0023 (IAM user + MFA-gated role) is **superseded** — it was designed against documentation for a different product, since the free account plan has no root user, no IAM Identity Center, no Organizations and no CloudShell |
 | **AWS what is missing** | **no ingress, no storage class, no IRSA — and all three are one missing piece.** The instances have **no `iam_instance_profile` at all**, so nothing in the cluster can call an AWS API: no EBS CSI driver, no load-balancer controller. `l2announcements` is still enabled there and **cannot work** (AWS will not honour gratuitous ARP for an address it did not assign), so a Gateway on AWS would sit `<pending>` and look like a CNI fault. The three candidate answers are written out in `docs/substrate-differences.md` |
+| **AWS teardown** | **PROVEN, 2026-11-05, and it had never run successfully before** — my `AWS_TF` deletion had broken it for the entire life of the first cluster. `make aws-down`: `Destroy complete! Resources: 11 destroyed`, then its own `make cost-check` sweeping **17 regions in parallel — clean**, and GCP nothing billable. **Both substrates at ₹0.** The plan was 11 rather than 14 because AWS had already reclaimed the instances, so the sweep is also what confirms **five sets of spot terminations took their root volumes with them** — nothing orphaned, which is the EBS half of ADR-0021 |
 | **AWS idempotency** | **not yet established.** The verified run was a from-scratch build, so `changed=17` is correct. The second consecutive run is the gate, and it has not been done |
 | **AWS session cost** | **~$0.106/hr ≈ ₹9.4/hr**, measured: 3 × `m6a.large` spot ~$0.0266, 3 × 30 GB gp3 ~$0.0036/node, 3 × public IPv4 $0.005. Module 09's working session ran ~3.3 hours |
 | **AWS guardrail** | $5 budget `platform-engineering-lab guardrail`, thresholds 50/90/100% on **ACTUAL** spend, all three subscribed to the alert address, verified against the Budgets API. **`make aws-up` refuses to run without it.** And the sharper limit than GCP's: **a budget alerts, it does not stop anything**, and on the free account plan there is no spend cap at all — so `make aws-down` is the control and the budget only tells you it was forgotten |
