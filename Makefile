@@ -534,7 +534,7 @@ aws-guardrails-verify: ## Read the budget back from the API and check it MATCHES
 AWS_INV := -i ansible/inventory/aws.py
 
 .PHONY: aws-cluster
-aws-cluster: _no-stray-flags ## Build the Kubernetes cluster on the EC2 nodes (same playbook as on-prem)
+aws-cluster: _no-stray-flags _aws-reach ## Build the Kubernetes cluster on the EC2 nodes (same playbook as on-prem)
 # THE SAME PLAYBOOK, THE SAME ROLES, A DIFFERENT INVENTORY - which is the whole question Module 09
 # exists to answer. ansible/playbooks/cluster.yml is not copied or branched: preflight,
 # control_plane, etcd_encryption, gateway_api, cilium, kube_proxy_removal and workers run exactly
@@ -597,6 +597,16 @@ aws-kubeconfig: _aws-preflight ## Re-point the aws-platform context at the contr
 	printf '\n'; \
 	kubectl --context "$$ctx" get nodes -o wide 2>&1 | sed 's/^/  /' || \
 	  printf '  \033[33mnot answering - if the certificate is the complaint, the cluster was\n  rebuilt and needs: make aws-cluster\033[0m\n'
+
+_aws-reach:
+# IN FRONT OF THE PLAYBOOK, because the alternative is five minutes of SSH timeouts followed by a
+# message that does not say which of two causes it was. Refuses only on a DEFINITE no: exit 2
+# means "I could not look", which proceeds - a check that cannot look must not be able to stop a
+# build that would otherwise work, which this repository has already got wrong once in a way that
+# blocked the only credential the account had.
+	@set -eu; \
+	set +e; bash scripts/aws-reach-check.sh; rc=$$?; set -e; \
+	[ "$$rc" -eq 1 ] && exit 1 || true
 
 _aws-preflight:
 	@set -eu; \
