@@ -292,6 +292,24 @@
       kubectl --kubeconfig "$incoming" \
         config rename-context kubernetes-admin@{{ cluster_name }} {{ kube_context }} >/dev/null 2>&1 || true
 
+      # THE ADDRESS IN admin.conf IS NOT ALWAYS THE ADDRESS kubectl CAN REACH, and on a cloud
+      # substrate it never is. kubeadm writes controlPlaneEndpoint into admin.conf, and the AWS
+      # inventory sets that to the control plane's PRIVATE ip - because workers join through it,
+      # and over the public one that traffic would leave through the internet gateway and be
+      # billed for every packet between a kubelet and its API server.
+      #
+      # So the copy that goes into ~/.kube/config gets the public address instead. It verifies
+      # because the same inventory puts that address in extra_cert_sans.
+      #
+      # Undefined on-prem, where one address serves both, and an empty string changes nothing -
+      # note that default() replaces UNDEFINED rather than empty, which this repository has got
+      # wrong before.
+      server='{{ kube_server | default("") }}'
+      if [ -n "$server" ]; then
+        kubectl --kubeconfig "$incoming" \
+          config set-cluster {{ cluster_name }} --server="$server" >/dev/null
+      fi
+
       kubectl --kubeconfig "$main" config delete-context {{ kube_context }} >/dev/null 2>&1 || true
       kubectl --kubeconfig "$main" config delete-cluster {{ cluster_name }} >/dev/null 2>&1 || true
       kubectl --kubeconfig "$main" config delete-user kubernetes-admin      >/dev/null 2>&1 || true

@@ -553,44 +553,51 @@ aws-argocd: _no-stray-flags ## Install/repair Argo CD on AWS and apply the seam
 	@$(PLAYBOOK) $(AWS_INV) ansible/playbooks/cluster.yml --tags argocd $(ARGS)
 
 .PHONY: aws-kubeconfig
-aws-kubeconfig: _aws-preflight ## Point kubectl at the AWS cluster, under the context aws-platform
-# THE FETCHED KUBECONFIG NAMES AN ADDRESS THIS LAPTOP CANNOT REACH, and that is by design rather
-# than a bug to work around.
+aws-kubeconfig: _aws-preflight ## Re-point the aws-platform context at the control plane's current public IP
+# THIS NO LONGER CREATES THE CONTEXT, and that is the change. `make aws-cluster` creates it: the
+# control_plane role renames the fetched context to aws-platform, rewrites its server to the
+# public address the inventory supplies as kube_server, and merges it into ~/.kube/config - one
+# task, one writer, the same code path that runs on-prem.
 #
-# kubeadm writes `server: https://<controlPlaneEndpoint>` into admin.conf, and the inventory sets
-# that endpoint to the control plane's PRIVATE address - because workers join through it, and over
-# the public IP that traffic would leave through the internet gateway and be billed for every
-# packet between a kubelet and its API server.
+# Until 2026-11-05 this target did all of that a SECOND time, in shell. Two writers of
+# ~/.kube/config that agree today are two writers that disagree after the next edit to either,
+# and the file they disagree about is the one holding access to three clusters.
 #
-# So the copy that goes into ~/.kube/config gets the PUBLIC address instead. It verifies because
-# the inventory put that address in extra_cert_sans, which is the other half of the same decision
-# (ansible/roles/control_plane/templates/kubeadm-init.yaml.j2).
+# So what remains is the one thing that can go stale WITHOUT a rebuild: a spot instance is
+# reclaimed and replaced, or the state is re-applied, and the control plane comes back on a NEW
+# public address. ~/.kube/config still names the old one, and kubectl HANGS rather than erroring -
+# which reads as a dead cluster.
+#
+# Repairing only the server address is safe because the CA and the client certificate did not
+# change. If they did - a genuinely rebuilt cluster - this fails TLS verification, and the answer
+# is `make aws-cluster`, not this.
 	@set -eu; \
-	src=$$HOME/.kube/aws.conf; \
-	[ -r "$$src" ] || { \
-	  printf '\033[31mno %s - the cluster playbook fetches it\033[0m\n  make aws-cluster\n' "$$src"; exit 1; }; \
+	ctx=aws-platform; \
+	cfg=$$HOME/.kube/config; \
+	cluster=$$(kubectl --kubeconfig "$$cfg" config view \
+	  -o jsonpath="{.contexts[?(@.name=='$$ctx')].context.cluster}" 2>/dev/null || true); \
+	if [ -z "$$cluster" ]; then \
+	  printf '\033[31mno context %s in %s\033[0m\n' "$$ctx" "$$cfg"; \
+	  printf 'The cluster playbook creates it, as its last control-plane task:\n  make aws-cluster\n'; \
+	  exit 1; \
+	fi; \
 	pub=$$(cd $(AWS_TF) && terraform output -raw control_plane_ip); \
 	[ -n "$$pub" ] || { printf '\033[31mno control_plane_ip in the Terraform state\033[0m\n'; exit 1; }; \
-	tmp=$$(mktemp); cp "$$src" "$$tmp"; \
-	old_ctx=$$(KUBECONFIG="$$tmp" kubectl config current-context); \
-	old_cluster=$$(KUBECONFIG="$$tmp" kubectl config view -o jsonpath='{.clusters[0].name}'); \
-	KUBECONFIG="$$tmp" kubectl config set-cluster "$$old_cluster" --server="https://$$pub:6443" >/dev/null; \
-	KUBECONFIG="$$tmp" kubectl config rename-context "$$old_ctx" aws-platform >/dev/null; \
-	mkdir -p "$$HOME/.kube"; \
-	cp "$$HOME/.kube/config" "$$HOME/.kube/config.bak-$$(date +%s)" 2>/dev/null || true; \
-	merged=$$(mktemp); \
-	KUBECONFIG="$$tmp:$$HOME/.kube/config" kubectl config view --flatten > "$$merged"; \
-	mv "$$merged" "$$HOME/.kube/config"; chmod 600 "$$HOME/.kube/config"; rm -f "$$tmp"; \
-	printf '\ncontext aws-platform -> https://%s:6443\n' "$$pub"; \
-	printf '\033[2mthe previous ~/.kube/config was copied to config.bak-<timestamp> first - merging\n'; \
-	printf 'kubeconfigs rewrites the file, and the one thing worse than no cluster access is\n'; \
-	printf 'losing access to the other two.\033[0m\n\n'; \
-	kubectl --context aws-platform get nodes -o wide 2>&1 | sed 's/^/  /' || \
-	  printf '  \033[33mnot answering yet - the API server may still be starting\033[0m\n'
+	want="https://$$pub:6443"; \
+	have=$$(kubectl --kubeconfig "$$cfg" config view \
+	  -o jsonpath="{.clusters[?(@.name=='$$cluster')].cluster.server}"); \
+	if [ "$$have" = "$$want" ]; then \
+	  printf 'context %s already points at %s\n' "$$ctx" "$$want"; \
+	else \
+	  cp "$$cfg" "$$cfg.bak-$$(date +%s)"; \
+	  kubectl --kubeconfig "$$cfg" config set-cluster "$$cluster" --server="$$want" >/dev/null; \
+	  printf 'context %s: %s -> %s\n' "$$ctx" "$$have" "$$want"; \
+	  printf '\033[2mthe previous ~/.kube/config was copied to config.bak-<timestamp> first.\033[0m\n'; \
+	fi; \
+	printf '\n'; \
+	kubectl --context "$$ctx" get nodes -o wide 2>&1 | sed 's/^/  /' || \
+	  printf '  \033[33mnot answering - if the certificate is the complaint, the cluster was\n  rebuilt and needs: make aws-cluster\033[0m\n'
 
-AWS_TF := terraform/aws
-
-.PHONY: _aws-preflight
 _aws-preflight:
 	@set -eu; \
 	command -v jq >/dev/null || { printf '\033[31mjq not installed\033[0m\n  make tools\n'; exit 1; }; \

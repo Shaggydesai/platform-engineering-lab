@@ -151,17 +151,41 @@ def build():
                     REPO, "ansible", "roles", "cilium", "files", "cilium-values.yaml"
                 ),
                 "kubeconfig_fetch_path": os.path.expanduser("~/.kube/aws.conf"),
+                # THE READABLE NAME IN ~/.kube/config, which is NOT argocd_kube_context above.
+                # kubeadm writes kubernetes-admin@platform into the fetched admin.conf; the
+                # control_plane role renames it to this when it merges. Passing one where the
+                # other is wanted is the mistake ADR-0020 records for the on-prem path.
+                "kube_context": "aws-platform",
+                # And the address that context should point at: the PUBLIC one, because kubectl
+                # runs outside the VPC. extra_cert_sans above is the other half - without it this
+                # address would fail TLS verification against a certificate that never heard of
+                # it.
+                "kube_server": f"https://{cp['public_ip']}:6443",
                 "argocd_chart_version": argocd["chart_version"],
                 "argocd_app_version": argocd["app_version"],
                 "argocd_values_file": os.path.join(REPO, argocd["values_file"]),
-                "argocd_kubeconfig": os.path.expanduser("~/.kube/aws.conf"),
-                # The context name kubeadm writes into the fetched admin.conf, which is
-                # kubernetes-admin@<cluster_name>. NOT `aws-platform`: that is the name
-                # `make aws-kubeconfig` gives the MERGED context in ~/.kube/config, and the two
-                # are different files. Passing the wrong one here is the mistake ADR-0020
-                # records for the on-prem path, where `onprem-admin` exists only in the merged
-                # config and never in the fetched one.
-                "argocd_kube_context": f"kubernetes-admin@{cfg['cluster_name']}",
+                # THE MERGED CONFIG, NOT THE FETCHED ONE - and this is where copying the
+                # on-prem inventory would have produced a cluster that builds and then reports
+                # its own API server dead.
+                #
+                # The argocd role runs delegate_to: localhost. On-prem that is fine: every
+                # address in onprem.conf is reachable from the laptop, so the fetched file works
+                # unchanged. Here the fetched file names control_plane_endpoint, which is the
+                # PRIVATE address by the decision above - so the role's /readyz probe would hang
+                # and then say "its API server did not answer", which reads as a broken control
+                # plane rather than as an address the laptop was never able to route to.
+                #
+                # So point it at the file the control_plane role merged, where the server is the
+                # public address. ansible/inventory/gcp.py does the same thing for the same
+                # reason, one layer up: on a cloud substrate the fetched kubeconfig is an
+                # artefact, not a working one.
+                "argocd_kubeconfig": os.path.expanduser("~/.kube/config"),
+                # And therefore the MERGED context name, which is kube_context above rather than
+                # the kubernetes-admin@<cluster> that kubeadm wrote. The two were different files
+                # when this said aws.conf; now they are the same file, and the name that exists
+                # in it is aws-platform. ADR-0020 records the near-miss from getting this pair
+                # the wrong way round on the on-prem path.
+                "argocd_kube_context": "aws-platform",
                 # NO root-tenants-aws.yaml YET, deliberately. There is no tenant on this
                 # substrate and no gitops/clusters/aws/apps to point one at - and a seam file
                 # naming a path that does not exist is how an inventory starts describing a
