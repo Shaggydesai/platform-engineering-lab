@@ -25,13 +25,20 @@
   # made against the merged result: the check still compares what helm holds against what this
   # role passed. On-prem the override is empty, the merged file is byte-identical to the one in
   # Git, and nothing about that substrate changes.
+  #
+  # NO `| indent(...)` ON THE RENDERED YAML, and the first version of this task had one. The
+  # six spaces below belong to YAML's literal block and are stripped when THIS FILE is parsed,
+  # long before Jinja runs; an indent filter adds its spaces to the rendered VALUE, which
+  # nothing strips. The result put every top-level key six columns deep, so `routingMode` read
+  # as a child of `ipam` and the error was "did not find expected key" - about the file this
+  # task wrote, naming a line number in it, with nothing pointing back here.
   ansible.builtin.copy:
     content: |
       # RENDERED - do not edit. Source: {{ cilium_values_file | basename }} plus
       # cilium_values_override from the inventory. Edit the file in Git or the inventory.
       {{ (lookup('file', cilium_values_file) | from_yaml)
          | combine(cilium_values_override, recursive=True)
-         | to_nice_yaml(indent=2) | indent(6) }}
+         | to_nice_yaml(indent=2) }}
     dest: "{{ cilium_values_effective }}"
     mode: "0644"
   delegate_to: localhost
