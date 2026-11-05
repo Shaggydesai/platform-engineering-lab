@@ -122,13 +122,21 @@
   gather_facts: false
   tags: [verify]
   tasks:
+    # EVERY kubectl IN THIS PLAY USES cluster_kubeconfig, NOT kubeconfig_fetch_path.
+    #
+    # The fetched admin.conf names controlPlaneEndpoint, which on a cloud substrate is an
+    # address this workstation cannot route to. These three tasks were the FOURTH place that
+    # mistake appeared - after the argocd role, then gateway_api, cilium and kube_proxy_removal
+    # together - because each fix was applied to the files in front of me rather than to
+    # everything that runs kubectl on localhost. `make lint` now enforces the rule instead of
+    # relying on me to grep.
     - name: Wait for the CNI agent on the newly joined workers
       ansible.builtin.command: >-
         kubectl --namespace kube-system rollout status daemonset/cilium --timeout=180s
       delegate_to: localhost
       become: false
       environment:
-        KUBECONFIG: "{{ kubeconfig_fetch_path }}"
+        KUBECONFIG: "{{ cluster_kubeconfig }}"
       changed_when: false
 
     - name: Every node Ready
@@ -136,7 +144,7 @@
       delegate_to: localhost
       become: false
       environment:
-        KUBECONFIG: "{{ kubeconfig_fetch_path }}"
+        KUBECONFIG: "{{ cluster_kubeconfig }}"
       changed_when: false
 
     - name: The cluster, as built
@@ -148,7 +156,7 @@
       delegate_to: localhost
       become: false
       environment:
-        KUBECONFIG: "{{ kubeconfig_fetch_path }}"
+        KUBECONFIG: "{{ cluster_kubeconfig }}"
       register: final_nodes
       changed_when: false
 

@@ -635,6 +635,42 @@ else
   skip 'python3 missing, skipped'
 fi
 
+step 'Only the control_plane role uses the fetched kubeconfig'
+# THE RULE THIS CHECK EXISTS TO STOP ME BREAKING A FIFTH TIME.
+#
+# `kubeconfig_fetch_path` is where the control_plane role PUTS the admin.conf it fetched. That
+# file names controlPlaneEndpoint, which on a cloud substrate is an address the workstation
+# cannot route to - so anything else that runs kubectl or helm on localhost must use
+# `cluster_kubeconfig`, the reachable copy that same role writes.
+#
+# That mistake appeared four times on 2026-11-05: the argocd role, then gateway_api, cilium and
+# kube_proxy_removal together, then the verify play in cluster.yml. Each fix was applied to the
+# files in front of me. The failure looks like `dial tcp 10.20.1.10:6443: i/o timeout` - a
+# network error, from a cluster that is working, hundreds of lines into a playbook.
+#
+# Deliberately a grep rather than anything cleverer: the rule is "this name is USED in exactly
+# one role", which is a textual property, checkable without Ansible, a cluster, or a substrate
+# being up.
+#
+# A USE, not a mention. The first version of this check matched the name anywhere and failed on
+# the comment in cluster.yml that explains the rule - a check that forbids writing down why it
+# exists. So it looks for the name inside a Jinja expression, on a line that is not a comment:
+# `{{ kubeconfig_fetch_path }}` is a use, and prose about it is not.
+if command -v grep >/dev/null 2>&1; then
+  hits=$(grep -rn '{{[^}]*kubeconfig_fetch_path' \
+           --include='*.yml' --include='*.yaml' ansible/ 2>/dev/null \
+         | grep -v '^ansible/roles/control_plane/' \
+         | grep -v ':[0-9]*: *#' || true)
+  if [[ -z "$hits" ]]; then
+    ok 'only the control_plane role uses the fetched kubeconfig'
+  else
+    printf '%s\n' "$hits" | sed 's/^/  /'
+    bad 'use cluster_kubeconfig - the fetched file names an address the workstation cannot reach'
+  fi
+else
+  skip 'grep missing, skipped'
+fi
+
 step "Cilium's pod CIDR agrees with every cluster's"
 # THE OTHER HALF OF A PAIR THAT WAS ONLY CHECKED ON ONE SIDE. Lint already asserts that the two
 # substrates' cluster.json files agree with each other about pod_cidr - and neither of them was
