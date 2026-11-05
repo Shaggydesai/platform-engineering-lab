@@ -424,19 +424,26 @@ aws-guardrails: _no-stray-flags ## ADR-0003 gate - the $5 budget alarm, BEFORE a
 	arn=$$(printf '%s' "$$who" | jq -r '.Arn'); \
 	case "$$arn" in \
 	  *:root) \
-	    printf '\033[31mthese are ROOT credentials - refusing\033[0m\n\n'; \
-	    printf '  %s\n\n' "$$arn"; \
-	    printf 'Root cannot be restricted by any policy: it can change the payment method, spend\n'; \
-	    printf 'the credits and close the account. A root ACCESS KEY - which is what the CLI is\n'; \
-	    printf 'using if this fired - is the one AWS credential whose leak has no recovery story,\n'; \
-	    printf 'and it should not exist at all (ADR-0024).\n\n'; \
-	    printf 'Delete the key, then get a SHORT-LIVED credential instead - 12 hours, obtained\n'; \
-	    printf 'through the browser, with nothing long-lived on this laptop to leak:\n\n'; \
-	    printf '  aws login --profile platform-lab\n'; \
-	    printf '  export AWS_PROFILE=platform-lab\n\n'; \
-	    printf 'IAM -> Users -> security credentials is where a root key is deleted:\n'; \
-	    printf '  https://console.aws.amazon.com/iam/home#/security_credentials\n'; \
-	    exit 1 ;; \
+	    if [ -n "$$(aws configure get aws_session_token 2>/dev/null)" ]; then \
+	      printf '\033[33mroot, but a SHORT-LIVED session rather than a key\033[0m\n\n'; \
+	      printf '  %s\n\n' "$$arn"; \
+	      printf 'Allowed. `aws login` issues root credentials on this account and there is no\n'; \
+	      printf 'other identity available - IAM Identity Center is not supported on the free plan\n'; \
+	      printf 'and the IAM console redirects (ADR-0024). What makes it acceptable is that this\n'; \
+	      printf 'expires in 12 hours and came through a browser session with MFA on it.\n\n'; \
+	    else \
+	      printf '\033[31ma root ACCESS KEY - refusing\033[0m\n\n'; \
+	      printf '  %s\n\n' "$$arn"; \
+	      printf 'No session token, so these are long-lived root credentials sitting in a file.\n'; \
+	      printf 'Root cannot be restricted by any policy - it can change the payment method,\n'; \
+	      printf 'spend the credits and close the account - and this is the one AWS credential\n'; \
+	      printf 'whose leak has no recovery story. It should not exist at all (ADR-0024).\n\n'; \
+	      printf 'Delete it, then get a short-lived one through the browser instead:\n\n'; \
+	      printf '  aws login --profile platform-lab\n'; \
+	      printf '  export AWS_PROFILE=platform-lab\n\n'; \
+	      printf '  https://console.aws.amazon.com/iam/home#/security_credentials\n'; \
+	      exit 1; \
+	    fi ;; \
 	esac; \
 	case "$$arn" in \
 	  *:assumed-role/*) : ;; \
@@ -485,6 +492,123 @@ aws-guardrails-verify: ## Read the budget back from the API and check it MATCHES
 # IS ANYONE SUBSCRIBED. The third has no GCP counterpart and is the one that decides whether this
 # guardrail can warn you at all.
 	@bash scripts/aws-guardrails-verify.sh
+
+AWS_TF := terraform/aws
+
+.PHONY: _aws-preflight
+_aws-preflight:
+	@set -eu; \
+	command -v jq >/dev/null || { printf '\033[31mjq not installed\033[0m\n  make tools\n'; exit 1; }; \
+	command -v aws >/dev/null || { printf '\033[31mthe AWS CLI is not installed\033[0m\n'; exit 1; }; \
+	if ! aws sts get-caller-identity >/dev/null 2>&1; then \
+	  printf '\033[31mno working AWS credentials\033[0m\n\n'; \
+	  printf 'They expire after 12 hours (ADR-0024). Get a new session:\n\n'; \
+	  printf '  aws login --profile platform-lab\n'; \
+	  printf '  export AWS_PROFILE=platform-lab\n'; \
+	  exit 1; \
+	fi; \
+	if [ ! -r "$$(eval echo $$(jq -r '.ssh.public_key_file' clusters/aws/cluster.json))" ]; then \
+	  printf '\033[31mno SSH public key at %s\033[0m\n\n' "$$(jq -r '.ssh.public_key_file' clusters/aws/cluster.json)"; \
+	  printf 'Terraform puts it on every node and Ansible logs in with it. Same key the laptop\n'; \
+	  printf 'uses (clusters/onprem/nodes.json). Generate one if it is genuinely absent:\n\n'; \
+	  printf '  ssh-keygen -t ed25519 -C platform-engineering-lab\n'; \
+	  exit 1; \
+	fi
+
+.PHONY: aws-up
+aws-up: _no-stray-flags _aws-preflight ## Build 3 spot EC2 nodes (REFUSES without the budget guardrail)
+# THE GUARDRAIL CHECK IS A PREREQUISITE, NOT A REMINDER - the same arrangement as gcp-up, and it
+# matters more here: this account has NO CREDITS (ADR-0003 Decision 6), so the alarm is the only
+# thing between a forgotten cluster and a card.
+	@set -eu; \
+	printf 'checking the guardrail before creating anything billable...\n'; \
+	set +e; bash scripts/aws-guardrails-verify.sh | sed 's/^/  /'; gv=$${PIPESTATUS[0]}; set -e; \
+	if [ "$$gv" -eq 2 ]; then \
+	  printf '\n\033[31mthe guardrail could not be CHECKED - refusing anyway\033[0m\n\n'; \
+	  printf 'It may well be fine. "I could not look" is not "it is missing", and the output\n'; \
+	  printf 'above says which - but neither is a basis for creating something billable.\n'; \
+	  exit 1; \
+	elif [ "$$gv" -ne 0 ]; then \
+	  printf '\n\033[31mthe budget alarm is missing or does not match cluster.json\033[0m\n\n'; \
+	  printf 'ADR-0003 Decision 3: the alarm exists BEFORE the first resource.\n'; \
+	  printf '  make aws-guardrails AWS_ALERT_EMAIL=you@example.com\n'; \
+	  exit 1; \
+	fi; \
+	printf '\nregion    %s / %s\n' "$$(jq -r '.region' clusters/aws/cluster.json)" "$$(jq -r '.availability_zone' clusters/aws/cluster.json)"; \
+	printf 'nodes     1 x %s control plane + %s x %s workers, spot=%s\n' \
+	  "$$(jq -r '.nodes.control_plane.instance_type' clusters/aws/cluster.json)" \
+	  "$$(jq -r '.nodes.workers.count' clusters/aws/cluster.json)" \
+	  "$$(jq -r '.nodes.workers.instance_type' clusters/aws/cluster.json)" \
+	  "$$(jq -r '.nodes.spot' clusters/aws/cluster.json)"; \
+	printf 'cost      real money - this account has no credits (ADR-0003 Decision 6)\n\n'
+	@cd $(AWS_TF) && terraform init -input=false && terraform apply
+
+.PHONY: aws-wait
+aws-wait: _aws-preflight ## Wait for cloud-init to finish running the image scripts on every node
+# WITHOUT THIS, ANSIBLE RACES THE BOOT. preflight asserts what the image scripts produce - swap
+# off, br_netfilter loaded, the right kubeadm - and on a node thirty seconds from passing them it
+# fails every one, which reads as a broken image rather than as impatience. That is the
+# "transient state read once" shape this project has already paid for twice (ADR-0021).
+	@set -eu; \
+	user=$$(jq -r '.ssh.user' clusters/aws/cluster.json); \
+	key=$$(eval echo $$(jq -r '.ssh.public_key_file' clusters/aws/cluster.json) | sed 's/\.pub$$//'); \
+	ips=$$(cd $(AWS_TF) && terraform output -json nodes | jq -r '.[].public_ip'); \
+	[ -n "$$ips" ] || { printf '\033[31mno nodes in the Terraform state - run make aws-up\033[0m\n'; exit 1; }; \
+	for ip in $$ips; do \
+	  printf '  %s ' "$$ip"; \
+	  ok=no; \
+	  for i in $$(seq 1 60); do \
+	    if ssh -i "$$key" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+	           -o ConnectTimeout=5 -o LogLevel=ERROR "$$user@$$ip" \
+	           'test -f /var/lib/cloud/image-ready' 2>/dev/null; then ok=yes; break; fi; \
+	    printf '.'; sleep 10; \
+	  done; \
+	  if [ "$$ok" = yes ]; then printf ' \033[32mimage ready\033[0m\n'; \
+	  else printf ' \033[31mNOT ready after 10 minutes\033[0m\n'; \
+	       printf '      ssh -i %s %s@%s '"'"'sudo tail -50 /var/log/image-build.log'"'"'\n' "$$key" "$$user" "$$ip"; \
+	       exit 1; fi; \
+	done; \
+	printf '\nEvery node ran the same four scripts the Packer image bakes for the laptop\n'; \
+	printf '(ADR-0025). Next:  make aws-cluster\n'
+
+.PHONY: aws-down
+aws-down: _no-stray-flags ## Destroy the AWS cluster, then prove nothing is left
+# ANYTHING A CONTROLLER INSIDE THE CLUSTER CREATED MUST GO FIRST. ADR-0021 learned that twice on
+# GCP - a forwarding rule, then an orphaned Persistent Disk - and the rule is not GCP-specific:
+# Terraform has no record of a load balancer the ingress layer asked for, and destroying the
+# cluster removes the controller that would clean it up.
+#
+# Best-effort and non-fatal, like the GCP one: refusing to destroy a billable cluster because a
+# cleanup step could not run would invert the point. cost-check below is the actual answer.
+	@set -u; \
+	if kubectl config get-contexts -o name 2>/dev/null | grep -qx aws-platform \
+	   && kubectl --context aws-platform -n argocd get applications >/dev/null 2>&1; then \
+	  printf '==> taking in-cluster cloud objects down BEFORE the cluster\n'; \
+	  kubectl --context aws-platform -n argocd delete application platform-ingress \
+	    --wait=true --timeout=180s 2>&1 | sed 's/^/    /' || true; \
+	  kubectl --context aws-platform -n argocd get applications \
+	    -o jsonpath='{range .items[?(@.spec.project=="tenants")]}{.metadata.name}{"\n"}{end}' \
+	    2>/dev/null | grep . | while read -r a; do \
+	      kubectl --context aws-platform -n argocd delete application "$$a" \
+	        --wait=true --timeout=120s 2>&1 | sed 's/^/    /' || true; \
+	    done; \
+	  kubectl --context aws-platform delete pvc -A --all --wait=true --timeout=180s 2>&1 | sed 's/^/    /' || true; \
+	  reg=$$(jq -r '.region' clusters/aws/cluster.json); \
+	  printf '\n    waiting for load balancers to disappear from AWS\n'; \
+	  for i in $$(seq 1 30); do \
+	    n=$$(timeout 30 aws elbv2 describe-load-balancers --region "$$reg" \
+	           --query 'LoadBalancers[].LoadBalancerName' --output text 2>/dev/null | grep -c . || true); \
+	    m=$$(timeout 30 aws elb describe-load-balancers --region "$$reg" \
+	           --query 'LoadBalancerDescriptions[].LoadBalancerName' --output text 2>/dev/null | grep -c . || true); \
+	    if [ "$$n" = "0" ] && [ "$$m" = "0" ]; then printf '    \033[32mnone left\033[0m\n\n'; break; fi; \
+	    printf '    %s still there (%ss)\n' "$$((n + m))" "$$((i * 10))"; sleep 10; \
+	  done; \
+	else \
+	  printf '==> no aws-platform context with Applications - nothing in-cluster to clean up first\n\n'; \
+	fi
+	@cd $(AWS_TF) && terraform destroy
+	@printf '\n==> and now the question terraform cannot answer\n'
+	@$(MAKE) --no-print-directory cost-check
 
 GCP_TF := terraform/gcp
 

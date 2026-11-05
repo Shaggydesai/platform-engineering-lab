@@ -21,8 +21,21 @@ timedatectl set-timezone UTC
 systemctl enable --now iscsid || true
 
 # qemu-guest-agent lets libvirt report the guest's address and shut it down cleanly.
-apt-get -y install qemu-guest-agent
-systemctl enable qemu-guest-agent
+#
+# GUARDED, because this script is no longer libvirt-only. Module 09 runs these same scripts on
+# EC2 through cloud-init rather than baking them with Packer (ADR-0025), so they are now the
+# IMAGE DEFINITION for two substrates rather than one. qemu-guest-agent on EC2 is a daemon with
+# no host to talk to: harmless, and harmless-but-pointless is how a "golden image" accumulates
+# things nobody can account for.
+#
+# systemd-detect-virt names the hypervisor, so the test is about where this is RUNNING rather
+# than about a variable someone has to remember to set.
+if [ "$(systemd-detect-virt 2>/dev/null || echo none)" = "kvm" ]; then
+  apt-get -y install qemu-guest-agent
+  systemctl enable qemu-guest-agent
+else
+  echo "not on KVM ($(systemd-detect-virt 2>/dev/null || echo unknown)) - skipping qemu-guest-agent"
+fi
 
 # Swap off, permanently. kubelet refuses to start with swap enabled unless explicitly told to.
 swapoff -a
