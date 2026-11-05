@@ -1,0 +1,74 @@
+# The root Application for the GKE cluster - the app-of-apps.
+# ANSIBLE APPLIES THIS FILE. It is the seam between Layer 2 and Layer 3 (ADR-0009, Decision 1).
+#
+# A NEAR-COPY OF root-onprem.yaml, and it is worth saying what differs and what does not, because
+# the two files sitting side by side are the clearest statement ADR-0001's premise has produced.
+#
+# What differs: the name, and the path it watches. Two lines.
+#
+# What does not: the project, the repoURL, the revision, the non-recursion, the destination, the
+# sync policy, the retry schedule, and the absence of a finalizer. Every structural decision made
+# for the on-prem root was made about Argo CD rather than about a laptop, so every one of them
+# travels unchanged - including the ones that were expensive to work out.
+#
+# WHY NOT ONE FILE WITH AN ApplicationSet. That is the obvious reaction to two files this similar,
+# and it is the right end state rather than the right next step. ADR-0009 Decision 1 chose
+# explicit files because the seam is the one thing Ansible applies and it must be readable
+# without rendering a generator; argocd-values.yaml turns applicationSet off with a note saying
+# this module is when to revisit it. Revisiting it means a generator that produces both roots, at
+# which point a mistake in the generator is a mistake on every cluster at once - a trade worth
+# making deliberately, with three clusters to justify it, not with two.
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-aws
+  namespace: argocd
+  # NO finalizer, for the same reason as the on-prem root: with
+  # resources-finalizer.argocd.argoproj.io here, deleting this one object would cascade and
+  # destroy the platform. Without it, deleting it orphans the child Applications - they keep
+  # running, and re-applying this file re-adopts them, because they are still in Git.
+  #
+  # The reasoning is slightly stronger on this substrate than on-prem. Recovery has to be the
+  # cheap path everywhere (ADR-0002), but here a cascading delete would also tear down anything
+  # the platform had asked the cloud for - and a load balancer or a disk that Argo CD created and
+  # then deleted is a resource `make cost-check` will not find because nothing lists it any more.
+
+spec:
+  project: platform
+
+  source:
+    repoURL: https://github.com/Shaggydesai/platform-engineering-lab.git
+    targetRevision: main
+    path: gitops/clusters/aws/platform
+    directory:
+      # NON-RECURSION, and `recurse` is ABSENT rather than written as false. Not a style choice
+      # copied from the other root - the explicit line made the on-prem seam report changed
+      # intermittently, which cost two parking-lot entries before a saved diff showed the field
+      # was ours and something was removing it between applies.
+      #
+      # The cost of the omission is the same here: this relies on false remaining Argo CD's
+      # default, so an Argo CD upgrade is the moment to re-check it. The pin now lives in
+      # clusters/platform.json, shared by both substrates, which means that check is one check
+      # rather than one per cluster.
+      include: '*.yaml'
+
+  destination:
+    # The in-cluster address, same as on-prem - which is the reason the AppProjects in
+    # projects.yaml needed no edit at all. Argo CD is running inside the cluster it manages, so
+    # "this cluster" is spelled the same way on every substrate. A multi-cluster Argo CD naming
+    # remote clusters explicitly is a different design, and ADR-0001 deliberately does not use it:
+    # one Argo CD per cluster means a substrate can be destroyed without touching the others.
+    server: https://kubernetes.default.svc
+    namespace: argocd
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

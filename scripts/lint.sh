@@ -215,15 +215,51 @@ step 'Every seam file an inventory names actually exists'
 # in Git looking deployed and nothing ever applies it, which is silent.
 if command -v python3 >/dev/null 2>&1; then
   if python3 - <<'PYCHECK'
-import json, os, subprocess, sys
+import ast, glob, json, os, re, subprocess, sys
 bad = []
 named = set()
-for inv in ('ansible/inventory/nodes.py', 'ansible/inventory/gcp.py'):
+
+# EVERY INVENTORY, FOUND BY GLOB. This check named two files for as long as there were two, and
+# the third one landing is what would have made it silently incomplete - the same shape as
+# cost-check's two hardcoded AWS regions (parking lot, 2026-11-04). A list somebody wrote is
+# exactly as complete as the day they wrote it.
+def seam_files(inv):
+    """The seam files an inventory names, and HOW we found out - which is not always the same way.
+
+    Running `--list` is the strong answer: it is the value Ansible will actually receive. But
+    ansible/inventory/aws.py reads node addresses from Terraform state, so it cannot list on a
+    laptop with no AWS cluster up - and a lint step that fails whenever a substrate is torn down
+    is a lint step people learn to ignore.
+
+    So: run it when it runs, and fall back to reading the literal out of the source when it does
+    not. The fallback is weaker - it cannot see a value computed at runtime - and it is stated as
+    such rather than passed off as equivalent.
+    """
     out = subprocess.run([sys.executable, inv, '--list'], capture_output=True, text=True)
-    if out.returncode != 0:
-        print('    %s --list failed: %s' % (inv, out.stderr.strip().splitlines()[-1:]))
+    if out.returncode == 0:
+        try:
+            return json.loads(out.stdout)['all']['vars'].get('argocd_seam_files', []), 'live'
+        except (ValueError, KeyError):
+            pass
+    tree = ast.parse(open(inv, encoding='utf-8').read())
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Compare) or not isinstance(node, ast.Dict)):
+            continue
+        for k, v in zip(node.keys, node.values):
+            if (isinstance(k, ast.Constant) and k.value == 'argocd_seam_files'
+                    and isinstance(v, (ast.List, ast.Tuple))):
+                vals = [e.value for e in v.elts if isinstance(e, ast.Constant)]
+                if len(vals) == len(v.elts):
+                    return vals, 'source'
+    return [], 'unreadable'
+
+for inv in sorted(glob.glob('ansible/inventory/*.py')):
+    files, how = seam_files(inv)
+    if how == 'unreadable':
+        print('    %s: could not determine its seam files either way' % inv)
         bad.append(inv); continue
-    files = json.loads(out.stdout)['all']['vars'].get('argocd_seam_files', [])
+    if how == 'source':
+        print('    %s: read from source - it cannot --list without its substrate built' % inv)
     if not files:
         print('    %s names no seam files at all' % inv)
         bad.append(inv); continue
@@ -245,9 +281,36 @@ for f in sorted(os.listdir('gitops/bootstrap')):
         print('    gitops/bootstrap/%s is in Git but no inventory applies it' % f)
         bad.append(f)
 
+# AND THE PATH EACH ROOT POINTS AT MUST CONTAIN SOMETHING.
+#
+# Added after this check passed clean on a root Application whose directory did not exist at all.
+# Argo CD does not treat that as an error: it syncs an empty directory, reports Synced/Healthy,
+# and installs nothing. So the seam would have looked correct on the cluster while delivering no
+# platform - a check agreeing with whoever wrote it, which is the shape this repository keeps
+# finding in its own checks.
+#
+# The path is read out of the Application rather than guessed from the filename, because
+# root-aws.yaml pointing at gitops/clusters/gcp/platform is exactly the copy-paste this catches.
+for f in sorted(os.listdir('gitops/bootstrap')):
+    if not f.endswith('.yaml') or f == 'projects.yaml':
+        continue
+    text = open(os.path.join('gitops/bootstrap', f), encoding='utf-8').read()
+    m = re.search(r'^\s*path:\s*(\S+)\s*$', text, re.M)
+    if not m:
+        print('    gitops/bootstrap/%s declares no source path' % f)
+        bad.append(f); continue
+    path = m.group(1).strip('"\'')
+    if not os.path.isdir(path):
+        print('    gitops/bootstrap/%s points at %s, which does not exist' % (f, path))
+        bad.append(f)
+    elif not [y for y in os.listdir(path) if y.endswith('.yaml')]:
+        print('    gitops/bootstrap/%s points at %s, which contains no yaml - Argo CD would sync'
+              ' it clean and install nothing' % (f, path))
+        bad.append(f)
+
 sys.exit(1 if bad else 0)
 PYCHECK
-  then ok 'both inventories name files that exist, and nothing in bootstrap is orphaned'
+  then ok 'every inventory names files that exist, and nothing in bootstrap is orphaned'
   else bad 'fix the mismatch above - ansible/inventory/*.py and gitops/bootstrap/ must agree'
   fi
 else

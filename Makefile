@@ -493,6 +493,63 @@ aws-guardrails-verify: ## Read the budget back from the API and check it MATCHES
 # guardrail can warn you at all.
 	@bash scripts/aws-guardrails-verify.sh
 
+AWS_INV := -i ansible/inventory/aws.py
+
+.PHONY: aws-cluster
+aws-cluster: _no-stray-flags ## Build the Kubernetes cluster on the EC2 nodes (same playbook as on-prem)
+# THE SAME PLAYBOOK, THE SAME ROLES, A DIFFERENT INVENTORY - which is the whole question Module 09
+# exists to answer. ansible/playbooks/cluster.yml is not copied or branched: preflight,
+# control_plane, etcd_encryption, gateway_api, cilium, kube_proxy_removal and workers run exactly
+# as they do against the libvirt VMs, and the only thing that differs is where the inventory says
+# the hosts are.
+#
+# If this works, "built from code, reproducible on any substrate" stops being a claim.
+	@$(PLAYBOOK) $(AWS_INV) ansible/playbooks/cluster.yml $(PLAY_OPTS)
+
+.PHONY: aws-check
+aws-check: _no-stray-flags ## Dry run the cluster playbook against AWS (--check --diff)
+	@$(PLAYBOOK) $(AWS_INV) ansible/playbooks/cluster.yml --check --diff $(PLAY_OPTS)
+
+.PHONY: aws-argocd
+aws-argocd: _no-stray-flags ## Install/repair Argo CD on AWS and apply the seam
+	@$(PLAYBOOK) $(AWS_INV) ansible/playbooks/cluster.yml --tags argocd $(ARGS)
+
+.PHONY: aws-kubeconfig
+aws-kubeconfig: _aws-preflight ## Point kubectl at the AWS cluster, under the context aws-platform
+# THE FETCHED KUBECONFIG NAMES AN ADDRESS THIS LAPTOP CANNOT REACH, and that is by design rather
+# than a bug to work around.
+#
+# kubeadm writes `server: https://<controlPlaneEndpoint>` into admin.conf, and the inventory sets
+# that endpoint to the control plane's PRIVATE address - because workers join through it, and over
+# the public IP that traffic would leave through the internet gateway and be billed for every
+# packet between a kubelet and its API server.
+#
+# So the copy that goes into ~/.kube/config gets the PUBLIC address instead. It verifies because
+# the inventory put that address in extra_cert_sans, which is the other half of the same decision
+# (ansible/roles/control_plane/templates/kubeadm-init.yaml.j2).
+	@set -eu; \
+	src=$$HOME/.kube/aws.conf; \
+	[ -r "$$src" ] || { \
+	  printf '\033[31mno %s - the cluster playbook fetches it\033[0m\n  make aws-cluster\n' "$$src"; exit 1; }; \
+	pub=$$(cd $(AWS_TF) && terraform output -raw control_plane_ip); \
+	[ -n "$$pub" ] || { printf '\033[31mno control_plane_ip in the Terraform state\033[0m\n'; exit 1; }; \
+	tmp=$$(mktemp); cp "$$src" "$$tmp"; \
+	old_ctx=$$(KUBECONFIG="$$tmp" kubectl config current-context); \
+	old_cluster=$$(KUBECONFIG="$$tmp" kubectl config view -o jsonpath='{.clusters[0].name}'); \
+	KUBECONFIG="$$tmp" kubectl config set-cluster "$$old_cluster" --server="https://$$pub:6443" >/dev/null; \
+	KUBECONFIG="$$tmp" kubectl config rename-context "$$old_ctx" aws-platform >/dev/null; \
+	mkdir -p "$$HOME/.kube"; \
+	cp "$$HOME/.kube/config" "$$HOME/.kube/config.bak-$$(date +%s)" 2>/dev/null || true; \
+	merged=$$(mktemp); \
+	KUBECONFIG="$$tmp:$$HOME/.kube/config" kubectl config view --flatten > "$$merged"; \
+	mv "$$merged" "$$HOME/.kube/config"; chmod 600 "$$HOME/.kube/config"; rm -f "$$tmp"; \
+	printf '\ncontext aws-platform -> https://%s:6443\n' "$$pub"; \
+	printf '\033[2mthe previous ~/.kube/config was copied to config.bak-<timestamp> first - merging\n'; \
+	printf 'kubeconfigs rewrites the file, and the one thing worse than no cluster access is\n'; \
+	printf 'losing access to the other two.\033[0m\n\n'; \
+	kubectl --context aws-platform get nodes -o wide 2>&1 | sed 's/^/  /' || \
+	  printf '  \033[33mnot answering yet - the API server may still be starting\033[0m\n'
+
 AWS_TF := terraform/aws
 
 .PHONY: _aws-preflight

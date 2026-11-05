@@ -76,11 +76,37 @@ apiServer:
   # Extra names the API server certificate is valid for. Without these, kubectl via any
   # name other than the advertise address fails TLS verification - and you will reach it
   # by several names.
+  #
+  # extra_cert_sans IS WHERE A CLOUD SUBSTRATE PUTS ITS PUBLIC ADDRESS, and it is the one place
+  # the on-prem assumption breaks. On the laptop every address is reachable from everywhere:
+  # nodes join over 192.168.100.x and so does kubectl, so one address serves both. On EC2 they
+  # are different addresses for the same machine - nodes must join over the PRIVATE IP, because
+  # joining over the public one would route cluster traffic out through the internet gateway and
+  # pay for it, while kubectl from the laptop can only reach the PUBLIC one.
+  #
+  # Leave the public address out and the cluster builds perfectly and then refuses the first
+  # kubectl command with a certificate error naming an IP - which reads as a broken PKI rather
+  # than as a missing SAN, and is unfixable without reissuing the API server certificate.
+  #
+  # `default([])` because the on-prem inventory does not define it. Note that default() replaces
+  # UNDEFINED and not empty, which this repository has already got wrong once.
+  #
+  # The loop body sits on the SAME LINE as the `for` tag deliberately, so this renders identically
+  # whether or not trim_blocks is set. Ansible's template module defaults it to true; a template
+  # whose output depends on a module default is one that breaks when somebody sets the default
+  # explicitly. Verified by rendering both ways with the list empty and populated.
+  #
+  # An earlier attempt put that explanation in a `{#- ... -#}` comment here, and the leading `-`
+  # ate the newline after 127.0.0.1 - producing `- 127.0.0.1    - 13.201.5.77` on one line, which
+  # is still valid YAML and silently wrong. Found by rendering it; it would not have been found
+  # by reading it.
   certSANs:
     - {{ inventory_hostname }}
     - {{ inventory_hostname }}.{{ cluster_domain }}
     - {{ control_plane_address }}
     - 127.0.0.1
+{% for san in extra_cert_sans | default([]) %}    - {{ san }}
+{% endfor %}
 
   # Encryption at rest for Secrets (ADR-0018 Decision 7). Two halves, and neither works
   # alone: the flag tells the API server which file to read, the volume is what makes that

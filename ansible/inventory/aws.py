@@ -1,0 +1,196 @@
+#!/usr/bin/env python3
+"""Dynamic Ansible inventory for the AWS substrate.
+
+Addresses come from TERRAFORM STATE, not from a config file, and that is the one structural
+difference from ansible/inventory/nodes.py. On-prem, every node's address is a CHOICE written in
+clusters/onprem/nodes.json - libvirt is told to use it and cloud-init configures it, so the file
+can be the source of truth for both Terraform and Ansible. On EC2 an address is an ALLOCATION:
+AWS picks it at launch and it changes every session. The same distinction ADR-0019 drew for the
+GKE load balancer, one layer down.
+
+So this reads `terraform output -json nodes`, which means the inventory cannot describe a cluster
+that does not exist - the same property nodes.py gets from reading the file Terraform reads.
+Everything else (versions, CIDRs, SSH) comes from clusters/aws/cluster.json, whose pins `make
+lint` checks against the on-prem ones.
+
+Ansible's script inventory interface:
+    --list          every group, host and variable, as JSON
+    --host <name>   per-host vars; unnecessary here because _meta carries them
+
+Try it by hand:
+    ansible/inventory/aws.py --list | jq
+"""
+
+import json
+import os
+import subprocess
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.dirname(os.path.dirname(HERE))
+CONFIG = os.path.join(REPO, "clusters", "aws", "cluster.json")
+PLATFORM = os.path.join(REPO, "clusters", "platform.json")
+TF_DIR = os.path.join(REPO, "terraform", "aws")
+
+# The same six lines nodes.py and gcp.py each carry, and still deliberately duplicated rather
+# than imported. Ansible EXECUTES an inventory script, so a sibling import breaks the moment
+# `inventory` points at the directory instead of the file - and an inventory that fails to
+# import fails in a way that reads as "no hosts matched" rather than as an error.
+
+
+def terraform_nodes():
+    """The nodes Terraform actually built, or a usable error."""
+    try:
+        out = subprocess.run(
+            ["terraform", f"-chdir={TF_DIR}", "output", "-json", "nodes"],
+            capture_output=True, text=True, timeout=60, check=False,
+        )
+    except FileNotFoundError:
+        sys.exit(
+            "terraform is not on PATH, and this inventory reads node addresses from its state.\n"
+            "On AWS an address is allocated at launch rather than chosen, so there is no file to\n"
+            "read instead - see the docstring."
+        )
+    except subprocess.TimeoutExpired:
+        sys.exit("`terraform output` took more than 60s - is the state locked by another apply?")
+
+    if out.returncode != 0:
+        err = (out.stderr or "").strip().splitlines()
+        hint = err[0] if err else "no error text"
+        sys.exit(
+            f"could not read the Terraform outputs: {hint}\n\n"
+            "If the state is empty, the cluster has not been built yet:\n"
+            "  make aws-up\n"
+            "If it complains about initialisation, the module has never been init'd here:\n"
+            f"  terraform -chdir={TF_DIR} init"
+        )
+
+    try:
+        nodes = json.loads(out.stdout)
+    except json.JSONDecodeError:
+        sys.exit("`terraform output -json nodes` did not return JSON - run it by hand and look")
+
+    if not nodes:
+        sys.exit("Terraform knows of no nodes. Build them first:  make aws-up")
+    return nodes
+
+
+def build():
+    with open(CONFIG, encoding="utf-8") as fh:
+        cfg = json.load(fh)
+    with open(PLATFORM, encoding="utf-8") as fh:
+        platform = json.load(fh)
+
+    argocd = platform["argocd"]
+    k8s = cfg["kubernetes"]
+    ssh = cfg["ssh"]
+    nodes = terraform_nodes()
+
+    groups = {"control_plane": [], "workers": []}
+    hostvars = {}
+
+    for name, node in sorted(nodes.items()):
+        group = "control_plane" if node["role"] == "control-plane" else "workers"
+        groups[group].append(name)
+        hostvars[name] = {
+            # ANSIBLE REACHES THE NODE ON ITS PUBLIC ADDRESS, because Ansible runs on a laptop
+            # outside the VPC. Everything the cluster does internally uses the private one -
+            # see control_plane_address below.
+            "ansible_host": node["public_ip"],
+            "node_address": node["private_ip"],
+            "node_public_address": node["public_ip"],
+            "node_role": node["role"],
+        }
+
+    cp_name = cfg["nodes"]["control_plane"]["name"]
+    if cp_name not in nodes:
+        sys.exit(
+            f"Terraform built no node called {cp_name}, which clusters/aws/cluster.json names as\n"
+            f"the control plane. It built: {', '.join(sorted(nodes))}"
+        )
+    cp = nodes[cp_name]
+
+    return {
+        "all": {
+            "children": ["control_plane", "workers"],
+            "vars": {
+                "ansible_user": ssh["user"],
+                "ansible_ssh_private_key_file": ssh["public_key_file"].removesuffix(".pub"),
+                # A fresh instance has a host key nothing has seen before, and its address is
+                # reused across sessions - so strict checking fails on every build and a known
+                # host from last week is a false alarm. Accepting the key is the honest setting
+                # for cattle; it is NOT set on-prem, where the VMs persist.
+                "ansible_ssh_common_args": "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null",
+                "cluster_name": cfg["cluster_name"],
+                # AWS gives every instance an internal name under this domain. Nothing here
+                # depends on it resolving - the addresses are used directly - but the kubeadm
+                # certSANs template interpolates it.
+                "cluster_domain": f"{cfg['region']}.compute.internal",
+                "pod_cidr": k8s["pod_cidr"],
+                "service_cidr": k8s["service_cidr"],
+                # THE PRIVATE ADDRESS, and this is the line that would cost money if it were the
+                # public one. Workers join through this endpoint; over the public IP that traffic
+                # would leave through the internet gateway and be billed, for every packet
+                # between a kubelet and its API server.
+                "control_plane_endpoint": f"{cp['private_ip']}:6443",
+                "control_plane_name": cp_name,
+                "control_plane_address": cp["private_ip"],
+                # AND THE PUBLIC ONE GOES IN THE CERTIFICATE, because kubectl on the laptop can
+                # reach nothing else. Leave it out and the cluster builds perfectly and then
+                # refuses the first kubectl command with a certificate error naming an IP -
+                # unfixable without reissuing the API server certificate.
+                "extra_cert_sans": [cp["public_ip"]],
+                "cni": k8s["cni"],
+                "kubernetes_version": k8s["version"],
+                "cilium_version": k8s["cilium_version"],
+                "gateway_api_version": k8s["gateway_api_version"],
+                "gateway_api_sha256": k8s["gateway_api_sha256"],
+                "all_node_names": sorted(nodes),
+                "repo_root": REPO,
+                "cilium_values_file": os.path.join(
+                    REPO, "ansible", "roles", "cilium", "files", "cilium-values.yaml"
+                ),
+                "kubeconfig_fetch_path": os.path.expanduser("~/.kube/aws.conf"),
+                "argocd_chart_version": argocd["chart_version"],
+                "argocd_app_version": argocd["app_version"],
+                "argocd_values_file": os.path.join(REPO, argocd["values_file"]),
+                "argocd_kubeconfig": os.path.expanduser("~/.kube/aws.conf"),
+                # The context name kubeadm writes into the fetched admin.conf, which is
+                # kubernetes-admin@<cluster_name>. NOT `aws-platform`: that is the name
+                # `make aws-kubeconfig` gives the MERGED context in ~/.kube/config, and the two
+                # are different files. Passing the wrong one here is the mistake ADR-0020
+                # records for the on-prem path, where `onprem-admin` exists only in the merged
+                # config and never in the fetched one.
+                "argocd_kube_context": f"kubernetes-admin@{cfg['cluster_name']}",
+                # NO root-tenants-aws.yaml YET, deliberately. There is no tenant on this
+                # substrate and no gitops/clusters/aws/apps to point one at - and a seam file
+                # naming a path that does not exist is how an inventory starts describing a
+                # cluster that is not there, which is the property this design exists to have.
+                # `make lint` checks both directions: every seam file exists, and nothing in
+                # bootstrap is orphaned.
+                "argocd_seam_files": [
+                    "projects.yaml",
+                    "root-aws.yaml",
+                ],
+                "argocd_root_app": "platform-aws",
+                "argocd_platform_path": "gitops/clusters/aws/platform",
+            },
+        },
+        "control_plane": {"hosts": groups["control_plane"]},
+        "workers": {"hosts": groups["workers"]},
+        "_meta": {"hostvars": hostvars},
+    }
+
+
+def main():
+    arg = sys.argv[1] if len(sys.argv) > 1 else "--list"
+    if arg == "--list":
+        print(json.dumps(build(), indent=2))
+    elif arg == "--host":
+        print(json.dumps({}))
+    else:
+        sys.exit(f"usage: {sys.argv[0]} --list | --host <name>")
+
+
+if __name__ == "__main__":
+    main()
