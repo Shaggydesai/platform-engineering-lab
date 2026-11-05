@@ -736,6 +736,70 @@ else
   skip 'grep missing, skipped'
 fi
 
+step 'Every Packer variable without a default is supplied'
+# THE CHECK FOR EXACTLY TODAY'S BUG, written the hour it happened.
+#
+# `30-kubernetes.sh` had K8S_PACKAGE_VERSION made REQUIRED on 2026-11-05, because a default there
+# meant "newest in the apt repo today" and produced a different Kubernetes on a different day.
+# Removing a default is the right move and it silently broke the caller: `scripts/build-image.sh`
+# ran `packer build .` with no `-var`, so the next image build would have stopped on a missing
+# variable - and an image rebuild happens rarely and usually under time pressure.
+#
+# Packer's own behaviour is what makes this worth a check rather than a convention: a variable
+# with no default and no value is not a parse error, it is an interactive prompt or a late
+# failure, so `packer validate` in CI would not necessarily catch it either.
+#
+# ssh_public_key is the expected exception: build-image.sh WRITES it into
+# variables.auto.pkrvars.hcl, which Packer loads automatically, and that file is gitignored
+# because it holds this machine's key.
+if command -v python3 >/dev/null 2>&1; then
+  if python3 - <<'PYPACKER'
+import pathlib, re, sys
+
+hcl_files = sorted(pathlib.Path("packer").rglob("*.pkr.hcl"))
+if not hcl_files:
+    print("  no packer templates found")
+    sys.exit(2)
+
+builder = pathlib.Path("scripts/build-image.sh")
+if not builder.is_file():
+    print("  scripts/build-image.sh is missing, so nothing supplies these")
+    sys.exit(1)
+script = builder.read_text()
+
+# Written by build-image.sh rather than passed on the command line.
+WRITTEN_BY_SCRIPT = {"ssh_public_key"}
+
+missing = []
+for f in hcl_files:
+    for name, body in re.findall(r'variable "(\w+)" \{(.*?)\n\}', f.read_text(), re.S):
+        # A real assignment, not the word "default" inside a description - which is how the
+        # first version of this check reported every documented variable as fine.
+        if re.search(r'^\s*default\s*=', body, re.M):
+            continue
+        if name in WRITTEN_BY_SCRIPT:
+            continue
+        if f'-var "{name}=' in script or f"-var {name}=" in script:
+            continue
+        missing.append((f, name))
+
+for f, name in missing:
+    print(f"  {f}: variable {name!r} has no default and build-image.sh does not pass it")
+if not missing:
+    print(f"  {len(hcl_files)} template(s) checked; every variable is defaulted, passed or written")
+sys.exit(1 if missing else 0)
+PYPACKER
+  then ok 'the image build supplies every variable its template requires'
+  else
+    rc=$?
+    if [[ $rc -eq 2 ]]; then skip 'no packer templates - see above'
+    else bad 'pass it in scripts/build-image.sh, or give the variable a default if one is correct'
+    fi
+  fi
+else
+  skip 'python3 missing, skipped'
+fi
+
 step "Cilium's pod CIDR agrees with every cluster's"
 # THE OTHER HALF OF A PAIR THAT WAS ONLY CHECKED ON ONE SIDE. Lint already asserts that the two
 # substrates' cluster.json files agree with each other about pod_cidr - and neither of them was
