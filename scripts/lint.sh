@@ -635,6 +635,108 @@ else
   skip 'python3 missing, skipped'
 fi
 
+step 'The two kubeadm inventories define the same variables'
+# THIS IS THE CHECK THAT SHOULD HAVE EXISTED BEFORE MODULE 09 WAS BUILT, and it is written after
+# three consecutive failures of the same shape on 2026-11-05: `kube_context`, then (found by
+# inspection beside it) `argocd_kubeconfig` pointing at an unreachable file, then
+# `gateway_api_bundle`. Each one cost a full playbook run against a billing cluster to discover,
+# and each was a variable ansible/inventory/nodes.py defines that ansible/inventory/aws.py did not.
+#
+# ansible/playbooks/cluster.yml runs the SAME eight roles against both substrates - that is the
+# whole premise of Module 09 - so a variable one inventory supplies and the other does not is a
+# role that works on one and fails on the other. Ansible finds that at the task, mid-run.
+#
+# WHY A SET DIFFERENCE RATHER THAN SCANNING THE ROLES for every `{{ name }}` they read: the
+# scanning version was written first and abandoned. It cannot tell a variable from a Jinja filter,
+# a loop variable, or prose inside a comment block, and - the part that makes it useless here - it
+# cannot tell a REQUIRED variable from one guarded by `| default()`. `kube_server` is deliberately
+# absent on-prem, and a check that flags it is a check that gets ignored. This one compares two
+# things that are supposed to be equal, and names the exceptions explicitly below.
+#
+# A new asymmetry fails here and the fix is one of two lines: define it in the other inventory, or
+# add it to SUBSTRATE_ONLY with the reason. Both are deliberate acts, which is the point.
+if command -v python3 >/dev/null 2>&1; then
+  if python3 - <<'PYINV'
+import json, os, subprocess, sys
+
+# Variables that SHOULD exist on one substrate only, each with the reason it cannot be shared.
+SUBSTRATE_ONLY = {
+    "ansible_ssh_common_args":
+        "aws: a fresh EC2 instance has a host key nothing has seen, at an address reused across "
+        "sessions - the libvirt VMs persist, so strict checking is correct there",
+    "extra_cert_sans":
+        "aws: the control plane's public IP must be in the API server certificate, because "
+        "kubectl runs outside the VPC. On-prem one address serves both",
+    "kube_server":
+        "aws: ~/.kube/config must name the public address while controlPlaneEndpoint stays "
+        "private. Guarded by | default() in the control_plane role, so on-prem needs no value",
+}
+
+def load(script):
+    out = subprocess.run([script, "--list"], capture_output=True, text=True)
+    if out.returncode != 0:
+        # THREE OUTCOMES, not two (ADR-0003). The AWS inventory reads Terraform state and exits
+        # non-zero when the substrate is not built, which is the normal case for a lint run on a
+        # laptop. That is "I could not look", and it is not a failure.
+        return None, (out.stderr or "").strip().splitlines()[:1]
+    try:
+        return set(json.loads(out.stdout)["all"]["vars"]), None
+    except (json.JSONDecodeError, KeyError) as e:
+        return None, [f"did not return the expected JSON: {e}"]
+
+onprem, e1 = load("ansible/inventory/nodes.py")
+aws, e2 = load("ansible/inventory/aws.py")
+
+if onprem is None:
+    print(f"  cannot compare: nodes.py did not list ({e1[0] if e1 else 'no error text'})")
+    sys.exit(2)
+if aws is None:
+    # Fall back to reading the literal keys out of the source, which is what the seam check
+    # already does for this same inventory and this same reason.
+    # ONLY the dict that is the value of a "vars" key - not every dict in the file. Taking all
+    # of them pulls in _meta, children, hosts and every hostvar name, and the check then fails
+    # on its own scaffolding, which is how it first behaved.
+    import ast, pathlib
+    tree = ast.parse(pathlib.Path("ansible/inventory/aws.py").read_text())
+    aws = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict):
+            continue
+        for key, value in zip(node.keys, node.values):
+            if (isinstance(key, ast.Constant) and key.value == "vars"
+                    and isinstance(value, ast.Dict)):
+                aws |= {
+                    k.value for k in value.keys
+                    if isinstance(k, ast.Constant) and isinstance(k.value, str)
+                }
+    if not aws:
+        print("  aws.py: could not find an `all.vars` dict in the source either")
+        sys.exit(2)
+    print("  aws.py: read from source - it cannot --list without its substrate built")
+
+missing = sorted(onprem - aws - set(SUBSTRATE_ONLY))
+extra = sorted(aws - onprem - set(SUBSTRATE_ONLY))
+
+for name in missing:
+    print(f"  ansible/inventory/aws.py does not define {name!r}, which nodes.py does")
+    print(f"    cluster.yml runs the same roles on both, so a role reading it fails mid-run on AWS")
+for name in extra:
+    print(f"  ansible/inventory/nodes.py does not define {name!r}, which aws.py does")
+    print(f"    define it there too, or add it to SUBSTRATE_ONLY in scripts/lint.sh with the reason")
+
+sys.exit(1 if (missing or extra) else 0)
+PYINV
+  then ok 'both kubeadm inventories define the same variables, bar the three recorded exceptions'
+  else
+    rc=$?
+    if [[ $rc -eq 2 ]]; then skip 'could not list an inventory - see above'
+    else bad 'define the variable in both inventories, or record why it belongs to one'
+    fi
+  fi
+else
+  skip 'python3 missing, skipped'
+fi
+
 step 'Optional linters, where installed'
 
 command -v yamllint     >/dev/null 2>&1 && { yamllint -s . && ok yamllint || bad yamllint; } || skip 'yamllint not installed'

@@ -150,6 +150,14 @@ def build():
                 "cilium_values_file": os.path.join(
                     REPO, "ansible", "roles", "cilium", "files", "cilium-values.yaml"
                 ),
+                # THE SAME PATH ON THE WORKSTATION AS ON-PREM, and shared deliberately. The
+                # gateway_api role downloads the bundle to the laptop and verifies it against
+                # gateway_api_sha256 before applying it, so one download serves both substrates
+                # and `make lint` already asserts the two digests agree. A per-substrate path
+                # would mean downloading the same pinned bytes twice to prove the same thing.
+                "gateway_api_bundle": os.path.join(
+                    REPO, ".cache", "gateway-api-standard-install.yaml"
+                ),
                 "kubeconfig_fetch_path": os.path.expanduser("~/.kube/aws.conf"),
                 # THE READABLE NAME IN ~/.kube/config, which is NOT argocd_kube_context above.
                 # kubeadm writes kubernetes-admin@platform into the fetched admin.conf; the
