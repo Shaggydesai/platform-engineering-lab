@@ -4,27 +4,21 @@ terraform {
   required_providers {
     aws = {
       source = "hashicorp/aws"
-      # A BOUNDED RANGE FOR EXACTLY ONE `terraform init`, then pinned exactly - the same sequence
-      # terraform/gcp/guardrails/versions.tf went through, written down here so the next reader
-      # knows this line is unfinished rather than sloppy.
+      # EXACT, AND READ FROM A REAL RESOLUTION rather than from memory. This was a bounded range
+      # for exactly one `terraform init`: the authoring environment cannot reach
+      # registry.terraform.io, and three pins written from memory in this repository have been
+      # wrong. That init ran on the laptop on 2026-11-05 and resolved 5.100.0.
       #
-      # The authoring environment cannot reach registry.terraform.io, so the current 5.x patch
-      # version cannot be read, and this repository has `make gitops-check-pins` precisely because
-      # three pins written from memory were wrong. So: a range now, and the FIRST `terraform init`
-      # on the laptop resolves a real version and writes it with its hashes into
-      # .terraform.lock.hcl.
+      # .terraform.lock.hcl carries the provider's HASHES and is the stronger pin - a re-published
+      # 5.100.0 would fail verification rather than install quietly - so `make lint` now DEMANDS
+      # it, because the version here is exact. That is the self-closing rule: pinning is what
+      # turns a missing lock file from "expected" into a failure.
       #
-      # THEN DO BOTH OF THESE, and `make lint` enforces the second:
+      #   git add -f terraform/aws/guardrails/.terraform.lock.hcl
       #
-      #   1. Replace the range below with the exact version the lock file names.
-      #   2. Commit the lock file:
-      #        git add -f terraform/aws/guardrails/.terraform.lock.hcl
-      #
-      # The lock file is the stronger pin because it carries hashes: a re-published version would
-      # fail verification rather than install quietly. Two of four Terraform states in this
-      # repository had no committed lock file on 2026-11-01 - a rule stated in one comment and
-      # enforced nowhere - which is now a lint check rather than a hope.
-      version = ">= 5.0.0, < 6.0.0"
+      # Two of four Terraform states had no committed lock file on 2026-11-01 - a rule stated in
+      # one comment and enforced nowhere.
+      version = "5.100.0"
     }
   }
 }

@@ -4,17 +4,16 @@ terraform {
   required_providers {
     aws = {
       source = "hashicorp/aws"
-      # A BOUNDED RANGE FOR EXACTLY ONE `terraform init`, then pinned exactly - the same sequence
-      # terraform/gcp/guardrails went through, and the same reason: the authoring environment
-      # cannot reach registry.terraform.io, and three pins written from memory in this repository
-      # have been wrong.
+      # STILL A RANGE, because `terraform init` has never run in THIS directory - and the rule
+      # this repository enforces is that a range IS that declaration. Pinning it exactly would
+      # make `make lint` demand a .terraform.lock.hcl that cannot exist yet, which is the lint
+      # failing for a reason the reader cannot fix.
       #
-      # The first `terraform init` on the laptop resolves a real version. THEN replace the range
-      # with that exact version and commit the lock file - `make lint` starts enforcing the lock
-      # the moment the version is exact, which is the self-closing rule ADR-0022's consequences
-      # describe:
-      #
-      #   git add -f terraform/aws/.terraform.lock.hcl
+      # The guardrail state resolved 5.100.0 on 2026-11-05, so this range will almost certainly
+      # resolve the same. After the first `make aws-up`, pin it to whatever the lock file names
+      # and commit the lock - at which point the check starts enforcing it. The two AWS states
+      # should end up on the same version: a plan that works in one and fails in the other
+      # because of a provider difference is a confusing hour.
       version = ">= 5.0.0, < 6.0.0"
     }
     http = {

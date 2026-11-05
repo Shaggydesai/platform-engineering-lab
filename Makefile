@@ -406,6 +406,25 @@ aws-guardrails: _no-stray-flags ## ADR-0003 gate - the $5 budget alarm, BEFORE a
 # It is kept OUT OF GIT in .cache/ (gitignored), the same arrangement as the GCP billing account
 # ID: this repository is public, and an address in a public repository is an address in a scraper's
 # list.
+#
+# AND THE CREDENTIALS ARE HANDED TO TERRAFORM EXPLICITLY, because the provider cannot find what
+# the CLI can:
+#
+#     Error: No valid credential sources found
+#     failed to refresh cached credentials, no EC2 IMDS role found, operation error ec2imds:
+#     GetMetadata, request canceled, context deadline exceeded
+#
+# `aws login` stores its session somewhere the AWS SDK for Go does not read, so the provider walks
+# its whole credential chain, finds nothing, and ends up asking the instance metadata service of a
+# machine that is not an EC2 instance - which takes a timeout to fail and then blames credentials
+# in general rather than naming the gap.
+#
+# `aws configure export-credentials --format env` resolves the session the CLI's own way and emits
+# it as the three environment variables every AWS SDK reads. `eval` rather than a printf, so the
+# secret is never a line of output; the recipe is `@`-prefixed so make does not echo it either.
+#
+# This is also why the AWS targets do not simply tell Terraform to use a profile: the profile is
+# the thing the provider cannot resolve.
 	@set -eu; \
 	command -v jq >/dev/null || { printf '\033[31mjq not installed\033[0m\n  make tools\n'; exit 1; }; \
 	command -v aws >/dev/null || { \
@@ -464,7 +483,7 @@ aws-guardrails: _no-stray-flags ## ADR-0003 gate - the $5 budget alarm, BEFORE a
 	    fi ;; \
 	esac; \
 	case "$$arn" in \
-	  *:assumed-role/*) : ;; \
+	  *:assumed-role/*|*:root) : ;; \
 	  *) \
 	    printf '\033[33mthese are an IAM USER'"'"'s own credentials, not an assumed role\033[0m\n\n'; \
 	    printf '  %s\n\n' "$$arn"; \
@@ -501,6 +520,7 @@ aws-guardrails: _no-stray-flags ## ADR-0003 gate - the $5 budget alarm, BEFORE a
 	printf '%s' "$$email" > $(AWS_ALERT_FILE); \
 	chmod 600 $(AWS_ALERT_FILE); \
 	TF_VAR_alert_emails=$$(jq -nc --arg e "$$email" '[$$e]'); export TF_VAR_alert_emails; \
+	eval "$$(aws configure export-credentials --format env)"; \
 	cd $(AWS_GUARDRAIL_TF) && terraform init -input=false && terraform apply
 
 .PHONY: aws-guardrails-verify
@@ -616,7 +636,7 @@ aws-up: _no-stray-flags _aws-preflight ## Build 3 spot EC2 nodes (REFUSES withou
 	  "$$(jq -r '.nodes.workers.instance_type' clusters/aws/cluster.json)" \
 	  "$$(jq -r '.nodes.spot' clusters/aws/cluster.json)"; \
 	printf 'cost      real money - this account has no credits (ADR-0003 Decision 6)\n\n'
-	@cd $(AWS_TF) && terraform init -input=false && terraform apply
+	@set -eu; eval "$$(aws configure export-credentials --format env)"; cd $(AWS_TF) && terraform init -input=false && terraform apply
 
 .PHONY: aws-wait
 aws-wait: _aws-preflight ## Wait for cloud-init to finish running the image scripts on every node
@@ -681,7 +701,7 @@ aws-down: _no-stray-flags ## Destroy the AWS cluster, then prove nothing is left
 	else \
 	  printf '==> no aws-platform context with Applications - nothing in-cluster to clean up first\n\n'; \
 	fi
-	@cd $(AWS_TF) && terraform destroy
+	@set -eu; eval "$$(aws configure export-credentials --format env)"; cd $(AWS_TF) && terraform destroy
 	@printf '\n==> and now the question terraform cannot answer\n'
 	@$(MAKE) --no-print-directory cost-check
 
