@@ -149,7 +149,7 @@
   run_once: true
   become: false
   environment:
-    KUBECONFIG: "{{ kubeconfig_fetch_path }}"
+    KUBECONFIG: "{{ cluster_kubeconfig }}"
   register: gw_diff
   changed_when: false
   # Anything above 1 is a real error. Without this, a broken kubeconfig reads as
@@ -167,7 +167,7 @@
   run_once: true
   become: false
   environment:
-    KUBECONFIG: "{{ kubeconfig_fetch_path }}"
+    KUBECONFIG: "{{ cluster_kubeconfig }}"
   register: gw_apply
   changed_when: true
 
@@ -185,7 +185,7 @@
   run_once: true
   become: false
   environment:
-    KUBECONFIG: "{{ kubeconfig_fetch_path }}"
+    KUBECONFIG: "{{ cluster_kubeconfig }}"
   changed_when: false
 
 - name: Report

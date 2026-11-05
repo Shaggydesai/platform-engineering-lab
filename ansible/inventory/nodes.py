@@ -93,6 +93,11 @@ def build():
                     REPO, "ansible", "roles", "cilium", "files", "cilium-values.yaml"
                 ),
                 "kubeconfig_fetch_path": os.path.expanduser("~/.kube/onprem.conf"),
+                # THE KUBECONFIG EVERY WORKSTATION kubectl AND helm IN cluster.yml USES, and
+                # on-prem it is the fetched file itself: one address serves both the cluster and
+                # the laptop, so there is nothing to rewrite and no second file to keep.
+                # ansible/inventory/aws.py has to differ, and the comment there says why.
+                "cluster_kubeconfig": os.path.expanduser("~/.kube/onprem.conf"),
                 # ---------------------------------------------------------- Layer 2, on-prem
                 # Everything the argocd role needs that differs between substrates. The role
                 # itself names no cluster, no file and no Application; it reads these (ADR-0020).

@@ -26,7 +26,7 @@
   run_once: true
   become: false
   environment:
-    KUBECONFIG: "{{ kubeconfig_fetch_path }}"
+    KUBECONFIG: "{{ cluster_kubeconfig }}"
   register: kp_present
   changed_when: false
 
@@ -63,7 +63,7 @@
       run_once: true
       become: false
       environment:
-        KUBECONFIG: "{{ kubeconfig_fetch_path }}"
+        KUBECONFIG: "{{ cluster_kubeconfig }}"
       register: kp_cilium_mode
       changed_when: false
 
@@ -100,7 +100,7 @@
   run_once: true
   become: false
   environment:
-    KUBECONFIG: "{{ kubeconfig_fetch_path }}"
+    KUBECONFIG: "{{ cluster_kubeconfig }}"
   loop:
     - daemonset/kube-proxy
     - configmap/kube-proxy

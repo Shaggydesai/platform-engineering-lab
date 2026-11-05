@@ -263,6 +263,75 @@
     flat: true
   become: true
 
+- name: Make a workstation-reachable copy of the fetched kubeconfig
+  # WHY A COPY RATHER THAN THE FETCHED FILE ITSELF. Every role after this one runs its kubectl
+  # and helm on the workstation with KUBECONFIG set to this path - gateway_api, cilium and
+  # kube_proxy_removal all do. On-prem they can use the fetched admin.conf unchanged, because
+  # the control plane's one address is reachable from the laptop.
+  #
+  # On AWS it is not: admin.conf names controlPlaneEndpoint, which is the PRIVATE address by
+  # deliberate choice, and the three roles above fail with `dial tcp 10.20.1.10:6443: i/o
+  # timeout` - a message about a network, from a cluster that is working.
+  #
+  # The fetched file is not edited in place because the `fetch` task above compares it to decide
+  # whether anything changed: a file a later step rewrites cannot also be an earlier step's
+  # idempotency marker. That lesson is written out two tasks up; this is it being applied rather
+  # than learned again.
+  #
+  # ONE CONTEXT INSIDE, which is the other reason not to send these roles at ~/.kube/config.
+  # That file holds three clusters, so a kubectl with no `--context` there is a kubectl aimed by
+  # whatever ran last (ADR-0020). Here there is nothing to aim: a single-context kubeconfig
+  # cannot be pointed at the wrong cluster.
+  when: cluster_kubeconfig != kubeconfig_fetch_path
+  ansible.builtin.shell:
+    executable: /bin/bash
+    cmd: |
+      set -uo pipefail
+      umask 077
+      src={{ kubeconfig_fetch_path }}
+      dst={{ cluster_kubeconfig }}
+      before=$([ -f "$dst" ] && sha256sum < "$dst" || echo absent)
+
+      tmp=$(mktemp)
+      trap 'rm -f "$tmp"' EXIT
+      cp "$src" "$tmp"
+
+      server='{{ kube_server | default("") }}'
+      if [ -n "$server" ]; then
+        kubectl --kubeconfig "$tmp" \
+          config set-cluster {{ cluster_name }} --server="$server" >/dev/null || exit 1
+      fi
+
+      # PROVE THE CLUSTER ENTRY WAS THE ONE THE CONTEXT USES, rather than trusting the exit
+      # code. `kubectl config set-cluster` is documented as set-OR-CREATE ("specifying a name
+      # that already exists will merge new fields"), which means a name that does NOT exist
+      # should produce a new entry and exit 0 - leaving the context pointed at the original
+      # server. I could not verify that behaviour where this was written (no kubectl, and
+      # dl.k8s.io is outside the allowlist), and the readback is why it does not matter: it
+      # asserts the OUTCOME through the context, so it is correct whether set-cluster creates,
+      # errors, or does something else entirely.
+      #
+      # This is the same correction as every other one in this repository this week - ask what
+      # the state is, not whether the command that was supposed to change it returned zero.
+      ctx=$(kubectl --kubeconfig "$tmp" config current-context)
+      named=$(kubectl --kubeconfig "$tmp" config view \
+        -o jsonpath="{.contexts[?(@.name=='$ctx')].context.cluster}")
+      got=$(kubectl --kubeconfig "$tmp" config view \
+        -o jsonpath="{.clusters[?(@.name=='$named')].cluster.server}")
+      if [ -n "$server" ] && [ "$got" != "$server" ]; then
+        echo "context $ctx still points at $got, not $server (cluster entry: $named)" >&2
+        exit 1
+      fi
+
+      cp "$tmp" "$dst"
+      after=$(sha256sum < "$dst")
+      [ "$before" = "$after" ] && echo UNCHANGED || echo WROTE "$got"
+  delegate_to: localhost
+  run_once: true
+  become: false
+  register: cp_local_kubeconfig
+  changed_when: "'WROTE' in cp_local_kubeconfig.stdout"
+
 - name: Merge it into the workstation's kubeconfig under a readable context name
   # One task does the renaming and the merging, in a temporary file, and reports changed only
   # when the real kubeconfig actually moved. The fetched copy is never touched.
@@ -308,6 +377,19 @@
       if [ -n "$server" ]; then
         kubectl --kubeconfig "$incoming" \
           config set-cluster {{ cluster_name }} --server="$server" >/dev/null
+        # READ IT BACK THROUGH THE CONTEXT. set-cluster is set-or-create, so a cluster-entry
+        # name that does not match produces a new entry and exits 0 while the context keeps
+        # the old server - which here would mean ~/.kube/config silently holding the private
+        # address and every later kubectl hanging. Fail loudly instead of writing that.
+        ctx=$(kubectl --kubeconfig "$incoming" config current-context)
+        named=$(kubectl --kubeconfig "$incoming" config view \
+          -o jsonpath="{.contexts[?(@.name=='$ctx')].context.cluster}")
+        got=$(kubectl --kubeconfig "$incoming" config view \
+          -o jsonpath="{.clusters[?(@.name=='$named')].cluster.server}")
+        if [ "$got" != "$server" ]; then
+          echo "context $ctx points at $got, not $server (cluster entry: $named)" >&2
+          exit 1
+        fi
       fi
 
       kubectl --kubeconfig "$main" config delete-context {{ kube_context }} >/dev/null 2>&1 || true

@@ -159,6 +159,17 @@ def build():
                     REPO, ".cache", "gateway-api-standard-install.yaml"
                 ),
                 "kubeconfig_fetch_path": os.path.expanduser("~/.kube/aws.conf"),
+                # A SEPARATE FILE FROM THE FETCHED ONE, which on-prem it is not. The fetched
+                # admin.conf names the private controlPlaneEndpoint, so the gateway_api, cilium
+                # and kube_proxy_removal roles - all of which run kubectl and helm on the
+                # workstation - cannot reach the cluster through it. The control_plane role
+                # writes this copy with the public server instead, and verifies the rewrite
+                # landed on the cluster entry the context actually uses.
+                #
+                # Not ~/.kube/config: that holds three clusters, and a kubectl with no
+                # --context there is aimed by whatever ran last (ADR-0020). This file has one
+                # context, so there is nothing to aim wrongly.
+                "cluster_kubeconfig": os.path.expanduser("~/.kube/aws-local.conf"),
                 # THE READABLE NAME IN ~/.kube/config, which is NOT argocd_kube_context above.
                 # kubeadm writes kubernetes-admin@platform into the fetched admin.conf; the
                 # control_plane role renames it to this when it merges. Passing one where the
