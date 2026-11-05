@@ -4,10 +4,14 @@
 > before you close the laptop. It takes thirty seconds and it is the reason this project will
 > not stall like the last one.
 
-**Last updated:** 2026-11-01
-**Current module:** 08 — GCP. Guardrail, cluster, Layer 2 and the secret backend are **applied
-and verified**. The tenant and the ingress decision are **written but never run**.
-**Overall progress:** Modules 00–07 complete — 8 / 13
+**Last updated:** 2026-11-05
+**Current module:** 09 — AWS. **The cluster is built and verified**: the same playbook and the
+same eight roles that build the laptop's VMs took three bare EC2 instances to Argo CD
+Synced/Healthy in one run, `failed=0`. The six differences are written up in
+`docs/substrate-differences.md`. **Not done:** no ingress, no storage and no IRSA on that
+substrate (one missing piece, see below), the EKS comparison session, and the second consecutive
+run that would prove idempotency there.
+**Overall progress:** Modules 00–08 complete — 9 / 13
 
 ---
 
@@ -54,7 +58,17 @@ and verified**. The tenant and the ingress decision are **written but never run*
 | **GCP guardrail** | ₹400 budget `ad4e1d32`, thresholds 50/90/100%, verified against the API. **`make gcp-up` refuses to run without it** |
 | **GCP account** | project `platform-eng-lab-261031`, billing `01662D-…-2D203C` linked. **Free trial: ₹28,257 of ₹28,797 left, ends 2027-01-02.** After that date the same mistake bills a card. Console still shows an unactioned **"administrator must verify this account"** banner |
 | **GCP leftovers** | **cleaned 2026-11-01.** The old `shopverse-lab` project is deleted, taking its tfstate bucket, Vault bucket and KMS keyring with it; the two stray ₹2500 budgets are gone. `make cost-check` clean |
-| **AWS cluster** | not built |
+| **AWS cluster** | **built and verified, 2026-11-05.** 3 nodes Ready on **v1.34.12** — `aws-cp01` .10, `aws-w01` .11, `aws-w02` .12, `m6a.large` spot in `ap-south-1b`. Built by **`ansible/playbooks/cluster.yml` unforked** — all eight roles the laptop uses, one inventory difference and one CNI value. Three bare Ubuntu instances to Argo CD Synced/Healthy in a single run, `failed=0`. **This is Module 09's central claim, and it is no longer a claim** |
+| **AWS Kubernetes** | **v1.34.12, identical to on-prem to the patch**, because both install `kubernetes.package_version` `1.34.12-1.1` from the same four scripts and `preflight` refuses to continue if `kubeadm` disagrees. GKE is on v1.36.4 and unpinnable — **only this pair agrees** |
+| **AWS dataplane** | **no kube-proxy**, same as on-prem. Agent reports `kubeProxyReplacement=true`, 0 `KUBE-SVC` iptables rules, Services in eBPF maps. Gateway API CRDs v1.6.3 established, digest `356c2b8e…`, and Cilium's Gateway support verified live |
+| **AWS Layer 2** | **done in the same run.** The `argocd` role is part of `cluster.yml`, so root app **`platform-aws` Synced/Healthy**, chart 10.11.0 → v3.5.5, seam `projects.yaml` + `root-aws.yaml` applied. Context `aws-platform` written into `~/.kube/config` by the `control_plane` role on its way through — **nothing to run afterwards** |
+| **AWS spot interruption** | **happened, for real, mid-session 2026-11-05 — all three instances reclaimed at once.** `terraform plan` said `3 to add, 0 to change, **0 to destroy**`, and that zero is the design working: `instance_interruption_behavior = "terminate"` plus `delete_on_termination = true` meant AWS took the root volumes with the instances. **Nothing orphaned** — ADR-0021's scenario tested by AWS rather than reasoned about |
+| **AWS identity** | **no access key exists anywhere.** `aws login` issues 12-hour browser-obtained credentials; a root access key was created once, `make aws-guardrails` **refused to run** because of it, and it was deleted. ADR-0023 (IAM user + MFA-gated role) is **superseded** — it was designed against documentation for a different product, since the free account plan has no root user, no IAM Identity Center, no Organizations and no CloudShell |
+| **AWS what is missing** | **no ingress, no storage class, no IRSA — and all three are one missing piece.** The instances have **no `iam_instance_profile` at all**, so nothing in the cluster can call an AWS API: no EBS CSI driver, no load-balancer controller. `l2announcements` is still enabled there and **cannot work** (AWS will not honour gratuitous ARP for an address it did not assign), so a Gateway on AWS would sit `<pending>` and look like a CNI fault. The three candidate answers are written out in `docs/substrate-differences.md` |
+| **AWS idempotency** | **not yet established.** The verified run was a from-scratch build, so `changed=17` is correct. The second consecutive run is the gate, and it has not been done |
+| **AWS session cost** | **~$0.106/hr ≈ ₹9.4/hr**, measured: 3 × `m6a.large` spot ~$0.0266, 3 × 30 GB gp3 ~$0.0036/node, 3 × public IPv4 $0.005. Module 09's working session ran ~3.3 hours |
+| **AWS guardrail** | $5 budget `platform-engineering-lab guardrail`, thresholds 50/90/100% on **ACTUAL** spend, all three subscribed to the alert address, verified against the Budgets API. **`make aws-up` refuses to run without it.** And the sharper limit than GCP's: **a budget alerts, it does not stop anything**, and on the free account plan there is no spend cap at all — so `make aws-down` is the control and the budget only tells you it was forgotten |
+| **AWS account** | `730335198894`, **no credits** — deliberately (ADR-0003 Decision 6). The credited account `331970435482` is **not activated for EC2** (`OptInRequired` after 19.5h) with a support case open; everything else on it works |
 | **Argo CD** | **running** — chart 10.11.0 / Argo CD v3.5.5, root app Synced, self-heal verified |
 | **Platform components** | metrics-server 3.14.0, cert-manager v1.21.3 + internal PKI — both Synced/Healthy |
 | **Internal CA** | `platform-ca` ClusterIssuer, Ready. Root valid to **2036-10-21**, key in `cert-manager/platform-ca-tls` |

@@ -44,29 +44,38 @@ output "next" {
   value = <<-EOT
     Three instances exist. They are NOT a cluster yet, and they are not ready for Ansible yet.
 
-      1. WAIT FOR THE IMAGE SCRIPTS. cloud-init is running the same four scripts the Packer
-         image bakes for the laptop (ADR-0025), which takes about two minutes. Ansible's
-         preflight role asserts what those scripts produce, so running it early fails every
-         assertion on a node that is thirty seconds from passing them:
-
-           make aws-wait
-
-         or by hand, until it prints the marker:
-
-           ssh -i ~/.ssh/id_ed25519 ${local.cfg.ssh.user}@${aws_instance.node[local.cfg.nodes.control_plane.name].public_ip} \
-             'cloud-init status --wait; ls -l /var/lib/cloud/image-ready'
-
-         If it never appears:  sudo tail -50 /var/log/image-build.log
-
-      2. BUILD THE CLUSTER with the same roles the laptop uses - preflight, control_plane,
-         gateway_api, cilium, kube_proxy_removal, workers:
+      1. BUILD THE CLUSTER. One command, and it waits for the image scripts itself:
 
            make aws-cluster
 
-      3. THEN Layer 2, which is one role shared by every substrate (ADR-0020):
+         cloud-init is running the same four scripts the Packer image bakes for the laptop
+         (ADR-0025), which takes about two minutes - and an instance answers SSH well before
+         they have finished. The playbook now waits for /var/lib/cloud/image-ready on every
+         node before preflight asserts anything, because running early fails every assertion
+         on a node that is thirty seconds from passing them.
 
-           make aws-kubeconfig     names the context aws-platform
-           make aws-argocd
+         `make aws-wait` still exists and does only that wait, which is useful when you want
+         to watch the boot rather than the build. It is no longer a step you have to remember:
+         on 2026-11-05 this output said to run it, the sequence handed over omitted it, and
+         preflight raced the boot. A documented first step is not a mechanism.
+
+         If the marker never appears:
+
+           ssh -i ~/.ssh/id_ed25519 ${local.cfg.ssh.user}@${aws_instance.node[local.cfg.nodes.control_plane.name].public_ip} \
+             'cloud-init status --long; sudo tail -50 /var/log/image-build.log'
+
+      2. THAT IS THE WHOLE CLUSTER, including Layer 2. `make aws-cluster` runs all eight roles
+         the laptop uses - preflight, control_plane, etcd_encryption, gateway_api, cilium,
+         kube_proxy_removal, workers AND argocd (ADR-0020) - and the control_plane role writes
+         the aws-platform context into ~/.kube/config on its way through.
+
+         So there is nothing to run after it. `make aws-argocd` re-runs only the Argo CD role,
+         for repairing Layer 2 without rebuilding; `make aws-kubeconfig` is repair-only too,
+         for the case where a reclaimed spot instance comes back on a new public address and
+         ~/.kube/config still names the old one.
+
+           make aws-check                   dry run, --check --diff
+           kubectl --context aws-platform get nodes -o wide
 
     AND THE ONE THAT ENDS THE SESSION, whatever else happens (ADR-0003 Decision 5):
 
