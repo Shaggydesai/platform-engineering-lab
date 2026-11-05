@@ -80,7 +80,7 @@ if [[ "$ents" != *remote-node* ]]; then
 fi
 
 # ---------------------------------------------------------------- 1
-step '1/4 the front door answers now'
+step '1/3 the front door answers now'
 code=$(probe)
 [[ "$code" == 200 ]] || die "GET https://$HOST/ -> $code before touching anything.
 Fix that first; this test can only tell you something if it starts from a working front door."
@@ -105,150 +105,152 @@ Wait for the lease to move, or move it by restarting the Cilium agent there:
   kubectl -n kube-system delete pod -l k8s-app=cilium --field-selector spec.nodeName=$HOLDER"
 fi
 
-# WHICH METHOD, and this is the fix for the first run of this script (2026-11-05), which
-# destroyed the node the frontend was running on and produced a result that meant nothing.
+# TWO QUESTIONS, AND THE THIRD VERSION OF THIS SCRIPT IS THE ONE THAT SEPARATES THEM.
 #
-# THE STATE WE WANT is "the announcer is not the frontend's node". Killing a node is one way to
-# reach it and a poor one when that node is also the frontend's: the pod is then rescheduled and
-# pulls its image elsewhere, so a 503 might be a policy denial or might be a pod that has not
-# started, and the check cannot tell you which. That is the same ambiguity this repository has
-# been removing all day, authored into a brand-new check by the person removing it.
+#   Q1  does the policy permit the front door when the announcer is NOT the frontend's node?
+#       That is the failure the rule exists to prevent. It needs no outage at all: produce the
+#       state, send a request, and read the identity Cilium saw.
 #
-# So: move the LEASE when they are co-located, and kill the NODE only when the frontend is
-# somewhere else and the result stays readable.
+#   Q2  does the front door come back when the announcing node DIES?
+#       A different question - about recovery, not about the policy.
+#
+# Run 1 destroyed the frontend's own node and could not tell a denial from a pod that had not
+# restarted. Run 2 did better and still failed for a reason that was not a failure: with two
+# workers, powering off the announcer leaves exactly one candidate, so the lease MUST land on
+# the frontend's node afterwards. The script called that "cannot test remote-node" and exited 1
+# - while its own step 1 had already answered Q1 in the affirmative and thrown the answer away.
+#
+# So Q1 is now the default and is non-destructive. Q2 is opt-in, and co-location afterwards is
+# reported rather than treated as a failure, because on a two-worker cluster it is the only
+# possible outcome.
 if [[ "$HOLDER" == "$FE_NODE" ]]; then
-  METHOD=lease
-  info "the announcer and the frontend are both on $HOLDER, so traffic currently arrives as"
-  info "'host' - which is exactly the state in which a rule missing remote-node looks fine."
-  info "Powering this node off would also take the frontend, and a 503 would then be"
-  info "indistinguishable from a pod that has not finished starting. Moving the lease instead."
-else
-  METHOD=node
-  info "the frontend is on $FE_NODE and the announcer is $HOLDER - already different, so the 200"
-  info "above already crosses nodes. Powering off the announcer adds the recovery half."
-fi
-
-# ---------------------------------------------------------------- 2
-if [[ "$METHOD" == lease ]]; then
-  step "2/4 moving the lease off $HOLDER by restarting its Cilium agent"
-  # Non-destructive: the agent is back in seconds, and while it is gone the lease expires and a
-  # surviving node takes it. Nothing else on the node is touched, so the frontend stays exactly
-  # where it is - which is the entire point.
+  step "2/3 moving the lease off $HOLDER so the front door has to cross nodes"
+  info "both are on $HOLDER, so traffic currently arrives as 'host' - exactly the state in"
+  info "which a rule missing the cross-node entity looks fine. Restarting its Cilium agent:"
+  info "the lease expires, a survivor takes it, and the frontend does not move."
   kubectl -n kube-system delete pod -l k8s-app=cilium \
     --field-selector "spec.nodeName=$HOLDER" >/dev/null \
     || die "could not restart the Cilium agent on $HOLDER"
-  ok "agent on $HOLDER restarted; waiting for the lease to move"
-else
-  step "2/4 powering off $HOLDER (hard, no graceful shutdown)"
-  if [[ "${CONFIRM:-}" != "yes" ]]; then
-    if [[ ! -t 0 ]]; then
-      die "this powers off $HOLDER and needs confirmation. Re-run with:  make ingress-failover-check CONFIRM=yes"
-    fi
-    printf '    %sType the node name to confirm, anything else aborts: %s' "$c_warn" "$c_off"
-    read -r answer
-    [[ "$answer" == "$HOLDER" ]] || die "aborted - nothing was touched"
+  for _ in $(seq 1 45); do
+    cur=$(lease_holder)
+    if [[ -n "$cur" && "$cur" != "null" && "$cur" != "$HOLDER" ]]; then HOLDER="$cur"; break; fi
+    sleep 2
+  done
+  if [[ "$HOLDER" == "$FE_NODE" ]]; then
+    die "the lease did not move off $FE_NODE within 90s. With one other worker it may have
+nowhere to go, or the announcement policy may select a single node:
+  kubectl get ciliuml2announcementpolicies.cilium.io -o yaml
+  kubectl get leases -n kube-system | grep l2announce"
   fi
-  $V destroy "$HOLDER" >/dev/null 2>&1 || die "virsh destroy $HOLDER failed - is the domain named
-differently from the Kubernetes node?  $V list --all"
-  ok "$HOLDER is off"
-  restore() {
-    printf '\n%s==> restoring %s%s\n' "$c_step" "$HOLDER" "$c_off"
-    $V start "$HOLDER" >/dev/null 2>&1 || bad "could not start $HOLDER - do it by hand: $V start $HOLDER"
-    for _ in $(seq 1 60); do
-      [[ "$(kubectl get node "$HOLDER" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)" == True ]] \
-        && { ok "$HOLDER is Ready again"; return; }
-      sleep 5
-    done
-    bad "$HOLDER did not become Ready within 5 minutes - check it before trusting the cluster"
-  }
-  trap restore EXIT
+  ok "lease moved to $HOLDER, which is not the frontend's node"
+else
+  step '2/3 the announcer is already on another node'
+  ok "announcer $HOLDER, frontend $FE_NODE - nothing to move"
 fi
 
 # ---------------------------------------------------------------- 3
-step '3/4 the lease moves, and then the front door'
-# THE LEASE FIRST, SEPARATELY. If the front door is timed before the announcer has actually
-# changed, the number measures lease expiry and not the policy - and if the lease never moves,
-# a 503 says nothing at all.
-NEW=""
-for _ in $(seq 1 45); do
-  cur=$(lease_holder)
-  if [[ -n "$cur" && "$cur" != "null" && "$cur" != "$HOLDER" ]]; then NEW="$cur"; break; fi
-  sleep 2
-done
-if [[ -z "$NEW" ]]; then
-  bad "the lease still reads $(lease_holder) after 90s - it never moved"
-  die "So nothing below could have told you anything about the policy. With only one other
-candidate node the lease may have nowhere to go, or the L2 announcement policy may select a
-single node:
-  kubectl get ciliuml2announcementpolicies.cilium.io -o yaml
-  kubectl get leases -n kube-system | grep l2announce"
-fi
-ok "lease moved: $HOLDER -> $NEW"
-if [[ "$NEW" == "$FE_NODE" ]]; then
-  bad "but $NEW is the FRONTEND's node, so traffic is arriving as 'host' again"
-  die "This round cannot test remote-node: the announcer and the backend are co-located again,
-which is the state the rule already worked in. Re-run - the lease lands somewhere else often
-enough - or add a third worker so there is always a non-frontend candidate."
-fi
-ok "and $NEW is NOT the frontend's node, so the front door is now crossing nodes"
-
-start=$SECONDS
-recovered=""
-for _ in $(seq 1 60); do
-  code=$(probe)
-  if [[ "$code" == 200 ]]; then recovered=$((SECONDS - start)); break; fi
-  sleep 2
-done
-if [[ -z "$recovered" ]]; then
-  bad "the front door did not reopen within ~120s (last response: $code)"
-  printf '\n%sTHIS IS THE FINDING, and it is now unambiguous: the frontend never moved, the%s\n' "$c_err" "$c_off"
-  printf 'announcer did, and the front door is shut. Read the identity Cilium is dropping:\n\n'
+step '3/3 the front door, across nodes, and the identity it arrives as'
+code=$(probe)
+if [[ "$code" != 200 ]]; then
+  bad "GET https://$HOST/ -> $code with the announcer on $HOLDER and the frontend on $FE_NODE"
+  printf '\n%sTHIS IS THE FINDING, and it is unambiguous: nothing was powered off, the frontend%s\n' "$c_err" "$c_off"
+  printf 'never moved, only the announcer changed - and the front door is shut. The rule is\n'
+  printf 'missing whatever identity cross-node ingress arrives as. Read it:\n\n'
   printf '  AGENT=$(kubectl -n kube-system get pod -l k8s-app=cilium --field-selector \\\n'
   printf '    spec.nodeName=%s -o jsonpath=\x27{.items[0].metadata.name}\x27)\n' "$FE_NODE"
   printf '  kubectl -n kube-system exec $AGENT -- hubble observe \\\n'
-  printf '    --to-label app.kubernetes.io/name=%s --verdict DROPPED --last 20\n\n' "$FE"
-  printf 'Whatever identity that names is what fromEntities is missing.\n'
+  printf '    --to-label app.kubernetes.io/name=%s --verdict DROPPED --last 20\n' "$FE"
   exit 1
 fi
-ok "front door reopened after ${recovered}s"
+ok "GET https://$HOST/ -> 200  with announcer and backend on DIFFERENT nodes"
+info "that is Q1 answered: the rule permits the front door when the lease is elsewhere, which"
+info "is the exact case the [host]-only version would have refused."
 
-# ---------------------------------------------------------------- 4
-step '4/4 which identity did that 200 actually arrive as?'
-# THE QUESTION THE CURL CANNOT ANSWER. A 200 proves the policy permitted the traffic; it does
-# not say which entity did the permitting, and `remote-node` has been carried in the rule as an
-# unverified hedge since it was written. If this says `ingress` even across nodes, then Cilium's
-# ingress proxy keeps its own identity wherever it runs and remote-node is dead weight - which
-# is worth knowing rather than guessing.
+# WHICH IDENTITY, because the 200 does not say. `remote-node` has been carried in fromEntities
+# as an unverified hedge since the rule was written, and this is what settles it.
 AGENT=$(kubectl -n kube-system get pod -l k8s-app=cilium \
         --field-selector "spec.nodeName=$FE_NODE" \
         -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
 if [[ -z "$AGENT" ]]; then
-  info "no Cilium agent found on $FE_NODE - cannot read the identity"
+  info "no Cilium agent on $FE_NODE - cannot read the identity"
 else
-  probe >/dev/null
-  sleep 2
+  probe >/dev/null; sleep 2
   flows=$(kubectl -n kube-system exec "$AGENT" -- hubble observe \
-          --to-label "app.kubernetes.io/name=$FE" --last 20 2>/dev/null \
+          --to-label "app.kubernetes.io/name=$FE" --last 30 2>/dev/null \
           | grep -oE '\((ingress|host|remote-node|world|unmanaged)\)' | sort -u | tr -d '()' | tr '\n' ' ')
   if [[ -z "$flows" ]]; then
-    info "the agent on $FE_NODE reported no flows to the frontend - the ring buffer may have"
-    info "rotated, or the request was served by an Envoy on another node's agent."
+    info "the agent on $FE_NODE reported no flows - the ring buffer may have rotated"
   else
-    ok "identities seen arriving at the frontend: $flows"
+    ok "identities arriving at the frontend: $flows"
     if [[ "$flows" == *remote-node* ]]; then
-      ok "remote-node IS exercised - carrying it in fromEntities is load-bearing, not a hedge"
+      ok "remote-node IS exercised - that entity is load-bearing, not a hedge"
     else
       info "remote-node did NOT appear even with the announcer on another node, so Cilium's"
-      info "ingress proxy keeps its own identity wherever it runs. The entity is harmless and"
-      info "is no longer evidence-free: this run is the evidence that it may be unnecessary."
+      info "ingress proxy keeps its own identity wherever it runs. The entity is harmless, and"
+      info "this run is the first evidence that it may be unnecessary - recorded rather than"
+      info "acted on, because one observation is where today's wrong answers came from."
     fi
   fi
 fi
 
+# ---------------------------------------------------------------- Q2, opt-in
+if [[ "${CONFIRM:-}" != "yes" ]]; then
+  echo
+  printf '%sthe front door works across nodes: announcer %s, frontend %s%s\n' "$c_ok" "$HOLDER" "$FE_NODE" "$c_off"
+  echo
+  printf 'That is the question the rule exists to answer, and nothing was powered off to answer\n'
+  printf 'it. A rule correct only while the lease sat on the right node would have passed every\n'
+  printf 'other test in this repository and failed here.\n'
+  echo
+  printf '%sNot tested:%s whether the front door RECOVERS when the announcing node dies, which is\n' "$c_warn" "$c_off"
+  printf 'a question about recovery rather than about the policy. It powers off a worker:\n'
+  printf '\n  make ingress-failover-check CONFIRM=yes\n\n'
+  printf 'On a two-worker cluster the lease must then land on the node the frontend runs on, so\n'
+printf 'that run measures how long the door stays shut, not whether it crosses nodes.\n'
+    exit 0
+fi
+
+step "powering off the announcer $HOLDER (hard, no graceful shutdown)"
+if [[ "$HOLDER" == "$FE_NODE" ]]; then
+  die "refusing: $HOLDER is also the frontend's node, so this would reschedule the backend and
+a 503 would be indistinguishable from a policy denial. That is how run 1 of this script wasted
+a node restart. Re-run without CONFIRM=yes to move the lease instead."
+fi
+ROLE=$(kubectl get node "$HOLDER" -o jsonpath='{.metadata.labels}' 2>/dev/null \
+       | jq -r 'if has("node-role.kubernetes.io/control-plane") then "control-plane" else "worker" end')
+[[ "$ROLE" == "worker" ]] || die "refusing: $HOLDER is the control plane, and losing etcd is
+Module 11's experiment rather than this one."
+$V destroy "$HOLDER" >/dev/null 2>&1 || die "virsh destroy $HOLDER failed - $V list --all"
+ok "$HOLDER is off"
+restore() {
+  printf '\n%s==> restoring %s%s\n' "$c_step" "$HOLDER" "$c_off"
+  $V start "$HOLDER" >/dev/null 2>&1 || bad "could not start $HOLDER - do it by hand: $V start $HOLDER"
+  for _ in $(seq 1 60); do
+    [[ "$(kubectl get node "$HOLDER" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)" == True ]] \
+      && { ok "$HOLDER is Ready again"; return; }
+    sleep 5
+  done
+  bad "$HOLDER did not become Ready within 5 minutes - check it before trusting the cluster"
+}
+trap restore EXIT
+
+step 'how long the front door stays shut'
+start=$SECONDS
+recovered=""
+for _ in $(seq 1 90); do
+  [[ "$(probe)" == 200 ]] && { recovered=$((SECONDS - start)); break; }
+  sleep 2
+done
+NEW=$(lease_holder)
+if [[ -z "$recovered" ]]; then
+  bad "the front door did not reopen within ~180s; the lease now reads ${NEW:-unknown}"
+  die "The frontend did not move (it is on $FE_NODE, which is up), so this is about the
+announcer: either the lease never moved or the new announcer cannot serve the address."
+fi
+ok "reopened after ${recovered}s; lease $HOLDER -> ${NEW:-unknown}"
+[[ "$NEW" == "$FE_NODE" ]] && info "and the lease landed on the frontend's node, which on a
+    two-worker cluster is the only place left - so this number is recovery time, not a
+    cross-node result. The cross-node result is the phase above."
+
 echo
-printf '%sthe front door survived the announcer moving to another node, in %ss%s\n' "$c_ok" "$recovered" "$c_off"
-echo
-printf 'That is the difference between this rule and the version listing only `host`: traffic\n'
-printf 'now enters from a node other than the one the frontend runs on, and the policy still\n'
-printf 'permits it. A rule correct only while the lease sat on the right node would have passed\n'
-printf 'every other test in this repository and failed here.\n'
+printf '%sthe front door recovered from losing its announcer in %ss%s\n' "$c_ok" "$recovered" "$c_off"
