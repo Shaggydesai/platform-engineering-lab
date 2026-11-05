@@ -29,9 +29,55 @@
       # wait_for_connection retries the connection itself rather than failing on the first
       # refusal, which is what makes this playbook safe to run at any moment: immediately after
       # starting the VMs, after a laptop restart, or mid-boot.
-      ansible.builtin.wait_for_connection:
-        timeout: 300
-        sleep: 5
+      #
+      # THE RESCUE EXISTS BECAUSE THE TIMEOUT MESSAGE NAMES THE TRANSPORT, NOT THE CAUSE.
+      # "Make sure this host can be reached over ssh" is identical for three situations with
+      # three different answers, and on 2026-11-05 all three happened within one hour:
+      #
+      #   the workstation's address changed  -> every node fails;    make aws-up (two SG rules)
+      #   spot instances were reclaimed      -> some or all fail;    make aws-up (rebuilds them)
+      #   the node is simply still booting   -> resolves inside the 300s above
+      #
+      # ANSIBLE ALREADY HOLDS THE DISCRIMINATOR AND IT IS FREE: this play targets every node, so
+      # if any OTHER node answered, the address, the security group, the subnet and the route
+      # table are all proven good - and an unreachable node is then a dead instance rather than
+      # a configuration fault. That inference needs no AWS credentials and no extra call; it
+      # needs the question to be asked.
+      block:
+        - name: Connect
+          ansible.builtin.wait_for_connection:
+            timeout: 300
+            sleep: 5
+      rescue:
+        - name: Say which of the three it is
+          vars:
+            others: "{{ ansible_play_hosts_all | reject('equalto', inventory_hostname) | list }}"
+          ansible.builtin.fail:
+            msg: |
+              {{ inventory_hostname }} ({{ ansible_host }}) did not answer SSH within 300s.
+
+              The other nodes in this play were: {{ others | join(', ') }}
+              Look at THEIR result above, because it is the whole diagnosis:
+
+                they answered too
+                  -> the address and the security group are fine, so this instance is GONE.
+                     A reclaimed spot instance leaves its address in Terraform state, which is
+                     what this playbook was handed. Rebuild it - no node that survived is
+                     touched, and the plan will say `1 to add`:
+
+                       make aws-up && make aws-cluster
+
+                they failed as well
+                  -> nothing can reach anything, which points at the ONE address the security
+                     group allows. This usually means a renumbered connection:
+
+                       bash scripts/aws-reach-check.sh
+
+                     It compares this workstation's public address with admin_cidr and needs no
+                     credentials. If it refuses, `make aws-up` updates two rules in place.
+
+              If `make aws-cluster` printed `[ ok ] this workstation ... is inside the allowed
+              ...` at the top, the second case is already ruled out and this is a dead instance.
 
     - name: Wait for the image scripts to finish, where they run at boot
       # A WAIT, NOT AN ASSERTION, and `make aws-wait` existing was not enough.
