@@ -504,6 +504,59 @@ else
 fi
 
 
+step 'The AWS and on-prem Kubernetes pins agree'
+# DUPLICATION WITH A CHECK, rather than coupling without one.
+#
+# clusters/aws/cluster.json repeats seven values from clusters/onprem/nodes.json: the Kubernetes
+# version, the CNI and its version, the Gateway API version and its content digest, and the two
+# CIDRs. Having the AWS inventory READ the on-prem file would remove the duplication and create a
+# worse problem - an AWS build failing because somebody edited the laptop's config - which is the
+# coupling ADR-0008 exists to avoid.
+#
+# WHAT EACH MISMATCH WOULD DO, because they fail in different and unhelpful ways:
+#
+#   version              preflight refuses the build: a control plane newer than its kubelets is
+#                        supported in one direction only and obscure when it breaks. But the
+#                        image scripts install from `minor`, so a disagreement between `minor`
+#                        and `version` is the one that gets through and bites at join time.
+#   cilium_version       two substrates running different dataplanes, compared as though they
+#                        were the same one - which quietly spoils every Module 09 measurement.
+#   gateway_api_sha256   the role verifies the digest before applying and refuses on a mismatch,
+#                        so this fails loudly. Good. It is checked anyway because a digest copied
+#                        wrong is indistinguishable from a tampered download.
+#   pod_cidr/service_cidr  changing either after kubeadm has run means rebuilding the cluster
+#                        (ADR-0007), so they must be right before the first apply, not after.
+if command -v python3 >/dev/null 2>&1; then
+  if python3 - <<'PYCHECK'
+import json, sys
+aws = json.load(open('clusters/aws/cluster.json'))['kubernetes']
+onp = json.load(open('clusters/onprem/nodes.json'))['kubernetes']
+bad = []
+for k in ("version", "cni", "cilium_version", "gateway_api_version",
+          "gateway_api_sha256", "pod_cidr", "service_cidr"):
+    a, o = aws.get(k), onp.get(k)
+    if a != o:
+        print('    %-20s aws=%r  onprem=%r' % (k, a, o))
+        bad.append(k)
+
+# `minor` is what the image scripts pin the apt repository to, and `version` is what preflight
+# asserts the installed kubeadm reports. A `version` outside its own `minor` installs one thing
+# and demands another - and nothing else in this repository compares them.
+minor, version = aws.get("minor", ""), aws.get("version", "")
+if minor and version and not version.startswith(minor + "."):
+    print('    minor %r does not contain version %r - the image installs one and preflight wants the other'
+          % (minor, version))
+    bad.append('minor')
+
+sys.exit(1 if bad else 0)
+PYCHECK
+  then ok 'version, CNI, Gateway API digest and both CIDRs match, and minor contains version'
+  else bad 'fix the mismatch above - clusters/onprem/nodes.json is the original'
+  fi
+else
+  skip 'python3 missing, skipped'
+fi
+
 step 'Optional linters, where installed'
 
 command -v yamllint     >/dev/null 2>&1 && { yamllint -s . && ok yamllint || bad yamllint; } || skip 'yamllint not installed'

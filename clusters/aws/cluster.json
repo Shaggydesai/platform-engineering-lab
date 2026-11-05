@@ -46,7 +46,14 @@
     "`gcp-platform` and `onprem-admin` without any of the three being a prefix of another."
   ],
   "kubernetes": {
-    "minor": "v1.34"
+    "minor": "v1.34",
+    "version": "v1.34.12",
+    "cni": "cilium",
+    "cilium_version": "1.20.3",
+    "gateway_api_version": "v1.6.3",
+    "gateway_api_sha256": "356c2b8e286a964dc20995435659ad1095386329974793af10bbfe3eff977fe5",
+    "pod_cidr": "10.244.0.0/16",
+    "service_cidr": "10.96.0.0/12"
   },
   "_kubernetes_comment": [
     "THE SAME MINOR AS ON-PREM, and this is the one version pin in this project that can actually",
@@ -56,7 +63,18 @@
     "This value is K8S_MINOR in packer/ubuntu-2404/scripts/30-kubernetes.sh, which pins the",
     "pkgs.k8s.io repository and then `apt-mark hold`s kubelet, kubeadm and kubectl. Two of three",
     "substrates therefore run the same Kubernetes, which makes the GKE gap a measurement rather",
-    "than noise."
+    "than noise.",
+    "",
+    "EVERY VALUE HERE IS A COPY OF ONE IN clusters/onprem/nodes.json, AND THAT IS DELIBERATE WITH",
+    "A CHECK RATHER THAN CLEVER WITHOUT ONE. Having the AWS inventory read the on-prem file would",
+    "remove the duplication and create a worse problem - an AWS build failing because somebody",
+    "edited the laptop's config - which is the coupling ADR-0008 exists to avoid: each substrate's",
+    "file is the truth for that substrate. So they are duplicated and `make lint` fails if they",
+    "stop agreeing, the same arrangement as the GCP secret backend whose overlay repeats the",
+    "project and cluster names because Argo CD cannot reach into a JSON file.",
+    "",
+    "WHAT IS NOT COPIED: the Argo CD pins, which live in clusters/platform.json for all three",
+    "substrates (ADR-0020)."
   ],
   "budget": {
     "amount_usd": 5,

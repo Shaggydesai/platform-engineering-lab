@@ -209,6 +209,15 @@ content), and public subnets with no NAT gateway (Decision 6).
 EKS managed node group; and **Decision 5's claim that two AZs are forced**, which is an EKS
 constraint on its control plane and does not bind a kubeadm cluster on plain EC2.
 
+**Put to the user explicitly on 2026-11-05, and answered: kubeadm, with one EKS session for
+comparison.** The case for EKS was real and stated — it is what employers use, IRSA is the AWS
+answer to Workload Identity and exists only there, and the VPC CNI's max-pods ceiling is a
+production constraint Cilium hides. It lost on the measurement: GKE already supplied the
+managed-control-plane contrast, and **kubeadm on EC2 is the only thing that tests whether Layers 0
+and 1 port** — five Ansible roles that have never run anywhere but libvirt VMs on one laptop. This
+is now a decision rather than a default, which is the difference that matters given how the
+divergence arose.
+
 **Second instance of this exact mistake.** `STATUS.md` already records one: a parking-lot entry
 described something as "Module 08's opening move", and that was believed on a later read when the
 roadmap said otherwise. **The roadmap is the plan; a document written later is not an amendment to
