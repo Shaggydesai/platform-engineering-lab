@@ -105,6 +105,12 @@ def build():
                 # the laptop, so there is nothing to rewrite and no second file to keep.
                 # ansible/inventory/aws.py has to differ, and the comment there says why.
                 "cluster_kubeconfig": os.path.expanduser("~/.kube/onprem.conf"),
+                # NOTHING TO WAIT FOR, and empty says so deliberately rather than by omission.
+                # Packer runs the image scripts at BUILD time here, so a libvirt VM boots with
+                # br_netfilter loaded and the packages already held. On AWS the same scripts run
+                # from cloud-init at FIRST BOOT, which is the one real difference ADR-0025
+                # leaves behind, and the playbook waits for a marker there.
+                "image_ready_marker": "",
                 # ---------------------------------------------------------- Layer 2, on-prem
                 # Everything the argocd role needs that differs between substrates. The role
                 # itself names no cluster, no file and no Application; it reads these (ADR-0020).

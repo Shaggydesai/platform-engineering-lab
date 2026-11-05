@@ -122,6 +122,11 @@ def build():
                 # for cattle; it is NOT set on-prem, where the VMs persist.
                 "ansible_ssh_common_args": "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null",
                 "cluster_name": cfg["cluster_name"],
+                # THE FILE cloud-init TOUCHES LAST, after the four image scripts. An EC2
+                # instance answers SSH long before those have run, so this is what separates
+                # "reachable" from "usable" - see the wait in ansible/playbooks/cluster.yml.
+                # terraform/aws/variables.tf is what writes it.
+                "image_ready_marker": "/var/lib/cloud/image-ready",
                 # AWS gives every instance an internal name under this domain. Nothing here
                 # depends on it resolving - the addresses are used directly - but the kubeadm
                 # certSANs template interpolates it.

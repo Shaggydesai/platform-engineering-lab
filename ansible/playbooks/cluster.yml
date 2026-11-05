@@ -33,6 +33,57 @@
         timeout: 300
         sleep: 5
 
+    - name: Wait for the image scripts to finish, where they run at boot
+      # A WAIT, NOT AN ASSERTION, and `make aws-wait` existing was not enough.
+      #
+      # On a cloud substrate the four image scripts run from cloud-init AFTER the instance
+      # answers SSH (ADR-0025), so a node can be reachable and two minutes from being usable.
+      # On 2026-11-05 all three spot instances were reclaimed, Terraform rebuilt them, and the
+      # playbook ran 90 seconds later: preflight failed on aws-w02 with
+      #
+      #   sysctl: cannot stat /proc/sys/net/bridge/bridge-nf-call-iptables: No such file
+      #
+      # br_netfilter simply had not been loaded yet. That reads as a broken image rather than
+      # as impatience - terraform/aws/variables.tf predicted it in writing when the marker was
+      # added, and `make aws-wait` is the documented first step. The documented first step is
+      # not a mechanism: it depends on somebody remembering it, and the one time it mattered
+      # the sequence I handed over left it out.
+      #
+      # EMPTY ON-PREM, where Packer bakes the scripts into the image at build time - the VM
+      # boots with br_netfilter already loaded and there is nothing to wait for. An empty
+      # marker skips this, which is a different statement from a missing variable: both
+      # inventories define it, and `make lint` enforces that they do.
+      when: image_ready_marker | default('') | length > 0
+      block:
+        - name: Wait for the boot marker
+          ansible.builtin.wait_for:
+            path: "{{ image_ready_marker }}"
+            timeout: 600
+            sleep: 5
+      rescue:
+        - name: Say what cloud-init was doing when it ran out of time
+          # The wait_for timeout says only that a file did not appear. The build log says what
+          # the scripts were doing, which is the difference between "slow mirror" and "this
+          # image cannot build".
+          ansible.builtin.shell:
+            executable: /bin/bash
+            cmd: |
+              set -uo pipefail
+              echo "--- cloud-init status ---"
+              cloud-init status --long 2>&1 || true
+              echo "--- last 30 lines of /var/log/image-build.log ---"
+              tail -30 /var/log/image-build.log 2>&1 || echo "(no image-build.log - the scripts never started)"
+          become: true
+          register: boot_log
+          changed_when: false
+
+        - name: Fail with the log rather than with the timeout
+          ansible.builtin.fail:
+            msg: |
+              {{ inventory_hostname }} never created {{ image_ready_marker }} within 600s.
+
+              {{ boot_log.stdout | default('(no output)') }}
+
     - name: Gather facts now that the nodes are up
       # The colon is not optional. `ansible.builtin.setup` without it is a bare scalar rather
       # than a mapping key, and YAML then reads the next line's "roles:" as a continuation -
