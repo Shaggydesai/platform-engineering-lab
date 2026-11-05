@@ -43,6 +43,8 @@
     "control_plane_endpoint": "k8s-cp01.platform.local:6443",
     "cni": "cilium",
     "version_comment": "The Kubernetes version must match what the Packer image installed and held (K8S_MINOR in packer/ubuntu-2404/scripts/30-kubernetes.sh). Ansible's preflight role asserts they agree and refuses to build a cluster if they do not, because a control plane newer than its kubelets is supported in one direction only and obscure when it breaks.",
+    "minor_comment": "The apt REPOSITORY the image scripts add, which until 2026-11-05 existed only as a default inside packer/ubuntu-2404/ubuntu.pkr.hcl - so the on-prem image's Kubernetes minor was defined by the build tool while AWS read its own from clusters/aws/cluster.json. ADR-0025's premise is one image definition across substrates, and a pin only one of them reads is not one definition. `make lint` now requires the two to agree, and scripts/build-image.sh passes this to Packer.",
+    "minor": "v1.34",
     "version": "v1.34.12",
     "package_version": "1.34.12-1.1",
     "cilium_version": "1.20.3",

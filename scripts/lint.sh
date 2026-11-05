@@ -595,7 +595,7 @@ import json, sys
 aws = json.load(open('clusters/aws/cluster.json'))['kubernetes']
 onp = json.load(open('clusters/onprem/nodes.json'))['kubernetes']
 bad = []
-for k in ("version", "package_version", "cni", "cilium_version", "gateway_api_version",
+for k in ("minor", "version", "package_version", "cni", "cilium_version", "gateway_api_version",
           "gateway_api_sha256", "pod_cidr", "service_cidr"):
     a, o = aws.get(k), onp.get(k)
     if a != o:
@@ -628,7 +628,7 @@ if version and pkg and not pkg.startswith(version.lstrip("v") + "-"):
 
 sys.exit(1 if bad else 0)
 PYCHECK
-  then ok 'version, package_version, CNI, Gateway API digest and both CIDRs agree, and the three version strings are consistent'
+  then ok 'minor, version, package_version, CNI, Gateway API digest and both CIDRs agree, and the three version strings are consistent'
   else bad 'fix the mismatch above - clusters/onprem/nodes.json is the original'
   fi
 else

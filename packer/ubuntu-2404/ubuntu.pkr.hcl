@@ -57,8 +57,7 @@ variable "k8s_package_version" {
 
 variable "k8s_minor" {
   type        = string
-  default     = "v1.34"
-  description = "Kubernetes package repository minor version. Pinned deliberately - see 30-kubernetes.sh."
+  description = "Kubernetes package repository minor, e.g. v1.34. NO DEFAULT, for the same reason k8s_package_version has none: a default is a second place the version is written down, and until 2026-11-05 the default v1.34 WAS that second place - the on-prem image read its minor from here while AWS read its own from its cluster config. Must equal kubernetes.minor in clusters/onprem/nodes.json, which scripts/build-image.sh passes and `make lint` checks against the other substrate."
 }
 
 variable "output_directory" {
