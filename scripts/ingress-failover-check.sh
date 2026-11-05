@@ -155,8 +155,12 @@ if [[ -z "$recovered" ]]; then
   printf 'parking-lot entry predicted: the rule was correct only while the announcer and the\n'
   printf 'frontend shared a node. Look at what the new announcer is and what Cilium dropped:\n\n'
   printf '  kubectl get leases -n kube-system | grep l2announce\n'
-  printf '  kubectl -n kube-system exec ds/cilium -- hubble observe --to-pod %s/%s --verdict DROPPED --last 20\n\n' \
-    "$NS" "$INSTANCE-$FE"
+  printf '  AGENT=$(kubectl -n kube-system get pod -l k8s-app=cilium --field-selector \\\n'
+  printf '    spec.nodeName=%s -o jsonpath=\x27{.items[0].metadata.name}\x27)\n' "${FE_NODE:-<frontend-node>}"
+  printf '  kubectl -n kube-system exec $AGENT -- hubble observe \\\n'
+  printf '    --to-label app.kubernetes.io/name=%s --verdict DROPPED --last 20\n\n' "$FE"
+  printf '  %s(the agent on the FRONTEND node, not ds/cilium: one agent sees one node, and\n' "$c_dim"
+  printf '   asking the wrong one returns silence that reads exactly like "nothing dropped")%s\n\n' "$c_off"
   exit 1
 fi
 ok "reopened after ${recovered}s"
@@ -176,7 +180,9 @@ if [[ -n "$FE_NODE" && "$NEW" != "$FE_NODE" ]]; then
 else
   info "the new announcer is also the frontend's node, so this round exercised 'host' again."
   info "Re-run to move it elsewhere, or check Hubble for the identity it actually saw:"
-  info "  kubectl -n kube-system exec ds/cilium -- hubble observe --to-pod $NS/$INSTANCE-$FE --last 5"
+  info "  AGENT=\$(kubectl -n kube-system get pod -l k8s-app=cilium --field-selector \\"
+  info "    spec.nodeName=$FE_NODE -o jsonpath='{.items[0].metadata.name}')"
+  info "  kubectl -n kube-system exec \$AGENT -- hubble observe --to-label app.kubernetes.io/name=$FE --last 5"
 fi
 
 echo

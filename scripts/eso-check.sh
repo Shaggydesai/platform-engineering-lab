@@ -161,7 +161,12 @@ else
       becomes Ready. Fix the client name in gitops/environments/onprem/vault.yaml:
         networkPolicy.clients[].name: $ctrl_label
       Then commit and: make gitops-refresh. To watch the drops meanwhile:
-        kubectl -n kube-system exec ds/cilium -- hubble observe --to-namespace $VAULT_NS --verdict DROPPED --last 20")
+        # NOT ds/cilium: that picks one arbitrary agent, and an agent only sees its own
+        # node's flows - ask the agent on the node Vault runs on.
+        AGENT=$(kubectl -n kube-system get pod -l k8s-app=cilium --field-selector \
+          spec.nodeName=$(kubectl -n $VAULT_NS get pod $VAULT_POD -o jsonpath='{.spec.nodeName}') \
+          -o jsonpath='{.items[0].metadata.name}')
+        kubectl -n kube-system exec $AGENT -- hubble observe --to-namespace $VAULT_NS --verdict DROPPED --last 20")
     fi
   fi
 fi

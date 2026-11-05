@@ -84,8 +84,28 @@ frontendIngress:
   # traffic and must not be listed here.
   name: frontend
 
-  # host AND remote-node. See above; dropping remote-node is the bug this rule exists to avoid.
+  # THREE ENTITIES, and the first one is here because the first version of this rule was WRONG
+  # and the application returned 503 (2026-11-05). Read off a live flow with Hubble rather than
+  # reasoned about, which is how it should have been written the first time:
+  #
+  #   10.244.1.207:39652 (ingress) <> shopverse-frontend:8080  policy-verdict:none INGRESS DENIED
+  #   10.244.1.207:35180 (host)     -> shopverse-frontend:8080  policy-verdict:L3-L4 ALLOWED
+  #
+  # SAME SOURCE ADDRESS, TWO DIFFERENT IDENTITIES, and that is the whole trap. 10.244.1.207 is
+  # the node's cilium_host address, and traffic from it carries:
+  #
+  #   ingress      Cilium's Gateway/Ingress Envoy proxy - the front door. REQUIRED, and the one
+  #                that was missing. Cilium gives its L7 ingress proxy its own reserved identity
+  #                rather than the host's.
+  #   host         the kubelet's liveness and readiness probes, from the local node. The parking
+  #                lot recorded `10.244.1.207 (host) -> frontend:8080` as the Gateway's traffic
+  #                and it was not - it was a PROBE, on the same address, under a different
+  #                identity. An observation of the right IP and the wrong flow.
+  #   remote-node  any other node. NOT yet observed, and kept as the failover hedge: whether the
+  #                Envoy keeps the `ingress` identity when it runs on a different node than the
+  #                backend is exactly what `make ingress-failover-check` will show.
   fromEntities:
+    - ingress
     - host
     - remote-node
 

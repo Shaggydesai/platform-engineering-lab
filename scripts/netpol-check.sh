@@ -118,10 +118,24 @@ ${INSTANCE}-frontend-ingress in $NS.  make gitops-refresh && make gitops-status"
   fi
   ents=$(kubectl -n "$NS" get ciliumnetworkpolicies.cilium.io "${INSTANCE}-frontend-ingress" \
          -o jsonpath='{.spec.ingress[0].fromEntities}' | jq -r 'join(",")')
+  # `ingress` is the one PROVEN necessary: without it the Gateway's Envoy is denied and the
+  # front door returns 503 immediately. Probe 1 below would catch that, but it would blame the
+  # database clients, so say it here where the cause is.
+  if [[ "$ents" != *ingress* ]]; then
+    bad "${INSTANCE}-frontend-ingress allows [$ents] - the 'ingress' entity is missing"
+    die "That is Cilium's Gateway Envoy, and without it the front door is DENIED: the Gateway
+has no reachable backend and returns 503. Observed on 2026-11-05 as
+
+  10.244.1.207 (ingress) <> ${INSTANCE}-frontend:8080  policy-verdict:none INGRESS DENIED
+
+Probe 1 below will fail too, but it points at the database clients, which is the wrong place."
+  fi
+  # `remote-node` is the hedge, and its absence breaks NOTHING until the lease moves - so it
+  # cannot be caught by any probe here, only by the edit being refused.
   if [[ "$ents" != *remote-node* ]]; then
     bad "${INSTANCE}-frontend-ingress allows [$ents] - remote-node is missing"
     die "Nothing below will fail because of this. The front door keeps working until the L2
-announcement lease moves to a node that is not the frontend's, and then it stops - about 15
+announcement lease moves to a node that is not the frontend's, and then it may stop - about 15
 seconds after an unrelated worker dies, with nothing in the application changed. That is the
 failure the entity list exists to prevent, and the only thing that demonstrates it is:
 
@@ -150,7 +164,11 @@ else
     bad "GET /api/products -> $code"
     die "the policy appears to have broken the application - this is the failure mode worth
 having a test for. Check which clients the overlay lists against what Hubble sees:
-  kubectl -n kube-system exec ds/cilium -- hubble observe --to-pod $NS/${DB_SVC}-0 --verdict DROPPED --last 20"
+  # ds/cilium picks an ARBITRARY agent, and an agent only sees its OWN node's flows:
+  AGENT=$(kubectl -n kube-system get pod -l k8s-app=cilium --field-selector \\
+    spec.nodeName=$(kubectl -n $NS get pod ${DB_SVC}-0 -o jsonpath='{.spec.nodeName}') \\
+    -o jsonpath='{.items[0].metadata.name}')
+  kubectl -n kube-system exec $AGENT -- hubble observe --to-pod $NS/${DB_SVC}-0 --verdict DROPPED --last 20"
   fi
 fi
 
@@ -186,7 +204,10 @@ actually landed:
 
   kubectl -n $NS get networkpolicy ${INSTANCE}-egress -o yaml
   kubectl -n kube-system get pods -l k8s-app=kube-dns
-  kubectl -n kube-system exec ds/cilium -- hubble observe --from-pod $NS/netpol-denied --verdict DROPPED --last 20
+  AGENT=$(kubectl -n kube-system get pod -l k8s-app=cilium --field-selector \\
+    spec.nodeName=$(kubectl -n $NS get pod netpol-denied -o jsonpath='{.spec.nodeName}') \\
+    -o jsonpath='{.items[0].metadata.name}')   # NOT ds/cilium - one agent, one node's flows
+  kubectl -n kube-system exec $AGENT -- hubble observe --from-pod $NS/netpol-denied --verdict DROPPED --last 20
 
 The quickest way back is egress.enabled: false in $OVERLAY, which returns the namespace to
 accepting everything outbound."

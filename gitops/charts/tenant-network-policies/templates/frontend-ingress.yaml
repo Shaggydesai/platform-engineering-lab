@@ -15,17 +15,26 @@
 # `reserved:remote-node` identity. NetworkPolicy can select pods, namespaces and CIDRs. It has no
 # selector for "the node", and the node's address is not a stable CIDR worth writing down.
 #
-# WHY BOTH ENTITIES, which is the part that makes this correct rather than merely working:
+# WHY THESE THREE ENTITIES. The first version of this rule listed only host and remote-node, and
+# the application returned 503 immediately - `make netpol-check` probe 1 caught it. The identity
+# was then READ OFF A LIVE FLOW instead of reasoned about:
 #
-#   host         the Envoy on the SAME node as the frontend pod. Cilium's allow-localhost
-#                default would permit this anyway, which is exactly the trap - a rule listing
-#                only `host` passes every test you run today.
-#   remote-node  the Envoy on ANY OTHER node. The L2 announcement policy (ADR-0013) elects one
-#                node to answer ARP for the Gateway's address, and that election MOVES: on a
-#                node failure the lease is taken by a survivor in about 15 seconds. The moment
-#                the announcing node is not the frontend's node, traffic arrives as
-#                remote-node - and a policy without it starts refusing the front door, 15
-#                seconds after an unrelated node died, with nothing in the application changed.
+#   10.244.1.207:39652 (ingress) <> shopverse-frontend:8080  policy-verdict:none INGRESS DENIED
+#   10.244.1.207:35180 (host)     -> shopverse-frontend:8080  policy-verdict:L3-L4 ALLOWED
+#
+#   ingress      CILIUM'S GATEWAY ENVOY, and the one that was missing. Cilium gives its L7
+#                ingress proxy a reserved identity of its own rather than the host's. Without
+#                this entity the front door is denied and the Gateway reports 503 because its
+#                only backend is unreachable.
+#   host         the kubelet's probes from the local node. Note the two lines above share the
+#                SOURCE ADDRESS 10.244.1.207 - the node's cilium_host - and differ only in
+#                identity. The parking lot had recorded that address under `(host)` and taken it
+#                for the Gateway's traffic; it was a probe. The right IP and the wrong flow.
+#   remote-node  any other node, kept as a hedge rather than because it has been observed. The
+#                L2 announcement lease (ADR-0013) elects one node to answer ARP for the
+#                Gateway's address and that election MOVES on a node failure, so the Envoy is
+#                not always on the frontend's node. Whether it keeps the `ingress` identity when
+#                it is remote is what `make ingress-failover-check` exists to find out.
 #
 # That is why this rule was deferred rather than written quickly (parking lot, 2026-10-30): a
 # rule that is correct until a failover is worse than no rule, because by then it is trusted.
