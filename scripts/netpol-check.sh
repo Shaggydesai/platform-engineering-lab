@@ -130,17 +130,17 @@ has no reachable backend and returns 503. Observed on 2026-11-05 as
 
 Probe 1 below will fail too, but it points at the database clients, which is the wrong place."
   fi
-  # `remote-node` is the hedge, and its absence breaks NOTHING until the lease moves - so it
-  # cannot be caught by any probe here, only by the edit being refused.
-  if [[ "$ents" != *remote-node* ]]; then
-    bad "${INSTANCE}-frontend-ingress allows [$ents] - remote-node is missing"
-    die "Nothing below will fail because of this. The front door keeps working until the L2
-announcement lease moves to a node that is not the frontend's, and then it may stop - about 15
-seconds after an unrelated worker dies, with nothing in the application changed. That is the
-failure the entity list exists to prevent, and the only thing that demonstrates it is:
-
-  make ingress-failover-check"
-  fi
+  # NOTHING IS REQUIRED BEYOND `ingress`, and `remote-node` used to be. It was removed on
+  # 2026-11-05 once measured: with the announcer on another node, the identities arriving are
+  # `host ingress` and nothing else, so it matched nothing while permitting any node to open
+  # this port. The entity list is verified by observation now rather than by a required-strings
+  # check here:
+  #
+  #   make ingress-failover-check
+  #
+  # which puts the announcer on a different node than the frontend and asserts that every
+  # identity it sees arriving is one this policy permits. That form cannot go stale the way a
+  # hardcoded list can.
   ok "CiliumNetworkPolicy ${INSTANCE}-frontend-ingress allows [$ents]"
 else
   printf '    %sfrontendIngress.enabled is false - the front door accepts everything inbound%s\n' \

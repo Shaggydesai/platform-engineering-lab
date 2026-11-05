@@ -101,13 +101,21 @@ frontendIngress:
   #                lot recorded `10.244.1.207 (host) -> frontend:8080` as the Gateway's traffic
   #                and it was not - it was a PROBE, on the same address, under a different
   #                identity. An observation of the right IP and the wrong flow.
-  #   remote-node  any other node. NOT yet observed, and kept as the failover hedge: whether the
-  #                Envoy keeps the `ingress` identity when it runs on a different node than the
-  #                backend is exactly what `make ingress-failover-check` will show.
+  #   remote-node  REMOVED 2026-11-05 after being measured rather than reasoned about. It was
+  #                carried as a hedge in case the Envoy presented as a remote node when it ran
+  #                somewhere other than the backend. `make ingress-failover-check` put the
+  #                announcer on k8s-w02 with the frontend on k8s-w01 and read the identities
+  #                actually arriving: `host ingress`. The proxy keeps its own identity wherever
+  #                it runs, so that entity never matched anything.
+  #
+  #                And it was not free: `remote-node` permits ANY node to open 8080 on the
+  #                frontend, not just the ingress proxy. So removing it is a tightening, not
+  #                tidying - and a clause nothing ever matches is a clause nobody can reason
+  #                about a month later, which is how `[host, remote-node]` survived review in
+  #                the first place.
   fromEntities:
     - ingress
     - host
-    - remote-node
 
   ports:
     - port: 8080

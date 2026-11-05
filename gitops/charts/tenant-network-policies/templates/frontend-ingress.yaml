@@ -30,11 +30,13 @@
 #                SOURCE ADDRESS 10.244.1.207 - the node's cilium_host - and differ only in
 #                identity. The parking lot had recorded that address under `(host)` and taken it
 #                for the Gateway's traffic; it was a probe. The right IP and the wrong flow.
-#   remote-node  any other node, kept as a hedge rather than because it has been observed. The
-#                L2 announcement lease (ADR-0013) elects one node to answer ARP for the
-#                Gateway's address and that election MOVES on a node failure, so the Envoy is
-#                not always on the frontend's node. Whether it keeps the `ingress` identity when
-#                it is remote is what `make ingress-failover-check` exists to find out.
+# `remote-node` WAS in this list and is not any more. The L2 announcement lease (ADR-0013)
+# elects one node to answer ARP for the Gateway's address and that election moves, so the Envoy
+# is not always on the frontend's node - and the hedge looked prudent. Measured instead:
+# `make ingress-failover-check` put the announcer on another node and read `host ingress`
+# arriving. The proxy keeps its own identity wherever it runs, so the entity matched nothing,
+# while permitting ANY node to open this port. The check now asserts that every identity it
+# observes is one this list permits, which is the form that cannot go stale.
 #
 # That is why this rule was deferred rather than written quickly (parking lot, 2026-10-30): a
 # rule that is correct until a failover is worse than no rule, because by then it is trusted.

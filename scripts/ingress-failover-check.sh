@@ -195,14 +195,34 @@ else
     info "frontend's node, so this run will skip the restart and the buffer will be intact."
   else
     ok "identities arriving at the frontend: $flows"
-    if [[ "$flows" == *remote-node* ]]; then
-      ok "remote-node IS exercised - that entity is load-bearing, not a hedge"
-    else
-      info "remote-node did NOT appear even with the announcer on another node, so Cilium's"
-      info "ingress proxy keeps its own identity wherever it runs. The entity is harmless, and"
-      info "this run is the first evidence that it may be unnecessary - recorded rather than"
-      info "acted on, because one observation is where today's wrong answers came from."
+    # EVERY IDENTITY SEEN MUST BE ONE THE POLICY PERMITS, which is the assertion rather than a
+    # list of entity names to look for. A hardcoded "remote-node must be present" check is how
+    # an entity that matched nothing stayed in the rule for an afternoon; comparing what ARRIVES
+    # against what is ALLOWED cannot go stale, and it fails loudly the day a new identity shows
+    # up - a different proxy, a NodePort path, a host-network client.
+    # NORMALISE FIRST: $ents comes from `jq join(", ")`, so it is "ingress, host" with spaces.
+    # Testing membership against that unnormalised would match the FIRST entity and silently
+    # miss every later one - a bug whose symptom is a check that passes, which is the only
+    # symptom this repository treats as serious.
+    ents_norm=",$(printf '%s' "$ents" | tr -d '[:space:]'),"
+    unpermitted=""
+    for id in $flows; do
+      [[ "$ents_norm" == *",$id,"* ]] || unpermitted="$unpermitted $id"
+    done
+    if [[ -n "$unpermitted" ]]; then
+      bad "arriving but NOT permitted by the policy:$unpermitted"
+      die "Those requests are being allowed by something other than this policy - most likely
+Cilium's allow-localhost default, which permits the local node whatever the rule says. The
+moment that path changes, the front door closes. Add the identity to frontendIngress.fromEntities
+in gitops/charts/tenant-network-policies/values.yaml, or explain in the overlay why it does not
+need permitting."
     fi
+    ok "and every identity arriving is permitted by the rule - nothing is getting in by accident"
+    # The reverse direction is information, not a failure: an entity that permits something
+    # never seen is dead weight, and dead weight in a security rule is why this check exists.
+    for e in $(printf '%s' "$ents" | tr ',' ' '); do
+      [[ " $flows " == *" $e "* ]] || info "fromEntities lists '$e', which did not appear in this run"
+    done
   fi
 fi
 
