@@ -89,6 +89,7 @@ locals {
       (local.cfg.nodes.control_plane.name) = {
         role          = "control-plane"
         instance_type = local.cfg.nodes.control_plane.instance_type
+        address       = local.cfg.nodes.control_plane.address
       }
     },
     {
@@ -96,6 +97,7 @@ locals {
       format("%s%02d", local.cfg.nodes.workers.name_prefix, i + 1) => {
         role          = "worker"
         instance_type = local.cfg.nodes.workers.instance_type
+        address       = local.cfg.nodes.workers.addresses[i]
       }
     },
   )
@@ -103,36 +105,60 @@ locals {
   # GZIPPED, because user_data is capped at 16 KB and the four scripts are ~7.4 KB before the
   # base64 expansion that would take them past 10. cloud-init decompresses it transparently.
   #
-  # The marker file at the end is what anything downstream waits for. WITHOUT IT, Ansible's
-  # preflight role races the boot and fails its assertions on a node that is thirty seconds away
-  # from passing them - which reads as a broken image rather than as impatience, and is the
-  # "transient state read once" shape this project has already paid for twice.
-  user_data = base64gzip(join("\n", concat(
-    ["#cloud-config"],
-    [yamlencode({
-      write_files = [
-        for s in local.image_scripts : {
-          path        = "/opt/image-scripts/${s}"
-          permissions = "0755"
-          content     = file("${path.module}/../../packer/ubuntu-2404/scripts/${s}")
-        }
-      ]
-      runcmd = concat(
-        [for s in local.image_scripts :
-          join(" ", [
-            "K8S_MINOR=${local.cfg.kubernetes.minor}",
-            # EXACT, not "newest on the day". Without this, cloud-init running today installs a
-            # different Kubernetes from the one the laptop's Packer image baked in - which is
-            # what happened on 2026-11-05 (v1.34.13 against v1.34.12) and what preflight caught.
-            "K8S_PACKAGE_VERSION=${local.cfg.kubernetes.package_version}",
-            "bash /opt/image-scripts/${s} >>/var/log/image-build.log 2>&1",
-          ])
-        ],
-        [
-          "touch /var/lib/cloud/image-ready",
-          "echo 'image scripts complete' >>/var/log/image-build.log",
-        ],
-      )
-    })],
-  )))
+  # ONE PER NODE NOW, not one shared blob. Two things have to differ per instance and both are
+  # the same lesson - on EC2 an identity is allocated unless you declare it:
+  #
+  #   hostname     EC2 names a host after its address, so `kubectl get nodes` would show
+  #                ip-10-20-1-10 instead of aws-cp01. kubeadm registers the node under its
+  #                hostname, so this is not cosmetic - it is the node's name in the cluster for
+  #                the rest of its life.
+  #   /etc/hosts   preflight requires every node to resolve every other BY NAME, because
+  #                controlPlaneEndpoint is a name on the laptop and a worker that cannot resolve
+  #                it cannot join. cloud-init writes it from the declared addresses, exactly as
+  #                the libvirt seed does on-prem.
+  #
+  # manage_etc_hosts is false so cloud-init does not rewrite the file after we have appended to
+  # it. The marker file at the end is what anything downstream waits for: WITHOUT IT, Ansible's
+  # preflight races the boot and fails its assertions on a node that is thirty seconds away from
+  # passing them - which reads as a broken image rather than as impatience, and is the "transient
+  # state read once" shape this project has already paid for twice.
+  user_data = {
+    for name, node in local.nodes : name => base64gzip(join("\n", concat(
+      ["#cloud-config"],
+      [yamlencode({
+        hostname          = name
+        fqdn              = name
+        manage_etc_hosts  = false
+        preserve_hostname = false
+        write_files = [
+          for s in local.image_scripts : {
+            path        = "/opt/image-scripts/${s}"
+            permissions = "0755"
+            content     = file("${path.module}/../../packer/ubuntu-2404/scripts/${s}")
+          }
+        ]
+        runcmd = concat(
+          # Appended rather than written, so Ubuntu's own 127.0.0.1 line survives. Idempotent
+          # because a re-run of cloud-init on the same boot would otherwise double every entry.
+          [for n, cfg in local.nodes :
+            "grep -q ' ${n}$' /etc/hosts || echo '${cfg.address} ${n}' >> /etc/hosts"
+          ],
+          [for s in local.image_scripts :
+            join(" ", [
+              "K8S_MINOR=${local.cfg.kubernetes.minor}",
+              # EXACT, not "newest on the day". Without this, cloud-init running today installs a
+              # different Kubernetes from the one the laptop's Packer image baked in - which is
+              # what happened on 2026-11-05 (v1.34.13 against v1.34.12) and what preflight caught.
+              "K8S_PACKAGE_VERSION=${local.cfg.kubernetes.package_version}",
+              "bash /opt/image-scripts/${s} >>/var/log/image-build.log 2>&1",
+            ])
+          ],
+          [
+            "touch /var/lib/cloud/image-ready",
+            "echo 'image scripts complete' >>/var/log/image-build.log",
+          ],
+        )
+      })],
+    )))
+  }
 }

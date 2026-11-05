@@ -135,6 +135,11 @@ resource "aws_instance" "node" {
   subnet_id     = aws_subnet.nodes.id
   key_name      = aws_key_pair.admin.key_name
 
+  # DECLARED, not allocated - see clusters/aws/cluster.json, _addresses_comment. Without this,
+  # Terraform cannot know the addresses when it renders the user-data, so nothing can write
+  # /etc/hosts and preflight refuses the build.
+  private_ip = each.value.address
+
   vpc_security_group_ids = [aws_security_group.nodes.id]
 
   # SPOT, for the ~72% discount measured on 2026-11-05 - and with a trade worth stating rather
@@ -162,7 +167,7 @@ resource "aws_instance" "node" {
     delete_on_termination = true
   }
 
-  user_data_base64 = local.user_data
+  user_data_base64 = local.user_data[each.key]
 
   # REPLACE THE NODE WHEN THE IMAGE DEFINITION CHANGES, which is the point of putting the scripts
   # in user_data rather than running them by hand afterwards. Editing 30-kubernetes.sh and

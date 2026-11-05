@@ -105,11 +105,16 @@
   "nodes": {
     "control_plane": {
       "name": "aws-cp01",
+      "address": "10.20.1.10",
       "count": 1,
       "instance_type": "m6a.large"
     },
     "workers": {
       "name_prefix": "aws-w",
+      "addresses": [
+        "10.20.1.11",
+        "10.20.1.12"
+      ],
       "count": 2,
       "instance_type": "m6a.large"
     },
@@ -118,6 +123,29 @@
     "disk_type": "gp3",
     "public_ip": true
   },
+  "_addresses_comment": [
+    "THE PRIVATE ADDRESSES ARE DECLARED, NOT ALLOCATED - which is a change made on 2026-11-05",
+    "after preflight refused to build the cluster:",
+    "",
+    "    Some node names do not resolve: ['aws-cp01', 'aws-w01', 'aws-w02'].",
+    "    controlPlaneEndpoint is a NAME, so a node that cannot resolve it cannot join.",
+    "",
+    "On the laptop, clusters/onprem/nodes.json declares each address and cloud-init writes",
+    "/etc/hosts from it, so every node resolves every other by name. The first AWS version let",
+    "EC2 allocate addresses at launch, which meant Terraform could not know them when it rendered",
+    "the user-data - so nothing could write /etc/hosts, and the nodes knew each other only by",
+    "numbers.",
+    "",
+    "Declaring them makes the two substrates the same shape AND makes a rebuild deterministic:",
+    "aws-cp01 is 10.20.1.10 today and after the next `make aws-up`, so a kubeconfig or a note in",
+    "a runbook does not go stale.",
+    "",
+    "WHY .10 AND NOT .1: AWS RESERVES THE FIRST FOUR ADDRESSES AND THE LAST ONE in every subnet -",
+    ".0 network, .1 the VPC router, .2 DNS, .3 reserved for the future, .255 broadcast. Asking for",
+    "one of those fails the apply with a message about an address being unavailable, which reads",
+    "like a conflict with something else. Starting at .10 leaves the reserved block alone and",
+    "keeps room to grow without renumbering."
+  ],
   "_nodes_comment": [
     "THREE NODES, MIRRORING ON-PREM: one control plane and two workers, named aws-cp01, aws-w01",
     "and aws-w02 against the laptop's k8s-cp01, k8s-w01 and k8s-w02. The names ARE settable here,",
