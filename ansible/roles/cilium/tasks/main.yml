@@ -7,6 +7,37 @@
 # one, and the values file lives in this repository. So every task here is delegated to
 # localhost and runs once.
 
+- name: Render the effective values - the file in Git plus this substrate's overrides
+  # ONE VALUES FILE, NOT TWO, and this task is what keeps it that way.
+  #
+  # cilium-values.yaml hardcoded `k8sServiceHost: k8s-cp01.platform.local`, which is the
+  # on-prem control plane's name in /etc/hosts. On EC2 that name does not resolve, and with
+  # `kubeProxyReplacement: true` there is NO ClusterIP fallback - so cilium-agent could not
+  # reach the API server, the DaemonSet never became available, and the only symptom was
+  # `rollout status` reporting "timed out waiting for the condition" after 180 seconds.
+  #
+  # The alternative designs are both worse. A second values file duplicates 120 lines of
+  # justified decisions, and they drift. `--set` on the helm command line breaks the
+  # idempotency check below, which compares `helm get values` against THE FILE - anything
+  # passed outside the file reads as a permanent mismatch and reinstalls Cilium on every run.
+  #
+  # So the override is merged into the parsed structure and written out, and the comparison is
+  # made against the merged result: the check still compares what helm holds against what this
+  # role passed. On-prem the override is empty, the merged file is byte-identical to the one in
+  # Git, and nothing about that substrate changes.
+  ansible.builtin.copy:
+    content: |
+      # RENDERED - do not edit. Source: {{ cilium_values_file | basename }} plus
+      # cilium_values_override from the inventory. Edit the file in Git or the inventory.
+      {{ (lookup('file', cilium_values_file) | from_yaml)
+         | combine(cilium_values_override, recursive=True)
+         | to_nice_yaml(indent=2) | indent(6) }}
+    dest: "{{ cilium_values_effective }}"
+    mode: "0644"
+  delegate_to: localhost
+  run_once: true
+  become: false
+
 - name: Is Cilium already installed, and at which version?
   # `helm upgrade --install` is idempotent in effect but always reports "changed", which would
   # make the second run of the playbook look like it did work. The Module 03 gate is
@@ -48,7 +79,7 @@
     # text - so a comment or a reordered key does not read as a change.
     cilium_values_match: >-
       {{ (cilium_live_values.stdout | default('{}', true) | from_json)
-         == (lookup('file', cilium_values_file) | from_yaml) }}
+         == (lookup('file', cilium_values_effective) | from_yaml) }}
   run_once: true
 
 - name: Install or upgrade Cilium
@@ -68,7 +99,7 @@
       - --namespace
       - kube-system
       - --values
-      - "{{ cilium_values_file }}"
+      - "{{ cilium_values_effective }}"
       - --wait
       - --timeout
       - 5m
@@ -89,6 +120,11 @@
 - name: Wait for the agent on every node
   # DaemonSet rollout, not pod count: a DaemonSet is "one per node", so this also waits for the
   # agent on a worker that joined moments ago.
+  #
+  # NOT FATAL HERE. `rollout status` says "timed out waiting for the condition" and nothing
+  # else - no pod name, no event, no container log - so on 2026-11-05 a cilium-agent that
+  # could not resolve its API server produced three minutes of silence and a one-line error
+  # about a condition. The diagnosis task below turns that into the actual reason.
   ansible.builtin.command: >-
     kubectl --namespace kube-system rollout status daemonset/cilium --timeout=180s
   delegate_to: localhost
@@ -96,7 +132,72 @@
   become: false
   environment:
     KUBECONFIG: "{{ cluster_kubeconfig }}"
+  register: cilium_rollout
   changed_when: false
+  failed_when: false
+
+- name: Say why the agent did not come up
+  # Runs ONLY on failure, and fails the play itself - so this is the error message rather than
+  # an extra step before it. Three questions, in the order a human would ask them: which pods
+  # exist and in what state, what the scheduler and kubelet said about them, and what the
+  # container itself logged before dying.
+  #
+  # --previous on a crash-looping container, because the CURRENT container's log is usually
+  # three seconds old and empty. `|| true` on each so a missing pod or an unavailable log
+  # does not replace the diagnosis with a shell error.
+  when: cilium_rollout.rc != 0
+  block:
+    - name: Collect what the cluster knows about the agent
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: |
+          set -uo pipefail
+          echo "--- pods ---"
+          kubectl -n kube-system get pods -l k8s-app=cilium -o wide 2>&1 || true
+          echo "--- not-ready containers, with reasons ---"
+          kubectl -n kube-system get pods -l k8s-app=cilium \
+            -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{range .status.initContainerStatuses[*]}  init {.name}: {.state}{"\n"}{end}{range .status.containerStatuses[*]}  {.name}: ready={.ready} restarts={.restartCount} {.state}{"\n"}{end}{end}' 2>&1 || true
+          echo
+          echo "--- events, newest last ---"
+          kubectl -n kube-system get events --field-selector involvedObject.kind=Pod \
+            --sort-by=.lastTimestamp 2>&1 | grep -i cilium | tail -20 || true
+          echo "--- agent log (previous container first) ---"
+          for p in $(kubectl -n kube-system get pods -l k8s-app=cilium \
+                       -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+            echo "== $p =="
+            kubectl -n kube-system logs "$p" -c cilium-agent --previous --tail=25 2>/dev/null \
+              || kubectl -n kube-system logs "$p" -c cilium-agent --tail=25 2>&1 || true
+          done
+      delegate_to: localhost
+      run_once: true
+      become: false
+      environment:
+        KUBECONFIG: "{{ cluster_kubeconfig }}"
+      register: cilium_why
+      changed_when: false
+
+    - name: Fail with the reason rather than with the timeout
+      ansible.builtin.fail:
+        msg: |
+          The cilium DaemonSet did not become available within 180s.
+
+          {{ cilium_rollout.stdout | default('') | trim }}
+          {{ cilium_rollout.stderr | default('') | trim }}
+
+          {{ cilium_why.stdout | default('(no diagnostic output)') }}
+
+          The two causes this has actually had:
+
+            k8sServiceHost does not resolve or is not reachable from a node. With
+            kubeProxyReplacement there is no ClusterIP fallback, so the agent cannot
+            reach the API server at all. It is set from cilium_values_override in the
+            inventory for this substrate.
+
+            The pod CIDR in cilium-values.yaml disagrees with the one kubeadm was
+            given, so pods get addresses nothing routes to. `make lint` now compares
+            every cluster.json against this file, so this one should be caught before
+            a cluster is built rather than here.
+      run_once: true
 
 - name: What configuration do the values ASK for?
   ansible.builtin.set_fact:

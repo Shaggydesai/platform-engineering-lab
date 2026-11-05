@@ -147,6 +147,25 @@ def build():
                 "gateway_api_sha256": k8s["gateway_api_sha256"],
                 "all_node_names": sorted(nodes),
                 "repo_root": REPO,
+                # THE ONE LINE OF cilium-values.yaml THAT IS ON-PREM-SPECIFIC.
+                #
+                # The file sets k8sServiceHost to k8s-cp01.platform.local, a name that exists
+                # only in the libvirt nodes' /etc/hosts. On EC2 it does not resolve, and
+                # kubeProxyReplacement: true means there is no kubernetes.default ClusterIP to
+                # fall back to - kube-proxy is gone, and Cilium is what would have programmed
+                # that address. So the agent cannot reach the API server, the DaemonSet never
+                # becomes available, and `rollout status` reports a timeout with no cause.
+                #
+                # The PRIVATE address, and by address rather than by name: the nodes do resolve
+                # aws-cp01 from the /etc/hosts cloud-init wrote, but an address removes a
+                # dependency instead of relying on one, and kubeadm puts the advertise address
+                # in the API server certificate itself.
+                "cilium_values_override": {
+                    "k8sServiceHost": cp["private_ip"],
+                },
+                "cilium_values_effective": os.path.join(
+                    REPO, ".cache", "cilium-values-aws.yaml"
+                ),
                 "cilium_values_file": os.path.join(
                     REPO, "ansible", "roles", "cilium", "files", "cilium-values.yaml"
                 ),

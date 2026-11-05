@@ -635,6 +635,55 @@ else
   skip 'python3 missing, skipped'
 fi
 
+step "Cilium's pod CIDR agrees with every cluster's"
+# THE OTHER HALF OF A PAIR THAT WAS ONLY CHECKED ON ONE SIDE. Lint already asserts that the two
+# substrates' cluster.json files agree with each other about pod_cidr - and neither of them was
+# ever compared with ansible/roles/cilium/files/cilium-values.yaml, which is the file that
+# actually tells the Cilium operator which addresses to hand out.
+#
+# A disagreement here is not an error anywhere. The operator allocates per-node ranges out of
+# its own pool, kubeadm tells kube-controller-manager about a different one, and pods come up
+# with addresses nothing routes to - which presents as a CNI that installed cleanly and a
+# DaemonSet that never becomes available.
+if command -v python3 >/dev/null 2>&1; then
+  if python3 - <<'PYCIDR'
+import json, pathlib, sys, yaml
+
+values = yaml.safe_load(
+    pathlib.Path("ansible/roles/cilium/files/cilium-values.yaml").read_text())
+pool = values["ipam"]["operator"]["clusterPoolIPv4PodCIDRList"]
+
+bad = False
+for cfg in sorted(pathlib.Path("clusters").glob("*/*.json")):
+    data = json.loads(cfg.read_text())
+    # on-prem keeps it under a different key than the cloud substrates do; read both rather
+    # than assuming, and say so when a file simply has no pod CIDR to check.
+    cidr = (data.get("kubernetes", {}).get("pod_cidr")
+            or data.get("networking", {}).get("pod_cidr"))
+    if cidr is None:
+        continue
+    if cidr not in pool:
+        print(f"  {cfg}: pod_cidr {cidr} is not in Cilium's pool {pool}")
+        bad = True
+    else:
+        print(f"  {cfg.parent.name}: {cidr}")
+
+if not any(True for _ in pathlib.Path("clusters").glob("*/*.json")):
+    print("  no cluster configs found to compare against")
+    sys.exit(2)
+sys.exit(1 if bad else 0)
+PYCIDR
+  then ok "every cluster's pod CIDR is inside the pool cilium-values.yaml hands out"
+  else
+    rc=$?
+    if [[ $rc -eq 2 ]]; then skip 'nothing to compare - see above'
+    else bad 'the CNI and kubeadm must agree about the pod CIDR, or pods get unroutable addresses'
+    fi
+  fi
+else
+  skip 'python3 missing, skipped'
+fi
+
 step 'The two kubeadm inventories define the same variables'
 # THIS IS THE CHECK THAT SHOULD HAVE EXISTED BEFORE MODULE 09 WAS BUILT, and it is written after
 # three consecutive failures of the same shape on 2026-11-05: `kube_context`, then (found by

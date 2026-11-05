@@ -89,6 +89,13 @@ def build():
                 # is no second file to find, and so they are derived from where this repository
                 # actually is rather than from a hardcoded path that works on one machine.
                 "repo_root": REPO,
+                # EMPTY, and that is the point: on-prem the file in Git is already correct
+                # for on-prem, so the rendered file is byte-identical to it. The AWS inventory
+                # says what it has to change and why.
+                "cilium_values_override": {},
+                "cilium_values_effective": os.path.join(
+                    REPO, ".cache", "cilium-values-onprem.yaml"
+                ),
                 "cilium_values_file": os.path.join(
                     REPO, "ansible", "roles", "cilium", "files", "cilium-values.yaml"
                 ),
