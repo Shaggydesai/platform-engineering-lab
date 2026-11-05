@@ -424,7 +424,24 @@ aws-guardrails: _no-stray-flags ## ADR-0003 gate - the $5 budget alarm, BEFORE a
 	arn=$$(printf '%s' "$$who" | jq -r '.Arn'); \
 	case "$$arn" in \
 	  *:root) \
-	    if [ -n "$$(aws configure get aws_session_token 2>/dev/null)" ]; then \
+	    tmpcred=unknown; \
+	    if creds=$$(aws configure export-credentials 2>/dev/null) \
+	       && printf '%s' "$$creds" | jq -e 'has("SessionToken") or has("Expiration")' >/dev/null 2>&1; then \
+	      tmpcred=yes; \
+	    elif [ -n "$$creds" ]; then tmpcred=no; \
+	    elif [ -n "$$(aws configure get aws_session_token 2>/dev/null)" ]; then tmpcred=yes; \
+	    fi; \
+	    if [ "$$tmpcred" = unknown ]; then \
+	      printf '\033[33mroot, and I cannot tell whether it is a session or a key\033[0m\n\n'; \
+	      printf '  %s\n\n' "$$arn"; \
+	      printf 'Proceeding. "I could not look" is not "it is a long-lived key", and refusing on\n'; \
+	      printf 'an unknown would block the only credential this account has - which is what the\n'; \
+	      printf 'first version of this check did (ADR-0024).\n\n'; \
+	      printf 'Worth confirming once, by hand:\n'; \
+	      printf '  aws configure export-credentials | jq "keys"\n'; \
+	      printf '  expect SessionToken and Expiration. If neither is there, it IS a static key\n'; \
+	      printf '  and should be deleted.\n\n'; \
+	    elif [ "$$tmpcred" = yes ]; then \
 	      printf '\033[33mroot, but a SHORT-LIVED session rather than a key\033[0m\n\n'; \
 	      printf '  %s\n\n' "$$arn"; \
 	      printf 'Allowed. `aws login` issues root credentials on this account and there is no\n'; \
@@ -433,6 +450,7 @@ aws-guardrails: _no-stray-flags ## ADR-0003 gate - the $5 budget alarm, BEFORE a
 	      printf 'expires in 12 hours and came through a browser session with MFA on it.\n\n'; \
 	    else \
 	      printf '\033[31ma root ACCESS KEY - refusing\033[0m\n\n'; \
+	      printf '  (resolved credentials carry no SessionToken and no Expiration)\n'; \
 	      printf '  %s\n\n' "$$arn"; \
 	      printf 'No session token, so these are long-lived root credentials sitting in a file.\n'; \
 	      printf 'Root cannot be restricted by any policy - it can change the payment method,\n'; \
