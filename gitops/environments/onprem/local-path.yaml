@@ -1,10 +1,14 @@
 # local-path-provisioner, on-prem.
 #
 # Only the values this project has a real opinion about. Everything else stays at the chart's
-# default ON PURPOSE: this chart cannot be rendered in the authoring environment, so a value set
-# from a guessed structure is a sync failure discovered by the operator rather than by me.
-# `make gitops-render CHART=...` shows what actually lands, and anything worth moving moves after
-# that has been read (ADR-0015).
+# default ON PURPOSE: a value set from a guessed structure is a sync failure discovered by the
+# operator rather than by me. `make gitops-render CHART=...` shows what actually lands, and
+# anything worth moving moves after that has been read (ADR-0015).
+#
+# THE CHART HAS NOW BEEN READ, 2026-11-05. It is a git source - rancher/local-path-provisioner at
+# tag v0.0.37, path deploy/chart/local-path-provisioner - so `git clone --depth 1 --branch
+# v0.0.37` is all it took, and the note that used to sit here ("cannot be rendered in the
+# authoring environment") was true of one environment rather than of the chart.
 storageClass:
   # Named for the platform rather than for the implementation. A workload asking for
   # "platform-local" keeps working if the provisioner behind it is ever replaced; one asking for
@@ -28,3 +32,36 @@ storageClass:
   # nodes and Released PVs that no new claim can bind to - the storage equivalent of the
   # orphaned-disk problem ADR-0003 forbids in the cloud.
   reclaimPolicy: Delete
+
+# ---------------------------------------------------------------------------------------------
+# THE HELPER POD'S IMAGE, which the chart defaults to `docker.io/library/busybox:latest`.
+#
+# That default was an open parking-lot item from 2026-10-29 recorded as "unpinned, and nobody
+# here has read the value". Read on 2026-11-05, and it is worse than unpinned: `latest` is a
+# mutable pointer with no version in it at all, on a container that the provisioner runs AS ROOT
+# on every node, mounting a host path, every time a PVC is created or deleted.
+#
+# WHY IT IS A `repository@sha256` AND A BARE HEX TAG, which looks wrong and is not. The chart
+# composes the reference with a literal colon:
+#
+#     image: {{ .Values.helperImage.repository }}:{{ .Values.helperImage.tag }}
+#
+# so a digest cannot go in `tag` - `busybox@sha256:abc` plus a tag renders two colons and is
+# rejected. Splitting the digest across the two values renders exactly `repo@sha256:<hex>`,
+# which is a valid immutable reference. Verify with `make gitops-render CHART=local-path` and
+# read the `helperPod.yaml` key of the rendered ConfigMap, which is where it lands.
+#
+# TO FILL THIS IN, one command, which needs network this repository's CI does not have:
+#
+#     scripts/image-digest.sh docker.io/library/busybox latest
+#
+# It HEADs the manifest and prints the digest that `latest` points at today - the bytes you
+# just inspected, which is the same thing the Gateway API pin means by a sha256. Paste the hex
+# after `sha256:` below and uncomment both lines.
+#
+# A tag would also be an improvement over `latest` and is NOT what this asks for: a digest is
+# the only form that cannot change under the cluster.
+#
+# helperImage:
+#   repository: docker.io/library/busybox@sha256
+#   tag: <64 hex characters, with no sha256: prefix - the chart adds the colon>

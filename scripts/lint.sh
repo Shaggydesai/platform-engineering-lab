@@ -736,6 +736,71 @@ else
   skip 'grep missing, skipped'
 fi
 
+step 'Any helper-image pin is a digest, not a tag'
+# WHAT THIS CHECK CLAIMS, precisely: no environment carries a MALFORMED helper-image pin. It does
+# NOT claim the image is pinned - an environment with no `helperImage` at all is using the chart's
+# default of `docker.io/library/busybox:latest`, and this prints that rather than passing over it.
+#
+# The distinction is the one this repository keeps paying for: a check whose "ok" covers a case it
+# never examined. So the unpinned environments are listed every run, and the green line below says
+# only what was verified.
+#
+# The shape is unusual and deliberate - the chart composes `{{ repository }}:{{ tag }}` with a
+# literal colon, so a digest has to be split across the two values to render `repo@sha256:<hex>`.
+# gitops/environments/onprem/local-path.yaml explains it at the point of use.
+if command -v python3 >/dev/null 2>&1; then
+  if python3 - <<'PYHELPER'
+import pathlib, re, sys, yaml
+
+files = sorted(pathlib.Path("gitops/environments").glob("*/local-path.yaml"))
+if not files:
+    print("  no local-path overlays found")
+    sys.exit(2)
+
+bad, unpinned = [], []
+for f in files:
+    try:
+        doc = yaml.safe_load(f.read_text()) or {}
+    except yaml.YAMLError as e:
+        print(f"  {f}: not parseable as YAML ({e})")
+        bad.append(f)
+        continue
+
+    helper = doc.get("helperImage")
+    if not helper:
+        unpinned.append(f)
+        continue
+
+    repo = str(helper.get("repository", ""))
+    tag = str(helper.get("tag", ""))
+    if not repo.endswith("@sha256"):
+        print(f"  {f}: helperImage.repository {repo!r} must end with '@sha256'")
+        print( "    the chart appends ':' + tag, so the digest is split across the two values")
+        bad.append(f)
+    if not re.fullmatch(r"[0-9a-f]{64}", tag):
+        print(f"  {f}: helperImage.tag {tag!r} is not 64 hex characters")
+        print( "    a tag here is a mutable pointer; put the digest's hex in it, no 'sha256:' prefix")
+        bad.append(f)
+
+for f in unpinned:
+    print(f"  {f}: no helperImage - the chart default docker.io/library/busybox:latest is in use")
+if unpinned:
+    print( "    open parking-lot item (2026-10-29). To close it:")
+    print( "      scripts/image-digest.sh docker.io/library/busybox latest")
+
+sys.exit(1 if bad else 0)
+PYHELPER
+  then ok 'no malformed helper-image pin - any environment listed above is simply unpinned'
+  else
+    rc=$?
+    if [[ $rc -eq 2 ]]; then skip 'no local-path overlays - see above'
+    else bad 'a helper-image pin must render repo@sha256:<hex> - see the lines above'
+    fi
+  fi
+else
+  skip 'python3 missing, skipped'
+fi
+
 step 'Every Packer variable without a default is supplied'
 # THE CHECK FOR EXACTLY TODAY'S BUG, written the hour it happened.
 #
