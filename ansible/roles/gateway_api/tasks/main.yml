@@ -24,10 +24,38 @@
   run_once: true
   become: false
 
+- name: Is the bundle already on disk, and is it the right bundle?
+  # ASKED BEFORE DOWNLOADING, so a correct local copy is not fetched again. This is 1.1 MB from
+  # GitHub on every run of the playbook, and on 2026-11-05 that download TIMED OUT - having
+  # already written all 1171163 bytes correctly. The task reported "Connection failure: The read
+  # operation timed out" about a file that was complete and whose digest matched the pin.
+  #
+  # That is this repository's recurring shape in a new place: the task's verdict described the
+  # transport rather than the outcome. The outcome is "do I hold the bytes the pin names", which
+  # is a question about the disk, and it is now asked first.
+  ansible.builtin.stat:
+    path: "{{ gateway_api_bundle }}"
+    checksum_algorithm: sha256
+  delegate_to: localhost
+  run_once: true
+  become: false
+  register: gw_existing
+
 - name: Fetch the Gateway API CRD bundle
   # To the workstation, not to a node. Nothing is applied from here yet - the download and the
   # verification are separate from the apply on purpose, so that a failed checksum means
   # "nothing happened" rather than "half of it happened".
+  #
+  # SKIPPED WHEN THE LOCAL COPY ALREADY MATCHES THE PIN. The three conditions are not redundant:
+  # the file may be absent, or the digest may be unrecorded (the first-run bootstrap flow the
+  # assert below prints), or the file may be the wrong bytes. Only the last of those is a
+  # mismatch; the middle one looks like a mismatch and is not, which is why it is named rather
+  # than left to a comparison against an empty string.
+  #
+  # TIMEOUT AND RETRIES, because the default is 10 seconds and this file does not always arrive
+  # in 10 seconds from India. `force: true` with the skip above means a retry re-downloads from
+  # the start rather than resuming a partial file - correct for 1.1 MB, and it is why a truncated
+  # download cannot survive into the next run.
   ansible.builtin.get_url:
     url: >-
       https://github.com/kubernetes-sigs/gateway-api/releases/download/{{ gateway_api_version
@@ -35,10 +63,18 @@
     dest: "{{ gateway_api_bundle }}"
     mode: "0644"
     force: true
+    timeout: 60
   delegate_to: localhost
   run_once: true
   become: false
+  when: >-
+    not gw_existing.stat.exists
+    or gateway_api_sha256 | length == 0
+    or gw_existing.stat.checksum | default('') != gateway_api_sha256
   register: gw_download
+  until: gw_download is succeeded
+  retries: 3
+  delay: 5
   changed_when: false
   # changed_when: false because downloading a file to a temporary path is not a change to
   # anything that matters. The apply below is where change is reported.
