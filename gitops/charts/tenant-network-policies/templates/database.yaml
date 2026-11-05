@@ -26,10 +26,15 @@ spec:
       app.kubernetes.io/instance: {{ .Values.tenant.instance }}
       app.kubernetes.io/name: {{ .Values.database.name }}
 
-  # Ingress only. Egress is left unrestricted on purpose: an egress policy must also permit DNS
-  # to kube-dns or every service loses name resolution, and that failure presents as the
-  # application being broken rather than as a policy being wrong. Egress is its own change, with
-  # its own test, and it is not this one.
+  # Ingress only, and egress is now handled NEXT DOOR rather than left open: egress.yaml in this
+  # same chart selects every pod in the namespace and permits DNS and the namespace itself.
+  # Until 2026-11-05 this comment said egress was deliberately unrestricted, which was true when
+  # it was written and then quietly became false - a comment that renders into the cluster and
+  # describes a decision that was reversed is worse than no comment.
+  #
+  # The two objects are independent and BOTH must allow a connection. So a compromised frontend
+  # is now permitted outbound to the namespace by egress.yaml and still refused at MongoDB by
+  # this one, which lists five pods by name.
   policyTypes: [Ingress]
 
   ingress:
