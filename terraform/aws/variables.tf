@@ -119,7 +119,14 @@ locals {
       ]
       runcmd = concat(
         [for s in local.image_scripts :
-          "K8S_MINOR=${local.cfg.kubernetes.minor} bash /opt/image-scripts/${s} >>/var/log/image-build.log 2>&1"
+          join(" ", [
+            "K8S_MINOR=${local.cfg.kubernetes.minor}",
+            # EXACT, not "newest on the day". Without this, cloud-init running today installs a
+            # different Kubernetes from the one the laptop's Packer image baked in - which is
+            # what happened on 2026-11-05 (v1.34.13 against v1.34.12) and what preflight caught.
+            "K8S_PACKAGE_VERSION=${local.cfg.kubernetes.package_version}",
+            "bash /opt/image-scripts/${s} >>/var/log/image-build.log 2>&1",
+          ])
         ],
         [
           "touch /var/lib/cloud/image-ready",

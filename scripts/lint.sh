@@ -595,7 +595,7 @@ import json, sys
 aws = json.load(open('clusters/aws/cluster.json'))['kubernetes']
 onp = json.load(open('clusters/onprem/nodes.json'))['kubernetes']
 bad = []
-for k in ("version", "cni", "cilium_version", "gateway_api_version",
+for k in ("version", "package_version", "cni", "cilium_version", "gateway_api_version",
           "gateway_api_sha256", "pod_cidr", "service_cidr"):
     a, o = aws.get(k), onp.get(k)
     if a != o:
@@ -611,9 +611,24 @@ if minor and version and not version.startswith(minor + "."):
           % (minor, version))
     bad.append('minor')
 
+# AND package_version IS WHAT APT ACTUALLY INSTALLS, while `version` is what preflight asserts
+# kubeadm reports. They are different strings for the same thing - "1.34.12-1.1" against
+# "v1.34.12" - so nothing compares them unless something is told to.
+#
+# Added after the two disagreed in the only way that matters: 30-kubernetes.sh installed
+# "newest in the v1.34 repo", which was v1.34.12 when the laptop image was baked and v1.34.13
+# when cloud-init ran it on EC2 five modules later. Preflight caught it, on the substrate where
+# the scripts run fresh - and the same bug had been sitting in the Packer path the whole time,
+# invisible because an image is baked once.
+pkg = aws.get("package_version", "")
+if version and pkg and not pkg.startswith(version.lstrip("v") + "-"):
+    print('    package_version %r is not a packaging of version %r - apt would install one and'
+          ' preflight would assert the other' % (pkg, version))
+    bad.append('package_version')
+
 sys.exit(1 if bad else 0)
 PYCHECK
-  then ok 'version, CNI, Gateway API digest and both CIDRs match, and minor contains version'
+  then ok 'version, package_version, CNI, Gateway API digest and both CIDRs agree, and the three version strings are consistent'
   else bad 'fix the mismatch above - clusters/onprem/nodes.json is the original'
   fi
 else

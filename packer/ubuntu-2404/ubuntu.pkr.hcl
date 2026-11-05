@@ -50,6 +50,11 @@ variable "ssh_private_key_file" {
   default = "~/.ssh/id_ed25519"
 }
 
+variable "k8s_package_version" {
+  type        = string
+  description = "Exact apt version for kubelet/kubeadm/kubectl, e.g. 1.34.12-1.1. Must equal kubernetes.package_version in clusters/onprem/nodes.json - 30-kubernetes.sh explains why there is no default."
+}
+
 variable "k8s_minor" {
   type        = string
   default     = "v1.34"
@@ -112,6 +117,7 @@ build {
     environment_vars = [
       "SSH_USERNAME=${var.ssh_username}",
       "K8S_MINOR=${var.k8s_minor}",
+      "K8S_PACKAGE_VERSION=${var.k8s_package_version}",
     ]
     scripts = [
       "scripts/00-wait-for-cloud-init.sh",
