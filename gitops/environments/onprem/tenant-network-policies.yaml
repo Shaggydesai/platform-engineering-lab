@@ -26,3 +26,17 @@ database:
     - cart-service
     - order-service
     - payment-service
+
+# EGRESS, added 2026-11-05, closing the parking-lot item from 2026-10-30.
+#
+# Before this, any pod in shopverse-prod could open a connection to anywhere - another namespace,
+# a node, the internet - so a compromised service could exfiltrate whatever it could read. The
+# database policy had never covered that, because it is ingress-only.
+#
+# What the tenant actually needs is small, which is what makes default-deny viable: DNS, and each
+# other. Verified by `make netpol-check`, which now probes DNS resolution and a denied external
+# destination as well as the database - in that order, because once egress is policed a failed
+# connection BY NAME no longer distinguishes "the policy denied it" from "DNS is broken", and the
+# database probes would have gone on passing for the wrong reason.
+egress:
+  enabled: true

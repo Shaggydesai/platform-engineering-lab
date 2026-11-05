@@ -28,3 +28,39 @@ database:
     - cart-service
     - order-service
     - payment-service
+
+# Everything the tenant may talk to. OFF by default, like the rest of this chart.
+#
+# The DNS values DO carry defaults, which is a deliberate exception to "defaults are off and
+# empty" above. `kube-system` / `k8s-app=kube-dns` is what kubeadm installs CoreDNS as and what
+# GKE and EKS use too, so it is not a per-substrate choice - and the consequence of getting it
+# wrong is not a policy that does nothing, it is a namespace where no name resolves. A default
+# that is correct everywhere is safer here than a blank that someone fills in from memory.
+#
+# The template still FAILS if either is explicitly emptied, because `dns: {}` is a thing someone
+# writes while debugging and then commits.
+egress:
+  enabled: false
+
+  dns:
+    namespace: kube-system
+    podLabels:
+      k8s-app: kube-dns
+    # 53 renders as both UDP and TCP. TCP is not optional: a response larger than 512 bytes, or
+    # any query over a resolver that chooses TCP, falls back to it - so a UDP-only rule produces
+    # resolution that works for most names and fails for some, which is worse than failing for
+    # all of them.
+    ports: [53]
+
+  # The tenant's own service graph. This does NOT grant database access - the database's ingress
+  # policy still lists five pods by name, and both directions must allow a connection.
+  allowSameNamespace: true
+
+  # Destinations outside the cluster, each with a reason. Empty because ShopVerse has none: no
+  # payment gateway, no SMTP, no external API. That is what makes default-deny possible here
+  # without a list to maintain, and it is not typical of a real tenant.
+  #
+  #   allowCidrs:
+  #     - cidr: 203.0.113.0/24
+  #       ports: [{protocol: TCP, port: 443}]
+  allowCidrs: []

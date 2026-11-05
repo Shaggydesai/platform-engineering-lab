@@ -1,0 +1,106 @@
+{{- if and .Values.tenant.enabled .Values.egress.enabled }}
+{{- if not .Values.tenant.namespace }}{{ fail "tenant.namespace is required" }}{{ end }}
+{{- if not .Values.egress.dns.namespace }}{{ fail "egress.dns.namespace is required - an egress policy without a DNS exception breaks every service in the namespace" }}{{ end }}
+{{- if not .Values.egress.dns.podLabels }}{{ fail "egress.dns.podLabels is required - see the comment in values.yaml about why this must not default" }}{{ end }}
+# Everything the tenant may TALK TO. Everything else is denied.
+#
+# This is the other half of the database policy next door, and it took a separate change because
+# it fails in a completely different way. The database policy, wrong, denies something that should
+# work and the application returns an error. This one, wrong, breaks NAME RESOLUTION - and a pod
+# that cannot resolve anything looks like an application bug, a crashed dependency, or a bad image
+# long before it looks like a network policy. That is why DNS is the first rule and why its
+# selectors cannot default to anything.
+#
+# podSelector: {} - EVERY POD IN THE NAMESPACE, not the tenant's release.
+#
+# The namespace belongs to one tenant (ADR-0017), so "the tenant's egress" is the namespace's
+# egress. Selecting on app.kubernetes.io/instance instead would leave anything without that label
+# completely unpoliced - a debug pod, a Job, a probe, or whatever an attacker starts - which is
+# the hole this policy exists to close. An empty selector is the only form that cannot be stepped
+# around by not wearing a label.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Values.tenant.instance }}-egress
+  namespace: {{ .Values.tenant.namespace }}
+  annotations:
+    # After the database policy, which is wave 5. Ordering does not matter for correctness - both
+    # are declarative - but applying the egress rule second means that if a sync is interrupted
+    # between them, the cluster is left in the state this project already ran for a week rather
+    # than in one where DNS is broken.
+    argocd.argoproj.io/sync-wave: "6"
+spec:
+  podSelector: {}
+
+  # EGRESS ONLY. Naming Ingress here as well would switch every pod in the namespace to
+  # deny-by-default for inbound traffic too - including the frontend, which must accept traffic
+  # from the Gateway, and that traffic arrives as `reserved:host`, which plain NetworkPolicy has
+  # no selector for. The result would be a tenant that is unreachable from outside and a policy
+  # that looks like it is only about egress. Frontend ingress is its own problem and is still
+  # open; it needs a CiliumNetworkPolicy and a substrate-specific rule.
+  policyTypes: [Egress]
+
+  egress:
+    # ------------------------------------------------------------------ DNS
+    #
+    # FIRST, AND THE ONLY RULE THAT IS NOT OPTIONAL. Without it every outbound connection by name
+    # fails, including the ones the rules below permit, because resolution happens before the
+    # connection the policy would have allowed.
+    #
+    # NOTE THE SINGLE `-`: namespaceSelector and podSelector are in ONE peer, which means "pods
+    # matching these labels IN namespaces matching those labels" - an AND. Written as two list
+    # items it becomes an OR, and that permits every pod in kube-system plus every pod labelled
+    # k8s-app=kube-dns anywhere in the cluster. The two forms differ by one character and by a
+    # great deal of access; this is the most common way this object is written wrong.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.egress.dns.namespace }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.egress.dns.podLabels | nindent 14 }}
+      ports:
+        {{- range .Values.egress.dns.ports }}
+        - protocol: UDP
+          port: {{ . }}
+        - protocol: TCP
+          port: {{ . }}
+        {{- end }}
+    {{- if .Values.egress.allowSameNamespace }}
+
+    # ------------------------------------------------------- within the namespace
+    #
+    # The tenant's own service graph: frontend to api-gateway, the five services to MongoDB. An
+    # empty podSelector with no namespaceSelector means "any pod in THIS namespace", which is the
+    # one case where leaving the namespace out is what you want.
+    #
+    # This does NOT grant access to the database - the database's own ingress policy still decides
+    # that, and it lists five pods by name. Egress and ingress are evaluated independently and
+    # BOTH must allow a connection, so a compromised frontend can now attempt MongoDB and still
+    # be refused at the far end.
+    - to:
+        - podSelector: {}
+    {{- end }}
+    {{- with .Values.egress.allowCidrs }}
+
+    # ------------------------------------------------------------- explicit exceptions
+    #
+    # Empty by default, and anything added here should name what needs it and why. ShopVerse has
+    # no outbound dependency at all - no payment gateway, no SMTP, no external API - which is
+    # what makes a default-deny egress policy possible here without a list of exceptions to
+    # maintain. A real tenant usually has one, and this is where it goes.
+    {{- range . }}
+    - to:
+        - ipBlock:
+            cidr: {{ .cidr }}
+            {{- with .except }}
+            except:
+              {{- toYaml . | nindent 14 }}
+            {{- end }}
+      {{- with .ports }}
+      ports:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    {{- end }}
+    {{- end }}
+{{- end }}
