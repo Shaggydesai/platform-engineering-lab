@@ -127,6 +127,10 @@ def build():
                 # "reachable" from "usable" - see the wait in ansible/playbooks/cluster.yml.
                 # terraform/aws/variables.tf is what writes it.
                 "image_ready_marker": "/var/lib/cloud/image-ready",
+                # RUN BY THE SSH WAIT'S RESCUE, so a failed connection reports which of three
+                # causes it was rather than asking the reader to correlate three hosts' results.
+                # Repo-relative; the playbook joins it to repo_root.
+                "reach_check_script": "scripts/aws-reach-check.sh",
                 # AWS gives every instance an internal name under this domain. Nothing here
                 # depends on it resolving - the addresses are used directly - but the kubeadm
                 # certSANs template interpolates it.

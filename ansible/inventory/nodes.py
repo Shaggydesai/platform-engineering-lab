@@ -111,6 +111,10 @@ def build():
                 # from cloud-init at FIRST BOOT, which is the one real difference ADR-0025
                 # leaves behind, and the playbook waits for a marker there.
                 "image_ready_marker": "",
+                # NO EQUIVALENT, and empty says so. The libvirt nodes sit on a NAT network inside
+                # this laptop: there is no security group, no public address, and nothing that can
+                # renumber between sessions. An unreachable node here means the VM is not running.
+                "reach_check_script": "",
                 # ---------------------------------------------------------- Layer 2, on-prem
                 # Everything the argocd role needs that differs between substrates. The role
                 # itself names no cluster, no file and no Application; it reads these (ADR-0020).

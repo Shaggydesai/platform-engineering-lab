@@ -49,35 +49,58 @@
             timeout: 300
             sleep: 5
       rescue:
+        - name: Ask the reachability check instead of asking the reader to remember it
+          # THE FIRST VERSION OF THIS RESCUE MADE THE HUMAN DO THE CORRELATION. It said "look at
+          # the other nodes' results", and when ALL THREE failed - which happened within the hour,
+          # five times - every host pointed at two results that had also failed, which its own
+          # text then read as "nothing can reach anything, so it is your address". That was wrong:
+          # the address was fine and all three instances were gone. The correct conclusion was
+          # available only in the last line, under the branch that did not apply, and it depended
+          # on remembering a line printed 300 seconds earlier.
+          #
+          # So ask. The script needs no AWS credentials - admin_cidr is a Terraform output and the
+          # state is local - and its three exit codes are exactly the three cases.
+          when: reach_check_script | default('') | length > 0
+          ansible.builtin.command: "bash {{ repo_root }}/{{ reach_check_script }}"
+          delegate_to: localhost
+          run_once: true
+          become: false
+          register: reach
+          changed_when: false
+          failed_when: false
+
         - name: Say which of the three it is
           vars:
             others: "{{ ansible_play_hosts_all | reject('equalto', inventory_hostname) | list }}"
+            verdict: >-
+              {{ {0: 'THE ADDRESS IS FINE, so the instances this playbook was handed are GONE.',
+                  1: 'THIS WORKSTATION IS NO LONGER ALLOWED - its public address changed.',
+                  2: 'THE CHECK COULD NOT LOOK, so this is undecided - see its output below.'
+                 }[reach.rc | default(2)] if reach is defined and reach.rc is defined
+                 else 'No reachability check on this substrate.' }}
           ansible.builtin.fail:
             msg: |
               {{ inventory_hostname }} ({{ ansible_host }}) did not answer SSH within 300s.
+              Also failed or not yet reported: {{ others | join(', ') }}
 
-              The other nodes in this play were: {{ others | join(', ') }}
-              Look at THEIR result above, because it is the whole diagnosis:
+              {{ verdict }}
 
-                they answered too
-                  -> the address and the security group are fine, so this instance is GONE.
-                     A reclaimed spot instance leaves its address in Terraform state, which is
-                     what this playbook was handed. Rebuild it - no node that survived is
-                     touched, and the plan will say `1 to add`:
+              {{ reach.stdout | default('') | trim }}
+              {{ reach.stderr | default('') | trim }}
 
-                       make aws-up && make aws-cluster
+              ONE COMMAND ANSWERS ALL THREE CASES, and its plan says which it was:
 
-                they failed as well
-                  -> nothing can reach anything, which points at the ONE address the security
-                     group allows. This usually means a renumbered connection:
+                make aws-up && make aws-cluster
 
-                       bash scripts/aws-reach-check.sh
+              A reclaimed spot instance leaves its address in Terraform state, which is what
+              this playbook was handed - so `3 to add` means all three were taken, `1 to add`
+              means one was, and two security group rules `~ updated in place` means only your
+              address moved. Nothing that survived is touched either way.
 
-                     It compares this workstation's public address with admin_cidr and needs no
-                     credentials. If it refuses, `make aws-up` updates two rules in place.
-
-              If `make aws-cluster` printed `[ ok ] this workstation ... is inside the allowed
-              ...` at the top, the second case is already ruled out and this is a dead instance.
+              If the plan shows instances being added REPEATEDLY across sessions, that is spot
+              capacity in this AZ rather than anything in this repository: on 2026-11-05 there
+              were five reclaim events in two hours in ap-south-1b. `"spot": false` in
+              clusters/aws/cluster.json buys an on-demand run for about $0.095/node/hour.
 
     - name: Wait for the image scripts to finish, where they run at boot
       # A WAIT, NOT AN ASSERTION, and `make aws-wait` existing was not enough.
