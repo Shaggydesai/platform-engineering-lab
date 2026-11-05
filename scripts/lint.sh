@@ -635,6 +635,71 @@ else
   skip 'python3 missing, skipped'
 fi
 
+step "The Makefile's own references resolve"
+# TWICE NOW, A MAKEFILE EDIT OF MINE HAS DELETED SOMETHING AND LINT HAS SAID CLEAN.
+#
+# First four targets (`_aws-preflight`, `aws-up`, `aws-wait`), caught by `git diff --stat`
+# showing 107 deletions for a one-recipe change. Then `AWS_TF := terraform/aws`, which sat
+# between two targets and was taken by a line-range replacement of the recipe above it - not
+# caught at all, for three hours, while a cluster billed.
+#
+# THE SECOND ONE IS THE WORSE FAILURE MODE and it is specific to make: an undefined variable
+# expands to the EMPTY STRING, silently. `cd $(AWS_TF)` becomes `cd`, which succeeds and lands
+# in $HOME. So `make aws-up` reported "Terraform initialized in an empty directory" - and
+# `make aws-down`, the one control standing between a forgotten cluster and a card, was equally
+# broken and nobody had run it to find out.
+#
+# Two textual properties, no make invocation, no substrate:
+#   every $(VAR) is defined in this Makefile, or is user-overridable (KNOWN_VARS), or is one of
+#   make's own; and every prerequisite is a defined target or an existing file.
+if command -v python3 >/dev/null 2>&1; then
+  if python3 - <<'PYMAKE'
+import os, re, sys, pathlib
+
+text = pathlib.Path("Makefile").read_text()
+
+defined = set(re.findall(r'^([A-Z_][A-Z_0-9]*)\s*:?=', text, re.M))
+known = set()
+m = re.search(r'^KNOWN_VARS\s*:?=\s*((?:.*\\\n)*.*)$', text, re.M)
+if m:
+    known = set(m.group(1).replace("\\", " ").split())
+# make's own, plus the environment ones a recipe may legitimately read.
+builtin = {"MAKE", "MAKEFLAGS", "MAKEFILE_LIST", "CURDIR", "SHELL", "HOME", "PATH", "PWD",
+           "USER", "MAKECMDGOALS", "VPATH", "SUFFIXES", ".DEFAULT_GOAL"}
+
+# $(NAME) but NOT $$(NAME), which is shell command substitution rather than a make variable.
+used = set(re.findall(r'(?<!\$)\$\(([A-Z_][A-Z_0-9]*)\)', text))
+undefined = sorted(used - defined - known - builtin)
+
+targets = set(re.findall(r'^([A-Za-z_][A-Za-z0-9_.-]*)\s*:(?!=)', text, re.M))
+missing = []
+for line in text.splitlines():
+    m = re.match(r'^([A-Za-z_][A-Za-z0-9_.-]*)\s*:(?!=)\s*([^#]*)', line)
+    if not m:
+        continue
+    for pre in m.group(2).split():
+        if pre.startswith("$"):            # computed prerequisite, not checkable textually
+            continue
+        if pre in targets or os.path.exists(pre):
+            continue
+        missing.append((m.group(1), pre))
+
+for v in undefined:
+    print(f"  $({v}) is used but never defined - make expands it to the empty string")
+for tgt, pre in missing:
+    print(f"  target {tgt!r} needs {pre!r}, which is neither a target here nor a file")
+
+if not undefined and not missing:
+    print(f"  {len(used)} variable reference(s) and {len(targets)} target(s), all resolved")
+sys.exit(1 if (undefined or missing) else 0)
+PYMAKE
+  then ok "every variable the Makefile uses is defined, and every prerequisite exists"
+  else bad 'an undefined make variable expands to the empty string - it will not fail loudly'
+  fi
+else
+  skip 'python3 missing, skipped'
+fi
+
 step 'Only the control_plane role uses the fetched kubeconfig'
 # THE RULE THIS CHECK EXISTS TO STOP ME BREAKING A FIFTH TIME.
 #

@@ -19,7 +19,7 @@ ENV ?= onprem
 # built before the recipe runs, which is the whole point.
 # Every variable this Makefile understands on the command line. Anything else is a typo.
 KNOWN_VARS := TAGS ARGS CHART ENV CTX STORE_NAME PROBE_NS VAULT_NS VAULT_POD VAULT_KEYS \
-              AWS_ALERT_EMAIL
+              AWS_ALERT_EMAIL NODE
 
 .PHONY: _no-stray-flags
 _no-stray-flags:
@@ -532,6 +532,14 @@ aws-guardrails-verify: ## Read the budget back from the API and check it MATCHES
 	@bash scripts/aws-guardrails-verify.sh
 
 AWS_INV := -i ansible/inventory/aws.py
+# RESTORED 2026-11-05 after I deleted it. It sat between two targets further down and a
+# line-range replacement of one recipe took it with it - `make lint` said clean, and
+# `cd $(AWS_TF)` with an empty value becomes `cd` with no argument, which succeeds and lands
+# in $HOME. So `terraform init` reported "initialized in an empty directory" and aws-up,
+# aws-wait, aws-kubeconfig and - the one that matters - aws-down were all broken for three
+# hours while the cluster billed. Variables live beside their section, not inside a recipe
+# block, precisely so that editing a recipe cannot reach them.
+AWS_TF := terraform/aws
 
 .PHONY: aws-cluster
 aws-cluster: _no-stray-flags _aws-reach ## Build the Kubernetes cluster on the EC2 nodes (same playbook as on-prem)
