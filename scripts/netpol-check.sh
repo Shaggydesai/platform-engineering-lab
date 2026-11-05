@@ -284,10 +284,15 @@ printf 'one did not, which is the only evidence that makes the policy real rathe
 printf 'The same pod resolved a name and could not open a connection to the node network, which\n'
 printf 'is what distinguishes a working egress policy from a broken resolver.\n'
 echo
-printf '%sNot yet covered:%s nothing restricts ingress to the frontend, because that traffic\n' "$c_warn" "$c_off"
-printf 'arrives from Cilium as reserved:host and plain NetworkPolicy cannot select it. It needs a\n'
-printf 'CiliumNetworkPolicy with fromEntities: [host, remote-node] here, a Google-owned range on\n'
-printf 'GKE and a VPC ENI on EKS - see the gcp/aws overlays for why that rule is the one thing\n'
-printf 'here that cannot be written portably. Verify it by MOVING THE L2 LEASE (virsh destroy the\n'
-printf 'announcing worker), not by curling once: a rule that is correct until a failover is worse\n'
-printf 'than no rule, because it gets trusted.\n'
+printf 'The front door is covered too, by the CiliumNetworkPolicy named above - the one object\n'
+printf 'here that cannot be written portably, since the source is the node and plain\n'
+printf 'NetworkPolicy has no selector for a node. On GKE the equivalent is a Google-owned source\n'
+printf 'range and on EKS a VPC range; the gcp and aws overlays say so.\n'
+echo
+printf '%sWhat THIS check cannot tell you:%s whether that rule survives the L2 announcement lease\n' "$c_warn" "$c_off"
+printf 'moving to a node other than the frontend. Every probe above runs with the announcer\n'
+printf 'wherever it happens to be, and the rule was wrong once in exactly that way. The only\n'
+printf 'thing that answers it moves the lease on purpose:\n'
+printf '\n  make ingress-failover-check\n\n'
+printf 'It also reports which identity the traffic arrived as, which is how `remote-node` stops\n'
+printf 'being an unverified entry in the entity list.\n'
