@@ -736,6 +736,69 @@ else
   skip 'grep missing, skipped'
 fi
 
+step 'Every link in the learning material resolves'
+# THE CHAPTERS QUOTE THIS REPOSITORY, which is the entire reason they live in it rather than in a
+# repository of their own - and it is also the reason they can rot. A chapter that says
+# "cilium-values.yaml sets kubeProxyReplacement: true" is correct next to the file and silently
+# wrong if the file moves.
+#
+# This checks the cheap half exactly: every relative link between those documents, and every
+# repository path they reference in backticks, points at something that exists. It does NOT check
+# that the prose is true - nothing can - so it is deliberately narrow and says so.
+if command -v python3 >/dev/null 2>&1; then
+  if python3 - <<'PYLEARN'
+import pathlib, re, sys
+
+root = pathlib.Path("docs/learn")
+if not root.is_dir():
+    print("  docs/learn does not exist")
+    sys.exit(2)
+
+docs = sorted(root.rglob("*.md"))
+if not docs:
+    print("  no chapters found")
+    sys.exit(2)
+
+bad = 0
+for d in docs:
+    text = d.read_text()
+    # Markdown links to local files, ignoring anchors and URLs.
+    for label, target in re.findall(r'\[([^\]]+)\]\(([^)]+)\)', text):
+        if target.startswith(("http://", "https://", "#", "mailto:")):
+            continue
+        path = target.split("#", 1)[0]
+        if not path:
+            continue
+        if not (d.parent / path).resolve().is_file():
+            print(f"  {d}: link {target!r} ({label}) does not resolve")
+            bad += 1
+    # Repository paths named in backticks. Only ones that look like a path INTO this repo -
+    # a leading directory that exists - so prose like `kubectl get pods` is not mistaken for one.
+    roots = {"ansible", "gitops", "scripts", "terraform", "clusters", "docs", "packer"}
+    for ref in re.findall(r'`([a-z][a-z0-9_./-]+\.(?:ya?ml|sh|py|json|j2|md|tf|hcl))`', text):
+        first = ref.split("/", 1)[0]
+        if first not in roots or "/" not in ref:
+            continue
+        if "*" in ref or "{" in ref:
+            continue
+        if not pathlib.Path(ref).exists():
+            print(f"  {d}: references {ref!r}, which does not exist")
+            bad += 1
+
+print(f"  {len(docs)} chapter(s) checked")
+sys.exit(1 if bad else 0)
+PYLEARN
+  then ok 'every local link and repository path in docs/learn resolves'
+  else
+    rc=$?
+    if [[ $rc -eq 2 ]]; then skip 'no learning material to check - see above'
+    else bad 'a chapter points at something that is not there - fix the link or write the file'
+    fi
+  fi
+else
+  skip 'python3 missing, skipped'
+fi
+
 step 'Any helper-image pin is a digest, not a tag'
 # WHAT THIS CHECK CLAIMS, precisely: every environment where local-path is actually DEPLOYED
 # pins its helper image by digest, and all of them pin the same one. Three other states are

@@ -2,6 +2,15 @@
 
 Where to read about the things this lab is made of, in the order the lab meets them.
 
+> **If you want to be taught rather than pointed somewhere, start with
+> [`docs/learn/`](learn/README.md).** Those are written chapters — the mechanism explained, then
+> what it actually did on this cluster, with the real output and the real mistakes. No tabs
+> required.
+>
+> **This file is the map to primary sources**, for when you want the vendor's own reference with a
+> question already in hand. The two are complementary and the order is: chapter, then ADR, then
+> the link below.
+
 **Read this repository first, and that is not modesty about the internet.** The ADRs record *why*
 each choice was made, what it cost, and — in several cases — what was believed first and turned out
 to be wrong. That is the part no vendor documentation contains, because vendor documentation
